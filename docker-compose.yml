@@ -1,0 +1,39 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16
+    container_name: edu_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: edu_saas
+      POSTGRES_USER: edu
+      POSTGRES_PASSWORD: edu123456
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+  redis:
+    image: redis:7
+    container_name: edu_redis
+    restart: always
+    ports:
+      - '6379:6379'
+
+  minio:
+    image: minio/minio:latest
+    container_name: edu_minio
+    command: server /data --console-address ':9001'
+    restart: always
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - miniodata:/data
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+
+volumes:
+  pgdata:
+  miniodata:
