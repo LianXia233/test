@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>校外培训机构综合管理平台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>综合管理平台</h1>
+      <p class="muted">SaaS 教学管理系统</p>
+      <nav id="tabs"></nav>
+      <div class="server-box">
+        <span>服务状态</span>
+        <strong id="health">检测中...</strong>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header>
+        <h2 id="page-title">仪表盘</h2>
+        <p class="muted">浏览器可视化操作，支持远程服务器部署访问</p>
+      </header>
+
+      <section class="card" id="dashboard-card">
+        <h3>快速概览</h3>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="card" id="form-card">
+        <h3 id="form-title">新增数据</h3>
+        <form id="entity-form"></form>
+      </section>
+
+      <section class="card">
+        <div class="list-header">
+          <h3 id="list-title">数据列表</h3>
+          <button id="refresh-btn" class="btn-secondary">刷新</button>
+        </div>
+        <div id="table-wrap" class="table-wrap"></div>
+      </section>
+
+      <section class="card" id="report-card">
+        <h3>营收报表</h3>
+        <form id="report-form" class="row"></form>
+        <pre id="report-output" class="report"></pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
