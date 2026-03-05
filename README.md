@@ -12,14 +12,14 @@
 
 ### 后端（Java）
 
-- JDK 21（LTS）
+- Java 17 LTS（Debian 12 默认 apt 友好）
 - Spring Boot 3.3+
 - Spring Security + JWT + RBAC（角色权限）
 - MyBatis-Plus（或 JPA，建议统一）
 - Redis（缓存/会话/限流）
-- PostgreSQL 16（主库）
+- PostgreSQL 15（Debian 12 默认仓库）
 - Flyway（数据库迁移）
-- MinIO（作业附件、导出文件）
+- 对象存储（S3 兼容，可接 MinIO/云厂商 OSS/COS）
 
 ### 前端（好看、企业级）
 
@@ -29,8 +29,9 @@
 - Pinia + Vue Router
 - Axios + OpenAPI 代码生成
 
-### 部署（Debian 12 直接部署）
+### 部署（Debian 12 原生部署）
 
+- **不使用 Docker / Docker Compose**
 - apt 安装依赖（JDK/PostgreSQL/Redis/Nginx/Node.js）
 - systemd 托管 Java 服务（开机自启）
 - Nginx 反向代理 + HTTPS
@@ -97,7 +98,7 @@
 
 ## 7. Debian 12 直接部署（不使用 Docker）
 
-1. apt 安装：`openjdk-21-jdk`、`postgresql`、`redis-server`、`nginx`、`nodejs`、`npm`
+1. apt 安装：`openjdk-17-jdk`、`postgresql`、`redis-server`、`nginx`、`nodejs`、`npm`
 2. PostgreSQL 创建业务库与账号，配置本机访问与强密码
 3. Redis 启用密码与 `supervised systemd`
 4. 前端 `npm run build`，产物放到 `/var/www/edu-admin`

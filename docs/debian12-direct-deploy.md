@@ -1,10 +1,12 @@
 # Debian 12 直接部署指引（apt 安装依赖，不使用 Docker）
 
-## 1. 安装系统依赖
+> 目标：纯 Debian 12 原生部署（systemd + nginx），不使用 Docker、Docker Compose、K8s。
+
+## 1. 安装系统依赖（apt）
 
 ```bash
 sudo apt update
-sudo apt install -y openjdk-21-jdk postgresql redis-server nginx nodejs npm certbot python3-certbot-nginx ufw
+sudo apt install -y openjdk-17-jdk postgresql redis-server nginx nodejs npm certbot python3-certbot-nginx ufw
 ```
 
 可选（Node 版本太低时）：改用 NodeSource 安装 Node 20 LTS。
@@ -23,7 +25,11 @@ CREATE DATABASE edu_saas OWNER edu;
 \q
 ```
 
-放开本机密码访问（如需）：编辑 `/etc/postgresql/15/main/pg_hba.conf`，确保存在：
+配置本机密码访问（按实际版本调整路径）：
+
+- 常见路径：`/etc/postgresql/15/main/pg_hba.conf`
+
+确保存在：
 
 ```conf
 host    all             all             127.0.0.1/32            scram-sha-256
@@ -55,6 +61,7 @@ sudo systemctl enable redis-server
 ```bash
 sudo mkdir -p /opt/edu-platform
 sudo cp app.jar /opt/edu-platform/app.jar
+sudo chown -R www-data:www-data /opt/edu-platform
 ```
 
 创建 systemd 服务 `/etc/systemd/system/edu-platform.service`：
@@ -90,7 +97,7 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable edu-platform
 sudo systemctl restart edu-platform
-sudo systemctl status edu-platform
+sudo systemctl status edu-platform --no-pager
 ```
 
 ## 5. 部署前端（Vue3）
@@ -102,6 +109,7 @@ npm ci
 npm run build
 sudo mkdir -p /var/www/edu-admin
 sudo cp -r dist/* /var/www/edu-admin/
+sudo chown -R www-data:www-data /var/www/edu-admin
 ```
 
 ## 6. Nginx 反向代理（同域）
@@ -148,7 +156,15 @@ sudo ufw allow 'Nginx Full'
 sudo ufw --force enable
 ```
 
-## 8. 验证清单
+## 8. 对象存储（无 Docker 方案）
+
+可选其一：
+
+1. 使用云对象存储（阿里 OSS / 腾讯 COS / AWS S3）
+2. 使用独立存储服务器部署 MinIO（与业务机分离）
+3. 过渡方案：本地文件系统 + 定期备份（小规模）
+
+## 9. 验证清单
 
 ```bash
 java -version
@@ -159,7 +175,7 @@ systemctl is-active postgresql redis-server edu-platform nginx
 curl -I http://127.0.0.1/api/health
 ```
 
-## 9. 生产建议
+## 10. 生产建议
 
 - 配置 PostgreSQL 定时备份（`pg_dump` + 定时任务）
 - 后端日志写入 journald 并配合 logrotate
