@@ -4,10 +4,10 @@
 
 ## [Unreleased]
 
-### 2026-10-04 — 默认配置统一：SSH 外部访问 + 固定默认密码 + 同名双频 WiFi
+### 2026-10-04 — 默认配置统一：SSH 局域网访问 + 固定默认密码 + 同名双频 WiFi
 
 - Releases 编译产物默认即为「系统默认配置」：
-  - **SSH**：root / `password`，默认启用外部访问（nftables input 链放行 TCP 22，WAN 侧可直连管理）
+  - **SSH**：root / `password`，仅允许局域网（br-lan）访问；WAN 侧不放行（避免公网暴露）
   - **Wi-Fi**：2.4G 与 5G 同名 **`OWRT`**，密码 **`12345678`**（/etc/default/h5000m-router 与
     h5000m-router-init.sh 兜底默认值同步）
   - **WebUI**：admin / `password`
