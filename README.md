@@ -46,8 +46,11 @@ sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：H5000M
 
 仓库已配置 `.github/workflows/build.yml`，推送到 `main`/`master` 或手动触发 `workflow_dispatch`
 即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → 刷写包
-（`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5），产物以上传 Artifact 方式交付
-（含 `initial-credentials.txt` 首次登录凭据）。
+（`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5）。产物双通道交付：
+
+- **GitHub Releases**：编译完成后自动创建/更新 `debian13-<日期>` Release，按 OpenWrt 惯例发布
+  `H5000M-debian13-<日期>-kernel.bin` / `-rootfs.bin` / `-rootfs.tar.zst` 与 `sha256sums.txt`；
+- **Actions Artifact**：每次运行保留 14 天（含 `initial-credentials.txt` 首次登录凭据）。
 
 ## 分区与启动（复用现有 OpenWrt 布局，不改 U-Boot）
 

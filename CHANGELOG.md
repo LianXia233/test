@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — CI 编译产物上传到 GitHub Releases（参考 OpenWrt 发布惯例）
+
+- 容器格式统一为 **`.bin`**（内核 FIT / rootfs ext4），其余命名、版本、校验与 OpenWrt 一致：
+  - `H5000M-debian13-<日期>-kernel.bin`（→ p4，FIT，U-Boot bootm 直接启动）
+  - `H5000M-debian13-<日期>-rootfs.bin`（→ p5，ext4 RootFS）
+  - `H5000M-debian13-<日期>-rootfs.tar.zst`（RootFS 压缩包，可选刷写方式）
+  - `sha256sums.txt`（参考 OpenWrt Releases 校验和）
+- `.github/workflows/build.yml`：
+  - `build-image` job 增加 `permissions: contents: write`
+  - 新增「上传固件到 GitHub Releases」步骤（`gh release`，仅非 PR 触发）
+  - Release tag 使用 `debian13-26.10.04` 日期版本；同名 tag 先删除后重建（支持每周定时/多次构建覆盖更新）
+  - Release Notes 引用 `docs/first-boot.md` 刷写说明；初始凭据仅在 Artifact 交付（不公开上传）
+
+
 ### 2026-10-04 — 刷写包产物改用 .bin 命名（与官方 H5000M-...sysupgrade.bin 风格一致）
 
 - 构建产物由 `h5000m-kernel.fit` / `h5000m-rootfs.ext4.img` 更名为 **`.bin` 格式**：

@@ -72,6 +72,8 @@ jobs:
     name: RootFS + 刷写包（FIT / ext4，复用现有 eMMC 分区布局）
     needs: build-kernel
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # 上传固件到 GitHub Releases 需要写权限
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -133,3 +135,44 @@ jobs:
             out/boot/boot.scr
             out/boot/boot.cmd
           retention-days: 14
+
+      - name: 上传固件到 GitHub Releases（参考 OpenWrt 惯例：日期版本 + sha256sums）
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(date -u +%y.%m.%d)"     # e.g. 26.10.04，与官方 H5000M Release 版本风格一致
+          TAG="debian13-${VERSION}"
+          RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
+          mkdir -p "$RELEASE_DIR"
+          # 固件以 .bin 容器格式发布（内核=FIT、rootfs=ext4），文件名带版本号
+          cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
+          cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
+          cp -f out/rootfs/debian13-arm64-rootfs.tar.zst "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.tar.zst"
+          (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
+          cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<'EOF'
+          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包
+          
+          完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）：
+          - p4 kernel ← H5000M-debian13-VERSION-kernel.bin（FIT 镜像，现有 U-Boot bootm 直接启动）
+          - p5 rootfs ← H5000M-debian13-VERSION-rootfs.bin（ext4 RootFS，PARTLABEL=rootfs）
+          - debian13-arm64-rootfs-VERSION.tar.zst 为 RootFS 压缩包（可选，install-emmc.sh 支持）
+          
+          刷写（在目标设备上，先备份）：
+            sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
+              --kernel-fit H5000M-debian13-VERSION-kernel.bin \
+              --rootfs H5000M-debian13-VERSION-rootfs.bin
+          
+          首次启动 WebUI：http://192.168.88.1 （初始凭据见构建 Artifact 中 initial-credentials.txt）
+          更多说明：https://github.com/LianXia233/test 仓库 docs/first-boot.md
+          EOF
+          # 将占位 VERSION 替换为实际版本（避免 heredoc 中直接展开造成歧义）
+          sed -i "s/VERSION/${VERSION}/g" "$RELEASE_DIR/RELEASE-NOTES.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          gh release create "$TAG" "$RELEASE_DIR"/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "H5000M Debian 13 固件 ${VERSION}" \
+            --notes-file "$RELEASE_DIR/RELEASE-NOTES.md"
