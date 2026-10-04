@@ -1,0 +1,8 @@
+# 仓库强制 LF
+# 行尾一律 LF：Shell(.sh)、Python(.py) 及所有文本/配置脚本要求 LF（CRLF 会导致
+# BusyBox ash / procd 启动失败，并污染 OpenWrt 风格补丁）。Windows 检出时也保持 LF。
+* text=auto eol=lf
+
+# 二进制文件：禁止行尾转换 / 文本 diff
+*.png binary
+*.ico binary

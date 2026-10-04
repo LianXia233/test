@@ -14,8 +14,10 @@
 - `.github/workflows/build.yml`：
   - `build-image` job 增加 `permissions: contents: write`
   - 新增「上传固件到 GitHub Releases」步骤（`gh release`，仅非 PR 触发）
-  - Release tag 使用 `debian13-26.10.04` 日期版本；同名 tag 先删除后重建（支持每周定时/多次构建覆盖更新）
+  - Release tag 使用 `H5000M-debian13-26.10.04` 日期版本（命名带机型）；同名 tag 先删除后重建（支持每周定时/多次构建覆盖更新）
   - Release Notes 引用 `docs/first-boot.md` 刷写说明；初始凭据仅在 Artifact 交付（不公开上传）
+- 新增 `.gitattributes`：仓库强制 **LF 行尾**（`* text=auto eol=lf`，二进制 png/ico 排除），
+  Windows 检出同样保持 LF，杜绝 CRLF 导致 BusyBox ash / procd 启动失败
 
 
 ### 2026-10-04 — 刷写包产物改用 .bin 命名（与官方 H5000M-...sysupgrade.bin 风格一致）

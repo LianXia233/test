@@ -48,7 +48,7 @@ sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：H5000M
 即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → 刷写包
 （`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5）。产物双通道交付：
 
-- **GitHub Releases**：编译完成后自动创建/更新 `debian13-<日期>` Release，按 OpenWrt 惯例发布
+- **GitHub Releases**：编译完成后自动创建/更新 `H5000M-debian13-<日期>` Release，按 OpenWrt 惯例发布
   `H5000M-debian13-<日期>-kernel.bin` / `-rootfs.bin` / `-rootfs.tar.zst` 与 `sha256sums.txt`；
 - **Actions Artifact**：每次运行保留 14 天（含 `initial-credentials.txt` 首次登录凭据）。
 

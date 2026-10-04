@@ -143,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(date -u +%y.%m.%d)"     # e.g. 26.10.04，与官方 H5000M Release 版本风格一致
-          TAG="debian13-${VERSION}"
+          TAG="H5000M-debian13-${VERSION}"   # 命名带机型（H5000M）+ 版本
           RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
           mkdir -p "$RELEASE_DIR"
           # 固件以 .bin 容器格式发布（内核=FIT、rootfs=ext4），文件名带版本号
@@ -176,3 +176,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "H5000M Debian 13 固件 ${VERSION}" \
             --notes-file "$RELEASE_DIR/RELEASE-NOTES.md"
+          echo "已发布 Release：$TAG"
