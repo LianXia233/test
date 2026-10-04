@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — 默认配置统一：SSH 外部访问 + 固定默认密码 + 同名双频 WiFi
+
+- Releases 编译产物默认即为「系统默认配置」：
+  - **SSH**：root / `password`，默认启用外部访问（nftables input 链放行 TCP 22，WAN 侧可直连管理）
+  - **Wi-Fi**：2.4G 与 5G 同名 **`OWRT`**，密码 **`12345678`**（/etc/default/h5000m-router 与
+    h5000m-router-init.sh 兜底默认值同步）
+  - **WebUI**：admin / `password`
+- 构建默认密码固定为 `password`（`build/build-rootfs.sh`），不再随机生成；
+  `/etc/h5000m-initial-credentials` 仍记录首次凭据，提示登录后立即修改
+- 同步更新：`docs/first-boot.md`（默认值表与首次登录说明）
+
 ### 2026-10-04 — CI 编译产物上传到 GitHub Releases（参考 OpenWrt 发布惯例）
 
 - 容器格式统一为 **`.bin`**（内核 FIT / rootfs ext4），其余命名、版本、校验与 OpenWrt 一致：

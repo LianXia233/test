@@ -84,14 +84,14 @@ sudo bash scripts/install-emmc.sh \
 | DHCP Server | 192.168.88.100 - 192.168.88.200 |
 | DNS | dnsmasq 192.168.88.1:53（WAN DHCP DNS + 兜底 1.1.1.1/8.8.8.8/223.5.5.5） |
 | NAT / Firewall | nftables 已装配（LAN→WAN masquerade；input 策略 drop） |
-| Wi-Fi | 双频 AP（NM 连接，桥接进 br-lan）：`H5000M-2.4G` / `H5000M-5G`，密码 `h5000m123` |
-| WebUI | http://192.168.88.1 （admin / 见 /etc/h5000m-initial-credentials） |
-| SSH | 端口 22，root / 见 /etc/h5000m-initial-credentials |
+| Wi-Fi | 双频 AP（NM 连接，桥接进 br-lan）：2.4G / 5G 同名 `OWRT`，密码 `12345678` |
+| WebUI | http://192.168.88.1 （admin / password，见 /etc/h5000m-initial-credentials） |
+| SSH | 端口 22，root / password（默认启用外部访问；见 /etc/h5000m-initial-credentials） |
 
 ## 6. 首次登录
 
 ```bash
-# 串口或 SSH 登录，读取初始凭据（root 与 WebUI 密码均在构建时随机生成并写入该文件）
+# 串口或 SSH 登录，读取初始凭据（root / WebUI 默认密码均为 password，已写入该文件）
 cat /etc/h5000m-initial-credentials
 ```
 

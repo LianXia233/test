@@ -52,8 +52,8 @@ SUITE="trixie"                       # Debian 13 稳定版（固定，不允许 
 ARCH="arm64"
 MIRROR="http://deb.debian.org/debian"
 TIMEZONE="Asia/Shanghai"
-ADMIN_PASSWORD=""                    # 为空则构建时随机生成
-ROOT_PASSWORD=""                     # 为空则构建时随机生成
+ADMIN_PASSWORD=""                    # 为空则使用默认密码 password
+ROOT_PASSWORD=""                     # 为空则使用默认密码 password
 OVERLAY_DIR="$PROJECT_ROOT/rootfs-overlay"
 PACKAGES_FILE="$PROJECT_ROOT/build/rootfs/packages.list"
 FIRMWARE_DIR="$PROJECT_ROOT/build/rootfs/firmware"
@@ -84,9 +84,9 @@ BOOT_DIR="$OUT_DIR/rootfs/boot"
 ROOTFS_TAR="$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst"
 mkdir -p "$ROOTFS_DIR" "$BOOT_DIR" "$OUT_DIR/rootfs"
 
-# 密码兜底：未指定时生成随机密码（交付时写入 /etc/h5000m-initial-credentials）
-[[ -n "$ADMIN_PASSWORD" ]] || ADMIN_PASSWORD="$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-[[ -n "$ROOT_PASSWORD"  ]] || ROOT_PASSWORD="$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# 密码兜底：未指定时使用默认密码 password（交付时写入 /etc/h5000m-initial-credentials）
+[[ -n "$ADMIN_PASSWORD" ]] || ADMIN_PASSWORD="password"
+[[ -n "$ROOT_PASSWORD"  ]] || ROOT_PASSWORD="password"
 
 log() { printf '[build-rootfs] %s\n' "$*"; }
 die() { printf '[build-rootfs] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -247,7 +247,7 @@ CRED
   cat > /etc/motd <<MOTD
 Welcome to Hiveton H5000M Debian 13 Router
 LAN: 192.168.88.1  |  WebUI: http://192.168.88.1
-Wi-Fi: H5000M-2.4G / H5000M-5G（与 LAN 同一二层网络）
+Wi-Fi: OWRT（2.4G / 5G 同名，与 LAN 同一二层网络）
 初始凭据：cat /etc/h5000m-initial-credentials
 MOTD
 
