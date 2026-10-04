@@ -16,6 +16,8 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   KERNEL_VERSION: 6.18.54
+  ACTIONS_STEP_DEBUG: true
+  ACTIONS_RUNNER_DEBUG: true
 
 jobs:
   # ============================================================ 1. 内核编译
