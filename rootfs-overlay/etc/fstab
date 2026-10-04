@@ -1,0 +1,2 @@
+# Hiveton H5000M rootfs 挂载（由 U-Boot 通过 root=PARTLABEL=rootfs 指定）
+PARTLABEL=rootfs	/	ext4	errors=remount-ro	0	1

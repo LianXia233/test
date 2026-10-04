@@ -1,0 +1,132 @@
+name: H5000M Debian 13 CI 云编译
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 每周五 20:00 UTC 自动重建（内核/固件/依赖更新）
+    - cron: '0 20 * * 5'
+
+concurrency:
+  group: h5000m-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  KERNEL_VERSION: 6.18.54
+
+jobs:
+  # ============================================================ 1. 内核编译
+  build-kernel:
+    name: 内核 6.18 (MT7987A)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            crossbuild-essential-arm64 bc xz-utils u-boot-tools zstd curl
+
+      - name: 缓存内核源码与编译产物
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/kernel/src
+          key: kernel-src-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'build/kernel-conf/h5000m-6.18.config', 'dts/**') }}
+          restore-keys: |
+            kernel-src-${{ env.KERNEL_VERSION }}-
+
+      - name: 编译 Linux 内核（Image / DTB / modules）
+        run: |
+          bash build/build-kernel.sh \
+            --kernel-version "$KERNEL_VERSION" \
+            --config build/kernel-conf/h5000m-6.18.config \
+            --out out/kernel \
+            --jobs 4 \
+            --skip-failed-patches
+
+      - name: 生成 U-Boot 启动脚本 boot.scr
+        run: bash build/make-boot.sh --out out/boot
+
+      - name: 上传内核产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: |
+            out/kernel/Image
+            out/kernel/mt7987a-hiveton-h5000m.dtb
+            out/kernel/modules.tar.zst
+            out/kernel/kernel-config-exported.config
+            out/kernel/kernel-mt7987-options.txt
+            out/boot/boot.scr
+            out/boot/boot.cmd
+          retention-days: 7
+
+  # ============================================================ 2. RootFS + 镜像
+  build-image:
+    name: RootFS + SD 镜像（Debian 13）
+    needs: build-kernel
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap qemu-user-static binfmt-support rsync zstd \
+            parted dosfstools e2fsprogs u-boot-tools
+          # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
+          sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
+
+      - name: 下载内核产物
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: artifacts/kernel
+
+      - name: 整理内核目录
+        run: |
+          mkdir -p out/kernel out/boot
+          cp -f artifacts/kernel/Image out/kernel/Image
+          cp -f artifacts/kernel/mt7987a-hiveton-h5000m.dtb out/kernel/mt7987a-hiveton-h5000m.dtb
+          cp -f artifacts/kernel/modules.tar.zst out/kernel/modules.tar.zst
+          cp -f artifacts/kernel/boot.scr out/boot/boot.scr
+          cp -f artifacts/kernel/boot.cmd out/boot/boot.cmd
+
+      - name: 构建 Debian 13 RootFS
+        run: |
+          sudo bash build/build-rootfs.sh \
+            --out out \
+            --hostname h5000m-debian \
+            --kernel-dir out/kernel
+
+      - name: 生成 SD / USB 启动镜像
+        run: |
+          sudo bash build/make-sd-image.sh \
+            --out out \
+            --img h5000m-debian13-sd.img \
+            --size 2048
+
+      - name: 上传发布产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: h5000m-debian13-release
+          path: |
+            out/rootfs/debian13-arm64-rootfs.tar.zst
+            out/rootfs/initial-credentials.txt
+            out/h5000m-debian13-sd.img.gz
+            out/kernel/Image
+            out/kernel/mt7987a-hiveton-h5000m.dtb
+            out/kernel/modules.tar.zst
+            out/kernel/kernel-config-exported.config
+            out/kernel/kernel-mt7987-options.txt
+            out/boot/boot.scr
+            out/boot/boot.cmd
+          retention-days: 14

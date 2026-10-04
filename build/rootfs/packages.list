@@ -1,0 +1,57 @@
+# Hiveton H5000M — Debian 13 (Trixie) ARM64 软件包清单
+# 由 build/build-rootfs.sh 在 chroot 内安装。
+#
+# 设计原则：
+#   1. Linux-Router 是唯一网络控制面；NetworkManager 是其底层接口管理器。
+#   2. dnsmasq 是唯一 DHCP + DNS 实例（:53），systemd-resolved 不安装。
+#   3. nftables 是唯一防火墙 / NAT 后端；firewalld / ufw 不安装。
+#   4. hostapd / wpasupplicant 均预装：NM AP 走 wpa_supplicant，
+#      hostapd 作为独立 AP 后端备用，但不默认启用其自带的 hostapd.service。
+
+# ---------- 基础系统 ----------
+systemd
+systemd-sysv
+udev
+kmod
+tzdata
+ca-certificates
+locales
+
+# ---------- 命令行 / 诊断工具 ----------
+curl
+wget
+openssh-server
+openssh-sftp-server
+sudo
+vim
+nano
+htop
+pciutils
+usbutils
+ethtool
+bind9-dnsutils
+tcpdump
+rsync
+iproute2
+
+# ---------- 网络管理（唯一控制面：NetworkManager，受 Linux-Router 编排） ----------
+network-manager
+wpasupplicant
+hostapd
+iw
+wireless-regdb
+rfkill
+bridge-utils
+
+# ---------- DHCP / DNS（dnsmasq 唯一实例） ----------
+dnsmasq
+dnsmasq-base
+
+# ---------- 防火墙 / NAT（nftables 唯一后端） ----------
+nftables
+iptables
+
+# ---------- Linux-Router WebUI（Gunicorn + Flask） ----------
+python3
+python3-flask
+gunicorn

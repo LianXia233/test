@@ -1,0 +1,15 @@
+[Unit]
+Description=Hiveton H5000M router bring-up (WAN/LAN/bridge/Wi-Fi)
+Documentation=file:/usr/local/sbin/h5000m-router-init.sh
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=router-panel.service router-panel-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/h5000m-router-init.sh
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

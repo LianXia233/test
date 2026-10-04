@@ -1,0 +1,33 @@
+# Hiveton H5000M — Debian 13 路由器默认配置
+# 由 h5000m-router-init.service 读取；修改后重启该服务生效。
+# 不要在此处修改 NetworkManager/dnsmasq/nftables 的职责归属。
+
+# WAN / LAN 物理接口（依据 DTS：gmac0=eth0=LAN，gmac1=eth1=WAN）
+WAN_IFACE=eth1
+LAN_IFACE=eth0
+
+# LAN 网桥与网段
+LAN_BRIDGE=br-lan
+LAN_SUBNET=192.168.88.0/24
+LAN_ADDRESS=192.168.88.1/24
+
+# LAN IPv6 ULA（dnsmasq 通过 RA 通告；LAN 客户端可自动获取 IPv6，不依赖 WAN PD）
+LAN_ULA=fd88:88::1/64
+
+# DHCP 地址池（dnsmasq：192.168.88.100 ~ 200，租约 12h）
+DHCP_RANGE=192.168.88.100,192.168.88.200,255.255.255.0,12h
+
+# Wi-Fi AP 接口（MT7992 双 PHY；按实际内核命名调整）
+AP_2G_IFACE=wlan0
+AP_5G_IFACE=wlan1
+
+# 默认 SSID / 密码（首次登录后请在 WebUI 修改）
+AP_SSID_2G=H5000M-2.4G
+AP_SSID_5G=H5000M-5G
+AP_PASSWORD=h5000m123
+
+# 国家/地区（5GHz 信道与发射功率；CN 为完整信道，可按需改 US/DE 等）
+REGULATORY_DOMAIN=CN
+
+# dnsmasq 兜底上游 DNS（WAN 未获取到 DNS 时仍可解析）
+FALLBACK_DNS="1.1.1.1 8.8.8.8 223.5.5.5"

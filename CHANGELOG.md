@@ -1,0 +1,129 @@
+# 更新文档 (Changelog)
+
+本项目遵循用户规则：任何对仓库的推送/更新，必须同步更新本文档。
+
+## [Unreleased]
+
+### 2026-10-04 — 风扇温控 + U-Boot 兼容 + eMMC 刷入 + GitHub Actions 云编译
+
+**风扇控制（参考 luci-app-h5000m-fancontrol 行为）：**
+
+- 内核：`CONFIG_PWM_FAN=y`（pwm-fan hwmon，`/sys/class/hwmon/*/pwm1` + thermal cooling device）
+  - `build/kernel-conf/h5000m-6.18.config` 启用 PWM / PWM_MEDIATEK / PWM_FAN
+  - `build/build-kernel.sh` 的 `REQUIRED_SYMBOLS` 增加 `CONFIG_PWM_FAN` 核验
+  - DTS 删除 cpu-thermal 中风扇相关 cooling-maps（`cpu-active-high/low`、`cpu-passive`），
+    保留 CPU 频率缩放与 critical/hot trips，避免内核 governor 与用户空间争抢 PWM
+- `rootfs-overlay/usr/local/sbin/h5000m-fancontrol`：Debian 版风扇控制器（systemd 服务）
+  - 自动曲线（silent/balanced/performance/custom）、手动 PWM、kernel 仅内核保护模式
+  - 温度滞回、降速延迟、启动助推（Start PWM）、传感器/曲线故障保护（Failsafe PWM）
+  - 温度来源 max（CPU/PHY/WiFi/5G 模组取最高）或 cpu；接管 thermal zone 策略前先保存并退出恢复
+- `rootfs-overlay/etc/default/h5000m-fancontrol`：默认配置（ENABLED/MODE/CURVE/TEMP_SOURCE 等）
+- `rootfs-overlay/etc/systemd/system/h5000m-fancontrol.service`：开机自启，失败自动重启
+- `build/build-rootfs.sh`：overlay 后 chmod 风扇脚本 + chroot 内 enable 服务
+
+**U-Boot 兼容（不修改 U-Boot 本体）：**
+
+- `boot/boot.cmd`：U-Boot 启动脚本源文件（eMMC → USB 依次尝试，booti 启动）
+- `build/make-boot.sh`：用 mkimage 生成 `boot.scr`（ImmortalWrt/OpenWrt Filogic U-Boot 自动加载）
+- `build/make-sd-image.sh`：boot 分区自动放入 boot.scr，无 boot.scr 时回退 extlinux 并告警
+- `scripts/install-emmc.sh`：eMMC 刷入脚本（GPT：p1 vfat boot + p2 ext4 rootfs，
+  可选整盘备份、可选 fw_setenv 设置 U-Boot 环境）
+
+**GitHub Actions 云编译：**
+
+- `.github/workflows/build.yml`：push / PR / workflow_dispatch / 每周定时触发
+  - Job 1 内核编译（ubuntu-24.04，内核源码缓存，产物 artifact）
+  - Job 2 RootFS + SD 镜像（debootstrap + qemu-user-static，上传发布 artifact）
+- `.gitignore`：out/、镜像、凭据、日志等
+
+**文档：**
+
+- README：目录结构、快速开始、云编译、eMMC 固化说明
+- docs/build-guide.md：boot.scr 生成、CI、eMMC 刷入
+- docs/first-boot.md：install-emmc.sh 固化流程
+- docs/hardware.md：风扇控制（DTS/PWM/控制器）
+- docs/architecture.md：风扇服务职责与启动顺序
+- docs/troubleshooting.md：风扇与启动引导排查
+
+### 2026-10-04 — 初始版本（H5000M → Debian 13 移植）
+
+**新增：**
+
+- 项目骨架：README、docs/（architecture、hardware、build-guide、first-boot、troubleshooting）
+- 硬件参考：H5000M DTS（ImmortalWrt master 已验证版本）→ `dts/`
+  （mt7987a-hiveton-h5000m.dts + mt7987a.dtsi / mt7987b.dtsi / mt7987.dtsi）
+- Linux-Router 源码 vendored → `linux-router/vendor/`（保持上游原始文件，集成层单独放置）
+- 内核适配：基于 ImmortalWrt patches-6.18 的 MT7987A 补丁集 → `kernel/patches/`
+  （generic/backport、generic/pending、generic/hack、mediatek 四层，按 OpenWrt 标准顺序）
+- 固件清单：MT7992（mediatek/mt7996/mt7992_*_23.bin）、MT7987 内置 2.5G PHY（i2p5ge-phy-*.bin）
+
+**内核（M1）：**
+
+- `build/build-kernel.sh`：自动化内核构建（默认 Linux 6.18.54）
+  - 按序应用 generic/backport → generic/pending → generic/hack → mediatek 补丁（逐个 `git apply --check`）
+  - 复制 OpenWrt files（mtdsplit、mtk_bmt、swconfig 等）→ `kernel/files-generic/`、`kernel/files-mediatek/`
+  - 复制 H5000M DTS 并注册 DTB 目标，`olddefconfig` 后核验关键符号，输出 Image / dtb / modules.tar.zst
+- `build/kernel-conf/h5000m-6.18.config`：MT7987A 内核配置片段
+  （MT7987 pinctrl/clk、mtk_eth_soc、RTL8221B、mt76/MT7992、eMMC、PCIe Gen3、PWM、LVTS thermal、nftables/bridge 全量）
+
+**RootFS（M2）：**
+
+- `build/build-rootfs.sh`：自动化 Debian 13 (Trixie) ARM64 RootFS 构建
+  - `debootstrap --foreign trixie` + qemu-user-static 完成第二阶段
+  - 安装 `build/rootfs/packages.list`（systemd / NetworkManager / hostapd / dnsmasq / nftables / iproute2 / iw / wireless-regdb / ethtool / bridge-utils / openssh-server 等）
+  - 应用 `rootfs-overlay/` 覆盖层 + 集成 Linux-Router + 安装内核/模块 + 生成初始凭据
+- `scripts/fetch-firmware.py`：跨平台固件获取（MT7992 / MT7987 PHY 固件，失败可离线重试）
+
+**开箱即用（M3）：**
+
+- `rootfs-overlay/` 运行时配置：
+  - `etc/systemd/system/h5000m-router-init.service`：开机编排（WAN/LAN/bridge/Wi-Fi 创建）
+  - `usr/local/sbin/h5000m-router-init.sh`：幂等初始化，创建 NM 连接：
+    WAN=eth1(DHCP) / br-lan=192.168.88.1/24(+IPv6 ULA) / LAN=eth0(从属) / Wi-Fi AP(2.4G+5G, 桥接 br-lan)
+  - `etc/default/h5000m-router`：网络默认配置（网段/SSID/密码/regulatory）
+  - `etc/NetworkManager/conf.d/h5000m.conf`：`dns=none`，NM 独占接口管理，DNS 交 dnsmasq
+  - `etc/dnsmasq.d/h5000m.conf`：唯一 DHCP+DNS（:53），DHCP 池 + RA/无状态 DHCPv6 + 兜底上游 DNS
+  - `etc/nftables.conf`：唯一防火墙/NAT（input drop、WAN 侧仅必要流量、MASQUERADE、IPv6 邻居发现放行）
+  - `etc/sysctl.d/90-h5000m-router.conf`：IPv4/IPv6 forwarding、桥接 nf-call 等
+  - `etc/systemd/system/router-panel.service` / `router-panel-agent.service`：Linux-Router WebUI 与代理
+  - `etc/systemd/system/dnsmasq.service.d/override.conf`：dnsmasq 崩溃自动重启
+  - `etc/NetworkManager/dispatcher.d/90-h5000m-wan-dns`：WAN DHCP 后刷新 dnsmasq 上游 DNS
+- Linux-Router 集成：预装到 `/opt/linux-router`，修改默认 LAN 网段为 192.168.88.0/24，
+  预创建运行账号/数据目录/初始密码，开机自动启动（WebUI http://192.168.88.1）
+
+**镜像与文档（M4/M5）：**
+
+- `build/make-sd-image.sh`：GPT 分区（p1 vfat /boot + p2 ext4 /）生成 USB/SD 启动镜像
+- `scripts/build.sh`：一键构建入口（内核 + RootFS + 镜像）
+- 文档：docs/architecture.md（服务职责表）、docs/hardware.md（硬件/补丁清单）、
+  docs/build-guide.md（构建指南）、docs/first-boot.md（首启不破坏 eMMC）、docs/troubleshooting.md
+
+**已验证/确认：**
+
+- WAN/LAN 物理对应（依据 ImmortalWrt `02_network` + DTS PHY 定义，非名称猜测）：
+  - LAN = eth0（gmac0，外置 RTL8221B PHY，远离电源口）
+  - WAN = eth1（gmac1，内置 2.5G PHY，靠近电源口）
+- 主线上游内核不支持 MT7987A，须使用 ImmortalWrt 6.18 补丁集；MT7992 由 mainline mt76 支持
+- Debian 13 仓库不含 MT7992/MT7987 PHY 固件，固件从 linux-firmware / mt76 仓库获取
+- nftables ICMPv6 类型名以实际支持为准（`nd-neighbor-advert` / `nd-router-advert`）
+- PCIe 符号名以 6.18 为准（`CONFIG_PCIE_MEDIATEK` / `CONFIG_MT76_CORE`）
+
+**网络职责（唯一控制者）：**
+
+| 功能 | 唯一控制者 | 底层实现 |
+| --- | --- | --- |
+| WAN/LAN/网口/Bridge/Wi-Fi AP | Linux-Router 编排（NM 连接） | NetworkManager |
+| DHCP/DNS | dnsmasq（:53，NM `dns=none`） | dnsmasq |
+| NAT/防火墙 | nftables（唯一后端） | nftables |
+| 服务生命周期 | systemd | systemd |
+| WebUI/配置持久化 | Linux-Router | router-panel + agent |
+
+**计划里程碑**
+
+| 里程碑 | 状态 |
+| --- | --- |
+| M1 内核 | ✅ build-kernel.sh + defconfig + DTS + 补丁集 |
+| M2 rootfs | ✅ build-rootfs.sh + packages.list + firmware + overlays |
+| M3 开箱即用 | ✅ 路由器配置 + Linux-Router 集成 + systemd 编排 |
+| M4 首启介质 | ✅ make-sd-image.sh + scripts/build.sh |
+| M5 验证 | ⏳ 沙箱/实机验证（需目标硬件） |

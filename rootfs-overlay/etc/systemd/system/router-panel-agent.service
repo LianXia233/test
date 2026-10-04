@@ -1,0 +1,33 @@
+[Unit]
+Description=Linux Router Privileged Agent (H5000M)
+After=network-online.target NetworkManager.service h5000m-router-init.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Group=router-panel
+WorkingDirectory=/opt/linux-router
+Environment="LINUX_ROUTER_DATA_DIR=/var/lib/linux-router"
+Environment="LINUX_ROUTER_AGENT_SOCKET=/run/linux-router/agent.sock"
+Environment="LINUX_ROUTER_AGENT_GROUP=router-panel"
+ExecStart=/usr/bin/python3 /opt/linux-router/agent.py
+Restart=always
+RestartSec=3
+UMask=0077
+RuntimeDirectory=linux-router
+RuntimeDirectoryMode=0750
+PrivateTmp=true
+NoNewPrivileges=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

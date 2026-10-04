@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# Hiveton H5000M (MT7987A) — Debian 13 内核构建脚本
+#
+# 基于 ImmortalWrt master（target/linux/mediatek）已验证的 6.18 内核补丁与配置，
+# 生成适用于 Debian 13 ARM64 的 Linux 6.18.x 内核：
+#   Image / mt7987a-hiveton-h5000m.dtb / modules.tar.zst
+#
+# 用法：
+#   bash build-kernel.sh [--kernel-version 6.18.54] [--config 文件]
+#                        [--out 目录] [--jobs N] [--skip-failed-patches]
+#
+# 平台：Linux（Windows 请使用 WSL / Git-Bash；脚本内含平台检测与提示）
+
+set -Eeuo pipefail
+
+# ---------------------------------------------------------------- 平台检测
+case "$(uname -s)" in
+  Linux)   BUILD_PLATFORM="linux" ;;
+  MINGW*|MSYS*|CYGWIN*) BUILD_PLATFORM="windows" ;;
+  Darwin)  BUILD_PLATFORM="macos" ;;
+  *)       BUILD_PLATFORM="unknown" ;;
+esac
+
+if [[ "$BUILD_PLATFORM" != "linux" ]]; then
+  echo "[build-kernel] 提示：内核交叉编译需要 Linux 环境。"
+  echo "[build-kernel]        Windows 请使用 WSL2，macOS 建议使用 Docker/Linux VM。"
+  echo "[build-kernel]        当前平台：$BUILD_PLATFORM（继续尝试，但不保证成功）"
+fi
+
+# ---------------------------------------------------------------- 路径（不硬编码）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DTS_DIR="$PROJECT_ROOT/dts"
+PATCH_DIR="$PROJECT_ROOT/kernel/patches"
+
+KERNEL_VERSION="6.18.54"
+CONFIG_FILE="$PROJECT_ROOT/build/kernel-conf/h5000m-6.18.config"
+OUT_DIR="$PROJECT_ROOT/out/kernel"
+JOBS="$(nproc 2>/dev/null || echo 2)"
+SKIP_FAILED=0
+
+# 补丁层级（OpenWrt/ImmortalWrt 标准顺序）：
+#   generic/backport -> generic/pending -> generic/hack -> mediatek
+GENERIC_PATCH_DIR="$PROJECT_ROOT/kernel/patches/generic"
+PATCH_DIR="$PROJECT_ROOT/kernel/patches"
+
+usage() {
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --kernel-version) KERNEL_VERSION="$2"; shift 2 ;;
+    --config)         CONFIG_FILE="$2"; shift 2 ;;
+    --out)            OUT_DIR="$2"; shift 2 ;;
+    --jobs)           JOBS="$2"; shift 2 ;;
+    --skip-failed-patches) SKIP_FAILED=1; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    *) echo "未知参数：$1" >&2; usage; exit 1 ;;
+  esac
+done
+
+KERNEL_MAJOR_MINOR="${KERNEL_VERSION%.*}"          # 6.18
+KERNEL_TAR="linux-$KERNEL_VERSION.tar.xz"
+KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/$KERNEL_TAR"
+KERNEL_SRC="$OUT_DIR/src/linux-$KERNEL_VERSION"
+WORK="$OUT_DIR/work"
+MODULES_ROOT="$WORK/modules-root"
+
+mkdir -p "$OUT_DIR" "$WORK" "$MODULES_ROOT"
+
+log() { printf '[build-kernel] %s\n' "$*"; }
+die() { printf '[build-kernel] ERROR: %s\n' "$*" >&2; exit 1; }
+
+command -v curl >/dev/null 2>&1 && DOWNLOADER="curl" || true
+command -v wget >/dev/null 2>&1 && DOWNLOADER="${DOWNLOADER:-wget}" || true
+: "${DOWNLOADER:?需要 curl 或 wget 下载内核源码}"
+command -v xz >/dev/null 2>&1 || die "缺少 xz 工具"
+command -v bc >/dev/null 2>&1 || die "缺少 bc（内核编译依赖）"
+
+# ---------------------------------------------------------------- 工具链检测
+if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+  die "未找到 aarch64-linux-gnu-gcc。请安装交叉编译工具链，例如：sudo apt-get install crossbuild-essential-arm64"
+fi
+command -v make >/dev/null 2>&1 || die "缺少 make"
+
+# ---------------------------------------------------------------- 1. 下载与解压
+if [[ -d "$KERNEL_SRC" ]]; then
+  log "已存在内核源码目录 $KERNEL_SRC，跳过下载"
+else
+  log "下载内核 $KERNEL_VERSION：$KERNEL_URL"
+  if [[ "$DOWNLOADER" == "curl" ]]; then
+    curl -fL --retry 3 -o "$OUT_DIR/$KERNEL_TAR" "$KERNEL_URL"
+  else
+    wget -O "$OUT_DIR/$KERNEL_TAR" "$KERNEL_URL"
+  fi
+  log "解压内核源码"
+  mkdir -p "$(dirname "$KERNEL_SRC")"
+  tar -xJf "$OUT_DIR/$KERNEL_TAR" -C "$(dirname "$KERNEL_SRC")"
+fi
+
+# ---------------------------------------------------------------- 2. 应用补丁
+log "应用 ImmortalWrt 补丁（backport -> pending -> hack -> mediatek）"
+PATCH_FAILED=0
+apply_patch_series() {
+  local series="$1"
+  local files=()
+  for dir in $2; do
+    # shellcheck disable=SC2206
+    files+=("$dir"/*.patch)
+  done
+  for patch in "${files[@]}"; do
+    [[ -f "$patch" ]] || continue
+    name="$(basename "$patch")"
+    if git -C "$KERNEL_SRC" apply --check "$patch" 2>/dev/null; then
+      git -C "$KERNEL_SRC" apply "$patch"
+      log "  [OK] $series/$name"
+    else
+      log "  [FAIL] $series/$name（与内核 $KERNEL_VERSION 上下文不匹配）"
+      if command -v patch >/dev/null 2>&1 && patch -d "$KERNEL_SRC" -p1 --forward --dry-run < "$patch" >/dev/null 2>&1; then
+        log "        使用 patch 回退应用成功"
+        patch -d "$KERNEL_SRC" -p1 --forward < "$patch" >/dev/null
+      else
+        log "        无法应用"
+        PATCH_FAILED=1
+      fi
+    fi
+  done
+}
+apply_patch_series backport "$GENERIC_PATCH_DIR/backport"
+apply_patch_series pending  "$GENERIC_PATCH_DIR/pending"
+apply_patch_series hack     "$GENERIC_PATCH_DIR/hack"
+apply_patch_series mediatek "$PATCH_DIR"
+if [[ "$PATCH_FAILED" -eq 1 ]]; then
+  if [[ "$SKIP_FAILED" -eq 1 ]]; then
+    log "存在失败补丁，已按 --skip-failed-patches 继续（硬件功能可能不完整）"
+  else
+    die "存在失败补丁。请调整 --kernel-version（6.18.x 系列）后重试，或加 --skip-failed-patches 强制继续。"
+  fi
+fi
+
+# ---------------------------------------------------------------- 3. 复制 DTS 并注册 DTB
+log "复制 H5000M DTS / dtsi 到内核源码"
+DTS_TARGET="$KERNEL_SRC/arch/arm64/boot/dts/mediatek"
+mkdir -p "$DTS_TARGET"
+cp -v "$DTS_DIR"/*.dts "$DTS_DIR"/*.dtsi "$DTS_TARGET/" >/dev/null
+
+# OpenWrt/ImmortalWrt 源码文件（mtdsplit / mtk_bmt 等；files-* 目录按内核版本提供）
+log "复制 OpenWrt files（generic + mediatek）到内核源码"
+cp -a "$PROJECT_ROOT/kernel/files-generic/." "$KERNEL_SRC/"
+cp -a "$PROJECT_ROOT/kernel/files-mediatek/." "$KERNEL_SRC/"
+
+log "注册 H5000M DTB 到 arch/arm64/boot/dts/mediatek/Makefile"
+if ! grep -q "mt7987a-hiveton-h5000m.dtb" "$DTS_TARGET/Makefile"; then
+  printf '\n# Hiveton H5000M (Debian 13 port)\ndtb-$(CONFIG_ARCH_MEDIATEK) += mt7987a-hiveton-h5000m.dtb\n' >> "$DTS_TARGET/Makefile"
+fi
+
+# ---------------------------------------------------------------- 4. 内核配置
+log "生成 .config（arm64 defconfig + 增量片段）"
+make -C "$KERNEL_SRC" ARCH=arm64 defconfig >/dev/null
+cat "$CONFIG_FILE" >> "$KERNEL_SRC/.config"
+make -C "$KERNEL_SRC" ARCH=arm64 olddefconfig >/dev/null
+
+log "核验关键配置项："
+REQUIRED_SYMBOLS=(
+  CONFIG_ARCH_MEDIATEK CONFIG_PINCTRL_MT7987 CONFIG_COMMON_CLK_MT7987
+  CONFIG_COMMON_CLK_MT7987_ETHSYS CONFIG_NET_MEDIATEK_SOC CONFIG_MEDIATEK_GE_PHY
+  CONFIG_REALTEK_PHY CONFIG_PCS_MTK_LYNXI CONFIG_MT76_CORE CONFIG_MT7996E
+  CONFIG_MMC_MTK CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_PWM_MEDIATEK CONFIG_PWM_FAN
+  CONFIG_MTK_LVTS_THERMAL CONFIG_USB_XHCI_MTK CONFIG_BRIDGE CONFIG_NF_TABLES
+  CONFIG_NFT_MASQ CONFIG_IPV6 CONFIG_EXT4_FS
+)
+CONFIG_MISSING=0
+for sym in "${REQUIRED_SYMBOLS[@]}"; do
+  if grep -q "^${sym}=y\|^${sym}=m" "$KERNEL_SRC/.config"; then
+    log "  [OK] $sym"
+  else
+    log "  [WARN] $sym 未启用（补丁未生效或符号名不匹配）"
+    CONFIG_MISSING=1
+  fi
+done
+if [[ "$CONFIG_MISSING" -eq 1 && "$SKIP_FAILED" -eq 0 ]]; then
+  log "提示：以上 WARN 项可能因内核版本与补丁不匹配导致；可使用 --skip-failed-patches 继续构建验证流程。"
+fi
+
+# ---------------------------------------------------------------- 5. 编译
+log "编译内核（Image + dtbs + modules，-j$JOBS）"
+make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs modules >"$WORK/build.log" 2>&1 || {
+  tail -n 60 "$WORK/build.log" >&2
+  die "内核编译失败，日志：$WORK/build.log"
+}
+
+log "安装内核模块到 $MODULES_ROOT"
+make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+  modules_install INSTALL_MOD_PATH="$MODULES_ROOT" INSTALL_MOD_STRIP=1 >/dev/null
+
+# ---------------------------------------------------------------- 6. 收集产物
+log "收集产物"
+IMAGE="$KERNEL_SRC/arch/arm64/boot/Image"
+DTB="$KERNEL_SRC/arch/arm64/boot/dts/mediatek/mt7987a-hiveton-h5000m.dtb"
+[[ -f "$IMAGE" ]] || die "Image 未生成"
+[[ -f "$DTB" ]]   || die "H5000M DTB 未生成"
+
+install -Dm644 "$IMAGE" "$OUT_DIR/Image"
+install -Dm644 "$DTB"   "$OUT_DIR/mt7987a-hiveton-h5000m.dtb"
+tar -C "$MODULES_ROOT" -cJf "$OUT_DIR/modules.tar.zst" lib
+
+cp "$CONFIG_FILE" "$OUT_DIR/kernel-config-exported.config"
+grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL_SRC/.config" \
+  > "$OUT_DIR/kernel-mt7987-options.txt" || true
+
+log "完成。产物："
+ls -lh "$OUT_DIR/Image" "$OUT_DIR/mt7987a-hiveton-h5000m.dtb" "$OUT_DIR/modules.tar.zst"

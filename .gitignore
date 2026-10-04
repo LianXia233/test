@@ -1,0 +1,27 @@
+# 构建产物
+out/
+*.img
+*.img.gz
+*.tar.zst
+*.tar.xz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统/编辑器
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 密钥与凭据（禁止提交）
+*.pem
+*.key
+initial-credentials.txt
+
+# 日志
+*.log
