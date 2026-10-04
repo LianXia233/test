@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — 官方固件实测验证（下载 H5000M sysupgrade.bin 逐项核对启动链）
+
+下载官方固件 `H5000M-.-sysupgrade.bin`（ImmortalWRT SNAPSHOT, mediatek/filogic, aarch64_cortex-a53）
+并实测分析，用真实数据验证 / 修正分区方案：
+
+**实测确认（与方案一致）：**
+
+- 固件为新式 sysupgrade tar 包：`sysupgrade-hiveton_h5000m/{CONTROL,kernel,root}`，`BOARD=hiveton_h5000m`
+- p4 内容为**裸 FIT 镜像**（魔数 `d00dfeed`），内核 LZMA 压缩；`mkimage -l`：
+  `ARM64 OpenWrt FIT` / `Linux-6.18.52` / `kernel-1` + `fdt-1` + `config-1`，每镜像 crc32 + sha1 双哈希
+- bootargs（DTB chosen）：`earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf`
+- GPT PARTLABEL 定位：`lib/upgrade/platform.sh` 设 `CI_KERNPART="kernel" CI_ROOTPART="rootfs"`，
+  `lib/upgrade/emmc.sh` 按 PARTLABEL `find_mmc_part` 后 **dd 仅写 kernel/rootfs 两分区**（与本方案"只写 p4/p5"一致）
+- p2 `factory`：DTB `block-partition-factory { partname = "factory"; nvmem-layout }`（Wi-Fi EEPROM）
+- 网口映射：`etc/board.d/02_network` → `ucidef_set_interfaces_lan_wan "eth0" eth1`（LAN=eth0 / WAN=eth1）
+- MAC 生成：`macaddr_generate_from_mmc_cid mmcblk0`（LAN），WAN=LAN+1
+- eMMC：DTB `mmc@11230000` `mmc-card` `non-removable`（无 SD 卡槽）
+
+**修正（基于实测）：**
+
+- FIT **load/entry 地址 0x40000000**（原假设 0x46000000，实测官方 FIT 同值，已修正）
+- FIT 节点命名与官方同构：`kernel-1` / `fdt-1` / `config-1` / `hash-1`(crc32) / `hash-2`(sha1)（消除 `@` 单元地址警告）
+- bootargs 补 `earlycon=uart8250,mmio32,0x11000000`（与官方 chosen 一致，各处文档/脚本已同步）
+- `make-sd-image.sh`：`mkimage` 调用前 `cd` 到工作目录（`.its` 的 `/incbin/()` 为相对路径，修复潜在打包失败）
+- 用官方内核数据实测验证：按新 `.its` 生成的 FIT 与官方哈希逐字节一致（crc32 `ffeed093`、sha1 `3ed2ff7d…`）
+- `docs/debian13-partition-plan.md` 新增 §1.2「官方固件实测验证」
+
 ### 2026-10-04 — 分区方案重构：完整复用现有 OpenWrt eMMC 布局（不重建 / 不重排）
 
 **核心原则落地**：以设备当前正常运行的 OpenWrt 分区布局 / 启动链 / DTS 为唯一基准，

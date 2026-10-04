@@ -19,7 +19,8 @@ setenv kernel_addr_r 0x46000000
 setenv fdt_addr_r 0x45000000
 setenv ramdisk_addr_r 0x44000000
 
-setenv bootargs 'root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
+# bootargs 与官方 OpenWrt 一致（实测 H5000M sysupgrade.bin chosen/bootargs）
+setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
 
 echo '### H5000M Debian boot (fallback): trying eMMC p5 (/boot, ext4) ###'
 setenv devtype mmc

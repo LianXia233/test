@@ -52,7 +52,7 @@ KERNEL_DIR="$OUT_DIR/kernel"
 ROOTFS_TAR="$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst"
 BOOT_DIR="$OUT_DIR/boot"
 ROOTFS_SIZE_MB="4096"            # ext4 镜像大小（默认 4 GiB，可写入 8G eMMC 的 p5）
-FIT_LOAD_ADDR="0x46000000"       # 与 Filogic U-Boot kernel_addr_r 一致
+FIT_LOAD_ADDR="0x40000000"       # 与官方 OpenWrt FIT 一致（实测 H5000M sysupgrade.bin：Load/Entry = 0x40000000）
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -124,8 +124,8 @@ cat > "$WORK/h5000m.its" <<EOF
     #address-cells = <1>;
 
     images {
-        kernel@1 {
-            description = "Linux 6.18 arm64 (Image, LZMA)";
+        kernel-1 {
+            description = "ARM64 OpenWrt-style Linux 6.18 arm64 (Image, LZMA)";
             data = /incbin/("Image.lzma");
             type = "kernel";
             arch = "arm64";
@@ -133,27 +133,29 @@ cat > "$WORK/h5000m.its" <<EOF
             compression = "lzma";
             load = <$FIT_LOAD_ADDR>;
             entry = <$FIT_LOAD_ADDR>;
-            hash@1 { algo = "crc32"; };
+            hash-1 { algo = "crc32"; };
+            hash-2 { algo = "sha1"; };
         };
 
-        fdt@1 {
-            description = "Hiveton H5000M device tree";
+        fdt-1 {
+            description = "ARM64 OpenWrt hiveton_h5000m device tree";
             data = /incbin/("mt7987a-hiveton-h5000m.dtb");
             type = "flat_dt";
             arch = "arm64";
             compression = "none";
             compatible = "hiveton,h5000m";
-            hash@1 { algo = "crc32"; };
+            hash-1 { algo = "crc32"; };
+            hash-2 { algo = "sha1"; };
         };
     };
 
     configurations {
-        default = "conf@h5000m";
+        default = "config-1";
 
-        conf@h5000m {
-            description = "Hiveton H5000M Debian 13";
-            kernel = "kernel@1";
-            fdt = "fdt@1";
+        config-1 {
+            description = "OpenWrt hiveton_h5000m";
+            kernel = "kernel-1";
+            fdt = "fdt-1";
         };
     };
 };
@@ -162,7 +164,10 @@ EOF
 cp -f "$IMAGE_LZMA" "$WORK/Image.lzma"
 cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
 log "  mkimage 打包 FIT ..."
-mkimage -f "$WORK/h5000m.its" "$FIT_OUT" >/dev/null 2>&1 || die "mkimage 打包 FIT 失败（请安装 u-boot-tools）"
+(
+  cd "$WORK"
+  mkimage -f h5000m.its "$FIT_OUT" >/dev/null 2>&1
+) || die "mkimage 打包 FIT 失败（请安装 u-boot-tools）"
 log "  [OK] $FIT_OUT（$(stat -c %s "$FIT_OUT") 字节）"
 dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd0 0d fe ed' \
   && log "  [OK] FIT 魔数校验通过" \
@@ -194,7 +199,7 @@ cat > "$MNT_ROOT/boot/extlinux/extlinux.conf" <<EOF
 LABEL H5000M Debian 13
     KERNEL ../Image
     FDT ../mt7987a-hiveton-h5000m.dtb
-    APPEND root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
+    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
 EOF
 
 if [[ -f "$BOOT_DIR/boot.scr" ]]; then

@@ -26,7 +26,7 @@
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
 | U-Boot 未自动引导 Debian | p4 是否已写入 FIT；p5 是否已写入 Debian | `dd if=/dev/mmcblk0p4 bs=1 count=4 | od -An -tx1` 应为 `d0 0d fe ed`；重新运行 `scripts/install-emmc.sh`（先备份！） |
-| 手动引导（主路径，p4 FIT） | 串口进入 U-Boot | `setenv bootargs 'root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'` → `load mmc 0:4 0x46000000` → `bootm 0x46000000` |
+| 手动引导（主路径，p4 FIT） | 串口进入 U-Boot | `setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'` → `load mmc 0:4 0x46000000` → `bootm 0x46000000`（bootm 按 FIT 内 load=0x40000000 解压） |
 | 手动引导（兜底，p5 /boot） | 串口进入 U-Boot | `load mmc 0:5 0x47000000 /boot/boot.scr` → `source 0x47000000` |
 | 刷入 eMMC 后无法启动 | 分区表 / FIT / rootfs | `sgdisk -p /dev/mmcblk0` 确认 p4 PARTLABEL=`kernel`、p5 PARTLABEL=`rootfs`；p4 为 FIT（bootm 加载）、p5 为 ext4（PARTLABEL=rootfs 挂载）；`Image`/DTB 与当前内核匹配 |
 | 想恢复 ImmortalWrt | 备份文件 | `dd if=emmc-backup.img of=/dev/mmcblk0 bs=4M conv=fsync` |

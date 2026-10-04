@@ -38,6 +38,31 @@ chosen {
 - 根文件系统定位方式：**`root=PARTLABEL=rootfs`**（内核按 GPT PARTLABEL 解析 `/dev/mmcblk0p5`）。
 - eMMC `mmc0` 节点仅定义 `factory` 分区的 NVMEM（Wi-Fi EEPROM），**不含任何固定分区表定义** —— 分区完全由 GPT 控制，因此 U-Boot / 内核均通过 GPT 的 PARTLABEL 工作。
 
+### 1.2 官方固件实测验证（重要）
+
+已下载官方固件 `H5000M-.-sysupgrade.bin`（ImmortalWRT SNAPSHOT，mediatek/filogic，
+aarch64_cortex-a53）并实测分析，全部结论与上述分区方案一致，并修正/确认关键参数：
+
+| 项目 | 实测结果（来自官方 sysupgrade.bin） | 与方案一致性 |
+| --- | --- | --- |
+| 固件格式 | 新式 sysupgrade **tar 包**：`sysupgrade-hiveton_h5000m/{CONTROL,kernel,root}` | — |
+| CONTROL | `BOARD=hiveton_h5000m` | 确认板级标识 |
+| kernel 分区内容（p4） | **裸 FIT 镜像**，魔数 `d00dfeed`；`mkimage -l` 显示：`ARM64 OpenWrt FIT`，内核 **LZMA 压缩**，**Load/Entry = 0x40000000** | 确认主引导为 p4 FIT（bootm）；**load 地址实测为 0x40000000（修正原假设 0x46000000）** |
+| FIT 内核版本 | `Linux-6.18.52`（本方案构建 6.18.x 同系列） | ✅ |
+| FIT 哈希 | 每镜像带 `hash-1(crc32)` + `hash-2(sha1)` | 方案 FIT 已补齐 sha1 |
+| rootfs 内容（p5） | SquashFS 4.0（xz），OpenWrt 根文件系统 | p5 将被改为 ext4 Debian RootFS |
+| bootargs（DTB chosen） | `earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf` | 与方案一致；已同步补充 `earlycon` |
+| GPT PARTLABEL 定位 | `lib/upgrade/platform.sh`：`CI_KERNPART="kernel" CI_ROOTPART="rootfs"`；`lib/upgrade/emmc.sh` 用 `find_mmc_part`（按 PARTLABEL）定位分区设备后 **dd 直接写入** | 确认 OpenWrt 仅按 PARTLABEL 写 `kernel`/`rootfs` 两分区，其余区域零写入（与本方案设计一致） |
+| factory 分区 | DTB：`block-partition-factory { partname = "factory"; nvmem-layout … }`（Wi-Fi EEPROM 校准） | 确认 p2 不可动 |
+| 网口映射 | `etc/board.d/02_network`：`ucidef_set_interfaces_lan_wan "eth0" eth1` | LAN=eth0 / WAN=eth1，与方案一致 |
+| MAC 生成 | `macaddr_generate_from_mmc_cid mmcblk0`（LAN=CID 派生，WAN=LAN+1） | 与网络初始化一致（可参考） |
+| eMMC 节点 | DTB `mmc@11230000`，`mmc-card`，`non-removable` | 无 SD 卡槽，仅 eMMC，与方案一致 |
+
+> 实测结论：官方 U-Boot 使用 **GPT PARTLABEL 定位 p4（kernel）→ 读取裸 FIT → bootm**
+> （内核 LZMA 解压至 load 地址 0x40000000）。本方案生成的 FIT 与官方同构
+> （同 load/entry、同 LZMA、同 crc32+sha1），现有 U-Boot 可**零改动**直接启动。
+> 官方 sysupgrade 也仅覆盖 `kernel`/`rootfs` 两个 GPT 分区，与本方案"只写 p4/p5"完全一致。
+
 ---
 
 ## 2. 当前启动链对应关系
@@ -58,9 +83,10 @@ Kernel（FIT 内：LZMA 压缩 Image + H5000M DTB）
 挂载 p5（`rootfs`）→ OpenWrt SquashFS / overlay
 ```
 
-**U-Boot 加载 Kernel 的方式（结论）**：Filogic（MT7987）平台的 OpenWrt/ImmortalWrt U-Boot
-通过 **GPT 分区号 p4 / PARTLABEL `kernel`** 定位 kernel 分区，将该分区内**裸 FIT 镜像**
-加载到 `kernel_addr_r`（0x46000000）后执行 `bootm`（FIT 方式启动，`CONFIG_FIT` + LZMA）。
+**U-Boot 加载 Kernel 的方式（结论，已由官方固件实测确认）**：Filogic（MT7987）平台的
+OpenWrt/ImmortalWrt U-Boot 通过 **GPT 分区号 p4 / PARTLABEL `kernel`** 定位 kernel 分区，
+将该分区内**裸 FIT 镜像**加载到内存后执行 `bootm`（FIT 方式启动，`CONFIG_FIT` + LZMA）；
+FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），bootm 按该地址解压跳转。
 不是 EFI/GRUB、不依赖传统 PC 启动路径。
 
 > 若个别固件版本的 U-Boot 使用 distro boot（`bootflow scan`），其会扫描文件系统分区
@@ -135,7 +161,7 @@ U-Boot bootcmd（现有，未修改）
   → 从 eMMC GPT 定位 p4（PARTLABEL=kernel）
   → load mmc 0:4 ${kernel_addr_r}（读取裸 FIT）
   → bootm ${kernel_addr_r}
-     ├─ 解压 LZMA 内核 → load 地址 0x46000000
+     ├─ 解压 LZMA 内核 → FIT 内 load/entry 地址 0x40000000（实测与官方一致）
      ├─ 选择 FIT config `conf@h5000m` → fdt（compatible=hiveton,h5000m）
      └─ 传递 bootargs（root=PARTLABEL=rootfs …）
 ```

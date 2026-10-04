@@ -152,7 +152,7 @@ sync && sudo umount /mnt/usb
 ```
 setenv ipaddr 192.168.1.2
 setenv serverip 192.168.1.1
-setenv bootargs console=ttyS0,115200n8 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf
+setenv bootargs earlycon=uart8250,mmio32,0x11000000 console=ttyS0,115200n8 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf
 tftpboot 0x46000000 Image
 tftpboot 0x44000000 mt7987a-hiveton-h5000m.dtb
 booti 0x46000000 - 0x44000000
@@ -166,7 +166,7 @@ booti 0x46000000 - 0x44000000
 
 ```bash
 # 主路径：从 p4 加载 FIT 并 bootm（与 OpenWrt 相同）
-setenv bootargs 'root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
+setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
 load mmc 0:4 0x46000000
 bootm 0x46000000
 
