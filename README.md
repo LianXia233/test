@@ -37,7 +37,7 @@ sudo bash scripts/build.sh --kernel-version 6.18.54 --out /path/to/out
 bash build/build-kernel.sh --kernel-version 6.18.54 --out /path/to/out/kernel
 bash build/make-boot.sh --out /path/to/out/boot     # 生成 boot.scr（备用引导，主引导为 p4 FIT）
 sudo bash build/build-rootfs.sh --out /path/to/out
-sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：h5000m-kernel.fit + h5000m-rootfs.ext4.img
+sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：H5000M-debian13-kernel.bin + H5000M-debian13-rootfs.bin
 ```
 
 构建机依赖：`git curl xz bison flex libssl-dev bc crossbuild-essential-arm64 debootstrap qemu-user-static u-boot-tools`。
@@ -46,7 +46,7 @@ sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：h5000m
 
 仓库已配置 `.github/workflows/build.yml`，推送到 `main`/`master` 或手动触发 `workflow_dispatch`
 即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → 刷写包
-（`h5000m-kernel.fit` → p4、`h5000m-rootfs.ext4.img` → p5），产物以上传 Artifact 方式交付
+（`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5），产物以上传 Artifact 方式交付
 （含 `initial-credentials.txt` 首次登录凭据）。
 
 ## 分区与启动（复用现有 OpenWrt 布局，不改 U-Boot）
@@ -58,7 +58,7 @@ sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：h5000m
 p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 ```
 
-- 主引导：现有 U-Boot 从 **p4** 读取 `h5000m-kernel.fit`（FIT）并 `bootm`（与 OpenWrt 同型）；
+- 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`（与 OpenWrt 同型）；
 - 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**（ext4 Debian 13）；
 - 启动链：BootROM → BL2 → FIP(U-Boot) → p4 FIT → Kernel → p5 Debian，逐级原样复用。
 
@@ -66,7 +66,7 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 
 ## 首次启动（兼容当前 U-Boot，不破坏 eMMC 中的 ImmortalWrt）
 
-1. 构建刷写包（`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`）；
+1. 构建刷写包（`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`）；
 2. 进入设备（OpenWrt initramfs / Debian live），**先完整备份**（整盘 dd 或逐分区备份）；
 3. 执行 `scripts/install-emmc.sh`，脚本**仅写 p4（FIT）+ p5（ext4）**，其余区域零写入；
 4. 重启后由现有 U-Boot 直接引导 Debian 13；WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、
@@ -76,8 +76,8 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 ```bash
 # 在 H5000M 上（OpenWrt initramfs / Debian live / 已启动的 Debian）执行
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/h5000m-kernel.fit \
-  --rootfs-img out/h5000m-rootfs.ext4.img \
+  --kernel-fit out/H5000M-debian13-kernel.bin \
+  --rootfs-img out/H5000M-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 ```
 

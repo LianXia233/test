@@ -22,11 +22,11 @@
 #
 # 用法（目标设备：OpenWrt initramfs / Debian live / 已启动的 Debian）：
 #   sudo bash scripts/install-emmc.sh \
-#     --kernel-fit out/h5000m-kernel.fit \
-#     --rootfs out/h5000m-rootfs.ext4.img [--dev /dev/mmcblk0] [--yes]
+#     --kernel-fit out/H5000M-debian13-kernel.bin \
+#     --rootfs out/H5000M-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes]
 #   # 或使用 rootfs tar.zst（脚本内部挂载解压）：
 #   sudo bash scripts/install-emmc.sh \
-#     --kernel-fit out/h5000m-kernel.fit \
+#     --kernel-fit out/H5000M-debian13-kernel.bin \
 #     --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst [--dev /dev/mmcblk0] [--yes]
 #
 # 平台：仅 Linux（dd / mkfs.ext4 / losetup / tar 等）。

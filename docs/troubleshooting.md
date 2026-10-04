@@ -87,8 +87,8 @@ dd if=/dev/mmcblk0 of=/path/to/backup/mmcblk0.img bs=4M conv=sync status=progres
 
 # 仅写 p4（FIT）+ p5（ext4），其余区域（GPT / p1-p3 / U-Boot / eMMC 硬件配置）不动
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/h5000m-kernel.fit \
-  --rootfs-img out/h5000m-rootfs.ext4.img \
+  --kernel-fit out/H5000M-debian13-kernel.bin \
+  --rootfs-img out/H5000M-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 ```
 

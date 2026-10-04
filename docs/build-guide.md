@@ -4,7 +4,7 @@
 
 1. Linux 6.18.x 内核（`Image` + H5000M `dtb` + `modules`）
 2. Debian 13 (Trixie) ARM64 RootFS
-3. **刷写包**：`h5000m-kernel.fit`（写入 p4 kernel 分区）+ `h5000m-rootfs.ext4.img`（写入 p5 rootfs 分区）
+3. **刷写包**：`H5000M-debian13-kernel.bin`（写入 p4 kernel 分区）+ `H5000M-debian13-rootfs.bin`（写入 p5 rootfs 分区）
 
 > **分区原则**：完全复用 H5000M 现有 OpenWrt 的 eMMC 分区布局与启动链
 > （BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置一律不动）。
@@ -54,8 +54,8 @@ rootfs/
   initial-credentials.txt     # 首次登录凭据（chmod 600）
 boot/
   boot.scr                    # 备用引导脚本（distro boot 兜底）
-h5000m-kernel.fit             # → 刷入 p4（kernel 分区，U-Boot bootm 直接加载）
-h5000m-rootfs.ext4.img        # → 刷入 p5（rootfs 分区，ext4）
+H5000M-debian13-kernel.bin             # → 刷入 p4（kernel 分区，U-Boot bootm 直接加载）
+H5000M-debian13-rootfs.bin        # → 刷入 p5（rootfs 分区，ext4）
 ```
 
 ## 3. 分步构建
@@ -118,13 +118,13 @@ sudo bash build/make-sd-image.sh \
 输出（对应现有 eMMC 分区，**不创建任何分区表**）：
 
 ```
-out/h5000m-kernel.fit        → dd 到 p4（kernel，30 MiB）
-out/h5000m-rootfs.ext4.img   → dd 到 p5（rootfs，~7.24 GiB）
+out/H5000M-debian13-kernel.bin        → dd 到 p4（kernel，30 MiB）
+out/H5000M-debian13-rootfs.bin   → dd 到 p5（rootfs，~7.24 GiB）
 ```
 
-- `h5000m-kernel.fit`：内核 LZMA 压缩 + H5000M DTB 的 FIT 镜像，**与 OpenWrt 同型**
+- `H5000M-debian13-kernel.bin`：内核 LZMA 压缩 + H5000M DTB 的 FIT 镜像，**与 OpenWrt 同型**
   （U-Boot 现有 `bootm` 流程原样加载），p4 无需文件系统；
-- `h5000m-rootfs.ext4.img`：ext4 根文件系统镜像，内含 `/boot` 备用引导
+- `H5000M-debian13-rootfs.bin`：ext4 根文件系统镜像，内含 `/boot` 备用引导
   （`boot.scr` / `extlinux.conf` / `Image` / DTB，供 distro boot 兜底）。
 
 ### 3.4 U-Boot 启动脚本（备用引导，可选）
@@ -145,13 +145,13 @@ bash build/make-boot.sh --out /path/to/out/boot
 ```bash
 # 方法一：使用 ext4 镜像（推荐）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/h5000m-kernel.fit \
-  --rootfs-img /path/to/out/h5000m-rootfs.ext4.img \
+  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --rootfs-img /path/to/out/H5000M-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 
 # 方法二：使用 rootfs tar.zst（脚本内部挂载解压）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
   --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
   --dev /dev/mmcblk0 [--yes]
 ```
@@ -172,7 +172,7 @@ sudo bash scripts/install-emmc.sh \
 
 1. **build-kernel**：ubuntu-24.04 上编译 6.18 内核（含源码缓存）+ 生成 boot.scr，上传 artifact；
 2. **build-image**：下载内核产物，debootstrap 构建 Debian 13 RootFS，生成刷写包
-   （`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`），上传 artifact。
+   （`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`），上传 artifact。
 
 产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`
 （rootfs、kernel.fit、rootfs.ext4.img、内核、boot.scr、初始凭据）。
@@ -198,8 +198,8 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware
 
 - [ ] `Image` 为 arm64 且含 MT7987A 驱动（`strings Image | grep -i mt7987`）
 - [ ] `mt7987a-hiveton-h5000m.dtb` 生成成功
-- [ ] `h5000m-kernel.fit` 首 4 字节为 FIT 魔数 `d0 0d fe ed`，且体积 < 30 MiB
-- [ ] `h5000m-rootfs.ext4.img` 可 `e2fsck -fn` 通过
+- [ ] `H5000M-debian13-kernel.bin` 首 4 字节为 FIT 魔数 `d0 0d fe ed`，且体积 < 30 MiB
+- [ ] `H5000M-debian13-rootfs.bin` 可 `e2fsck -fn` 通过
 - [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 与 `mt7987/` 固件齐全
 - [ ] rootfs 内 Linux-Router 服务已 enable
 - [ ] rootfs 内 `/etc/fstab` 根挂载为 `PARTLABEL=rootfs`

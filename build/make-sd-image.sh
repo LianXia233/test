@@ -7,12 +7,12 @@
 #   p1 u-boot-env  1 MiB    ← 原样保留
 #   p2 factory     2 MiB    ← 原样保留
 #   p3 fip         4 MiB    ← 原样保留
-#   p4 kernel     30 MiB    ← 复用：写入 h5000m-kernel.fit（U-Boot 现有 bootm 流程不变）
-#   p5 rootfs  ~7.2 GiB     ← 复用：写入 h5000m-rootfs.ext4.img（ext4，PARTLABEL=rootfs）
+#   p4 kernel     30 MiB    ← 复用：写入 H5000M-debian13-kernel.bin（U-Boot 现有 bootm 流程不变）
+#   p5 rootfs  ~7.2 GiB     ← 复用：写入 H5000M-debian13-rootfs.bin（ext4，PARTLABEL=rootfs）
 #
 # 本脚本只生成两个可刷写文件，不创建分区表、不触碰任何块设备：
-#   out/h5000m-kernel.fit    → dd 到 p4（U-Boot 直接 bootm 加载）
-#   out/h5000m-rootfs.ext4.img → dd 到 p5（或由 scripts/install-emmc.sh 刷写）
+#   out/H5000M-debian13-kernel.bin  → dd 到 p4（U-Boot 直接 bootm 加载）
+#   out/H5000M-debian13-rootfs.bin  → dd 到 p5（或由 scripts/install-emmc.sh 刷写）
 #
 # FIT 镜像说明：与 OpenWrt 一致，内核以 LZMA 压缩打包进 FIT（p4 仅 30 MiB，
 # 未压缩 Image 无法容纳）；U-Boot 的 bootm 自动解压并跳转。
@@ -72,8 +72,8 @@ done
 
 IMAGE="$KERNEL_DIR/Image"
 DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
-FIT_OUT="$OUT_DIR/h5000m-kernel.fit"
-ROOTFS_IMG="$OUT_DIR/h5000m-rootfs.ext4.img"
+FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
+ROOTFS_IMG="$OUT_DIR/H5000M-debian13-rootfs.bin"
 
 [[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh）"
 [[ -f "$DTB"   ]] || die "缺少 DTB：$DTB"

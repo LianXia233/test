@@ -130,7 +130,7 @@ FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），boot
 | p1 | `u-boot-env` | 2048 | 4095 | 1 MiB | 裸（U-Boot env） | 原样保留 |
 | p2 | `factory` | 4096 | 8191 | 2 MiB | 裸（校准数据） | 原样保留（Wi-Fi EEPROM） |
 | p3 | `fip` | 8192 | 16383 | 4 MiB | 裸（FIP） | 原样保留（BL2/U-Boot） |
-| p4 | `kernel` | 16384 | 77823 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（h5000m-kernel.fit） |
+| p4 | `kernel` | 16384 | 77823 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（H5000M-debian13-kernel.bin） |
 | p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian RootFS 所在** |
 
 - **PARTUUID**：保持不变（现有 GPT 中已存在，全部保留；Debian 不依赖 PARTUUID）。
@@ -144,7 +144,7 @@ FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），boot
 
 | 内容 | 位置 |
 | --- | --- |
-| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `h5000m-kernel.fit`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 内 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb` |
+| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 内 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb` |
 | **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb` |
 | **RootFS** | p5 `rootfs` 分区（ext4，PARTLABEL=`rootfs`），Debian 13 (Trixie) ARM64 |
 | **Data** | p5 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
@@ -218,7 +218,7 @@ PARTLABEL=rootfs	/	ext4	errors=remount-ro	0	1
 
 | 区域 | 操作 |
 | --- | --- |
-| p4 `kernel`（30 MiB） | **覆盖**：写入 `h5000m-kernel.fit`（原 OpenWrt FIT 被替换） |
+| p4 `kernel`（30 MiB） | **覆盖**：写入 `H5000M-debian13-kernel.bin`（原 OpenWrt FIT 被替换） |
 | p5 `rootfs`（~7.24 GiB） | **覆盖**：`mkfs.ext4` 重建文件系统 + 写入 Debian 13 RootFS（原 OpenWrt SquashFS/overlay 全部被替换） |
 | p1 / p2 / p3 | **零写入** |
 | GPT（主 + 备份） | **零写入**（不重建、不重排） |
@@ -283,8 +283,8 @@ cat /proc/mounts   > /tmp/h5000m-backup/mounts.txt
 
 ```
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/h5000m-kernel.fit \
-  --rootfs-img out/h5000m-rootfs.ext4.img \
+  --kernel-fit out/H5000M-debian13-kernel.bin \
+  --rootfs-img out/H5000M-debian13-rootfs.bin \
   --backup-full /tmp/h5000m-full.img        # 整盘
   # 或 --backup-p45 /tmp/h5000m-p45          # 仅 p4/p5
 ```
@@ -340,8 +340,8 @@ curl -sI http://192.168.88.1    # WebUI 可达
 build/build-kernel.sh        → out/kernel/Image + mt7987a-hiveton-h5000m.dtb + modules.tar.zst
 build/build-rootfs.sh        → out/rootfs/debian13-arm64-rootfs.tar.zst
 build/make-boot.sh           → out/boot/boot.scr（备用引导）
-build/make-sd-image.sh       → out/h5000m-kernel.fit（→ p4）
-                               out/h5000m-rootfs.ext4.img（→ p5）
+build/make-sd-image.sh       → out/H5000M-debian13-kernel.bin（→ p4）
+                               out/H5000M-debian13-rootfs.bin（→ p5）
 scripts/install-emmc.sh      → 校验现有分区 → 仅写 p4 / p5 → 校验
 ```
 

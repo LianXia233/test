@@ -7,7 +7,7 @@ Debian 13 与 OpenWrt 共用完全相同的分区布局与启动链：
 p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 ```
 
-- 主引导：现有 U-Boot 从 **p4** 读取 `h5000m-kernel.fit`（FIT）并 `bootm`；
+- 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`；
 - 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**。
 
 完整方案见 [docs/debian13-partition-plan.md](debian13-partition-plan.md)。
@@ -20,8 +20,8 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 在 Linux 构建机生成刷写包（见 [docs/build-guide.md](build-guide.md)）：
 
 ```
-out/h5000m-kernel.fit        # → p4
-out/h5000m-rootfs.ext4.img   # → p5
+out/H5000M-debian13-kernel.bin        # → p4
+out/H5000M-debian13-rootfs.bin   # → p5
 out/rootfs/initial-credentials.txt
 ```
 
@@ -48,13 +48,13 @@ sgdisk --backup=/tmp/bk/gpt.bin /dev/mmcblk0
 ```bash
 # 方法一：ext4 镜像（推荐）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/h5000m-kernel.fit \
-  --rootfs-img /path/to/out/h5000m-rootfs.ext4.img \
+  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --rootfs-img /path/to/out/H5000M-debian13-rootfs.bin \
   --dev /dev/mmcblk0 --yes
 
 # 方法二：rootfs tar.zst
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
   --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
   --dev /dev/mmcblk0 --yes
 ```
@@ -126,7 +126,7 @@ dd if=/tmp/bk/p5.img of=/dev/mmcblk0p5 bs=4M conv=fsync status=progress
 
 ### 方式 A：USB 盘
 
-> 默认刷写包（`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`）面向 **eMMC 复用现有分区**，
+> 默认刷写包（`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`）面向 **eMMC 复用现有分区**，
 > 不再生成通用 USB/SD 镜像。如需 USB 试运行，按下述手动步骤制作（仅用于临时验证盘）：
 
 ```bash

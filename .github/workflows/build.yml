@@ -107,7 +107,7 @@ jobs:
             --hostname h5000m-debian \
             --kernel-dir out/kernel
 
-      - name: 生成刷写包（p4 FIT + p5 RootFS ext4 镜像，复用现有分区布局）
+      - name: 生成刷写包（p4 kernel .bin + p5 RootFS .bin，复用现有分区布局）
         run: |
           sudo bash build/make-sd-image.sh \
             --out out \
@@ -123,8 +123,8 @@ jobs:
           path: |
             out/rootfs/debian13-arm64-rootfs.tar.zst
             out/rootfs/initial-credentials.txt
-            out/h5000m-kernel.fit
-            out/h5000m-rootfs.ext4.img
+            out/H5000M-debian13-kernel.bin
+            out/H5000M-debian13-rootfs.bin
             out/kernel/Image
             out/kernel/mt7987a-hiveton-h5000m.dtb
             out/kernel/modules.tar.zst

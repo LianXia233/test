@@ -3,7 +3,7 @@
 #
 # Hiveton H5000M — Debian 13 一键构建（内核 + RootFS + 刷写包）
 #
-# 刷写包 = h5000m-kernel.fit（→ p4 kernel 分区）+ h5000m-rootfs.ext4.img（→ p5 rootfs 分区），
+# 刷写包 = H5000M-debian13-kernel.bin（→ p4 kernel 分区）+ H5000M-debian13-rootfs.bin（→ p5 rootfs 分区），
 # 完全复用设备现有 OpenWrt 分区布局与启动链（不创建 / 不重建分区表）。
 #
 # 用法：
@@ -100,7 +100,7 @@ fi
 
 # ---------------------------------------------------------------- 3. 刷写包（FIT + RootFS ext4 镜像）
 if [[ "$NO_IMAGE" -eq 0 ]]; then
-  log "== 步骤 3/3：生成刷写包（h5000m-kernel.fit + h5000m-rootfs.ext4.img）=="
+  log "== 步骤 3/3：生成刷写包（H5000M-debian13-kernel.bin + H5000M-debian13-rootfs.bin）=="
   bash "$PROJECT_ROOT/build/make-sd-image.sh" \
     --out "$OUT_DIR" \
     --kernel-dir "$KERNEL_DIR" \

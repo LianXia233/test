@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — 刷写包产物改用 .bin 命名（与官方 H5000M-...sysupgrade.bin 风格一致）
+
+- 构建产物由 `h5000m-kernel.fit` / `h5000m-rootfs.ext4.img` 更名为 **`.bin` 格式**：
+  - `out/H5000M-debian13-kernel.bin`（内容仍为裸 FIT 镜像，→ p4，U-Boot bootm 直接加载）
+  - `out/H5000M-debian13-rootfs.bin`（内容仍为 ext4 镜像，→ p5）
+- 同步更新：`build/make-sd-image.sh`、`scripts/install-emmc.sh`、`scripts/build.sh`、
+  `boot/boot.cmd`、`.github/workflows/build.yml`（Artifact 产物路径）及全部文档引用
+  （README / docs/build-guide / first-boot / troubleshooting / debian13-partition-plan）
+
+
 ### 2026-10-04 — 官方固件实测验证（下载 H5000M sysupgrade.bin 逐项核对启动链）
 
 下载官方固件 `H5000M-.-sysupgrade.bin`（ImmortalWRT SNAPSHOT, mediatek/filogic, aarch64_cortex-a53）

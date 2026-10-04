@@ -1,7 +1,7 @@
 # Hiveton H5000M (MT7987A) — Debian 13 备用引导脚本源文件
 #
 # 【主引导路径】无需本脚本：
-#   现有 U-Boot 从 eMMC p4 (kernel 分区) 读取 h5000m-kernel.fit 并 bootm，
+#   现有 U-Boot 从 eMMC p4 (kernel 分区) 读取 H5000M-debian13-kernel.bin 并 bootm，
 #   分区布局 / 启动链完全不变（BootROM → BL2 → FIP → U-Boot → p4 FIT → Kernel
 #   → root=PARTLABEL=rootfs → p5 Debian）。
 #
