@@ -30,14 +30,14 @@
 在 **Linux x86_64/arm64 构建机**上执行：
 
 ```bash
-# 一键构建（内核 + rootfs + SD 镜像）
+# 一键构建（内核 + RootFS + 刷写包）
 sudo bash scripts/build.sh --kernel-version 6.18.54 --out /path/to/out
 
 # 分步构建
-bash build/build-kernel.sh --kernel-version 6.18.54 --out /path/to/out
-bash build/make-boot.sh --out /path/to/out/boot      # 生成 boot.scr（U-Boot 兼容启动脚本）
+bash build/build-kernel.sh --kernel-version 6.18.54 --out /path/to/out/kernel
+bash build/make-boot.sh --out /path/to/out/boot     # 生成 boot.scr（备用引导，主引导为 p4 FIT）
 sudo bash build/build-rootfs.sh --out /path/to/out
-sudo bash build/make-sd-image.sh --out /path/to/out --dev /dev/sdX   # 写入 SD 卡
+sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：h5000m-kernel.fit + h5000m-rootfs.ext4.img
 ```
 
 构建机依赖：`git curl xz bison flex libssl-dev bc crossbuild-essential-arm64 debootstrap qemu-user-static u-boot-tools`。
@@ -45,22 +45,40 @@ sudo bash build/make-sd-image.sh --out /path/to/out --dev /dev/sdX   # 写入 SD
 ## 云编译（GitHub Actions）
 
 仓库已配置 `.github/workflows/build.yml`，推送到 `main`/`master` 或手动触发 `workflow_dispatch`
-即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → SD/USB 镜像，
-产物以上传 Artifact 方式交付（含 `initial-credentials.txt` 首次登录凭据）。
+即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → 刷写包
+（`h5000m-kernel.fit` → p4、`h5000m-rootfs.ext4.img` → p5），产物以上传 Artifact 方式交付
+（含 `initial-credentials.txt` 首次登录凭据）。
+
+## 分区与启动（复用现有 OpenWrt 布局，不改 U-Boot）
+
+以设备当前正常运行的 OpenWrt 分区布局 / 启动链为**唯一基准**，仅将 Kernel / RootFS 区域
+转换为 Debian 13 内容。**BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置一律不动**：
+
+```
+p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
+```
+
+- 主引导：现有 U-Boot 从 **p4** 读取 `h5000m-kernel.fit`（FIT）并 `bootm`（与 OpenWrt 同型）；
+- 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**（ext4 Debian 13）；
+- 启动链：BootROM → BL2 → FIP(U-Boot) → p4 FIT → Kernel → p5 Debian，逐级原样复用。
+
+完整方案见 [docs/debian13-partition-plan.md](docs/debian13-partition-plan.md)。
 
 ## 首次启动（兼容当前 U-Boot，不破坏 eMMC 中的 ImmortalWrt）
 
-1. 制作 SD 卡（或 USB）启动盘；`boot.scr` 已内置于 boot 分区，ImmortalWrt/OpenWrt Filogic 系 U-Boot 会自动加载；
-2. 保持 eMMC 原样，从 SD/USB 启动 Debian 13；
-3. U-Boot 已存在，无需改动；首次测试通过 SD/USB/TFTP 引导；
-4. 系统启动后：WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、Wi-Fi 默认开启、风扇自动温控、WebUI 就绪。
-
-固化到 eMMC（可选，请先完整备份）：
+1. 构建刷写包（`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`）；
+2. 进入设备（OpenWrt initramfs / Debian live），**先完整备份**（整盘 dd 或逐分区备份）；
+3. 执行 `scripts/install-emmc.sh`，脚本**仅写 p4（FIT）+ p5（ext4）**，其余区域零写入；
+4. 重启后由现有 U-Boot 直接引导 Debian 13；WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、
+   Wi-Fi 默认开启、风扇自动温控、WebUI 就绪；
+5. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）。
 
 ```bash
-# 在 H5000M 上（Debian 已启动）或 USB live 环境中执行
-sudo bash scripts/install-emmc.sh --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
-    --boot-dir out/boot --kernel-dir out/kernel --dev /dev/mmcblk0
+# 在 H5000M 上（OpenWrt initramfs / Debian live / 已启动的 Debian）执行
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit out/h5000m-kernel.fit \
+  --rootfs-img out/h5000m-rootfs.ext4.img \
+  --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 ```
 
 详见 [docs/first-boot.md](docs/first-boot.md)。
@@ -74,17 +92,18 @@ sudo bash scripts/install-emmc.sh --rootfs out/rootfs/debian13-arm64-rootfs.tar.
 ├── docs/                        # 文档
 │   ├── architecture.md          # 架构与网络职责
 │   ├── hardware.md              # 硬件适配
+│   ├── debian13-partition-plan.md # 分区方案（复用现有 eMMC 布局）
 │   ├── build-guide.md           # 构建指南
-│   ├── first-boot.md            # 首次启动
+│   ├── first-boot.md            # 首次启动（仅写 p4/p5）
 │   └── troubleshooting.md       # 故障排查
 ├── dts/                         # H5000M 设备树（已验证，作为硬件参考）
 ├── boot/
-│   └── boot.cmd                 # U-Boot 启动脚本源文件（编译为 boot.scr，兼容当前 U-Boot）
+│   └── boot.cmd                 # U-Boot 备用引导脚本源文件（编译为 boot.scr）
 ├── build/
 │   ├── build-kernel.sh          # 内核构建（6.18.54 + ImmortalWrt 补丁集）
 │   ├── build-rootfs.sh          # Debian 13 ARM64 rootfs 构建
-│   ├── make-boot.sh             # 生成 boot.scr（U-Boot 启动脚本）
-│   ├── make-sd-image.sh         # SD/USB 镜像制作
+│   ├── make-boot.sh             # 生成 boot.scr（备用引导）
+│   ├── make-sd-image.sh         # 生成刷写包（p4 FIT + p5 ext4 镜像）
 │   ├── kernel-conf/             # 内核 defconfig 片段
 │   └── rootfs/
 │       └── packages.list        # Debian 13 软件包清单
@@ -104,18 +123,23 @@ sudo bash scripts/install-emmc.sh --rootfs out/rootfs/debian13-arm64-rootfs.tar.
 ├── scripts/
 │   ├── build.sh                 # 一键构建入口
 │   ├── fetch-firmware.py        # 固件获取（跨平台）
-│   └── install-emmc.sh          # eMMC 刷入脚本（兼容当前 U-Boot 启动）
+│   └── install-emmc.sh          # eMMC 刷入脚本（仅写 p4/p5，兼容当前 U-Boot）
 └── .github/workflows/build.yml  # GitHub Actions 云编译
 ```
 
 ## 验收标准
 
-1. H5000M 从 SD/USB/TFTP 启动 Debian 13，**不破坏原 eMMC 中 ImmortalWrt**；
-2. 首次启动即完成：WAN DHCP、LAN 192.168.88.1/24 DHCP+DNS+NAT、IPv4/IPv6 forwarding、防火墙、MT7992 Wi-Fi AP（2.4G/5G，与 LAN 同网段）、Linux-Router 与 WebUI 全部自动运行；
+1. H5000M 由现有 U-Boot 从 **p4 FIT** 直接引导 Debian 13，**BL2 / U-Boot / FIP / u-boot-env /
+   factory / GPT / eMMC 硬件配置零改动**，分区表 Start/End/PARTLABEL 与迁移前逐项一致；
+2. 首次启动即完成：WAN DHCP、LAN 192.168.88.1/24 DHCP+DNS+NAT、IPv4/IPv6 forwarding、
+   防火墙、MT7992 Wi-Fi AP（2.4G/5G，与 LAN 同网段）、Linux-Router 与 WebUI 全部自动运行；
 3. LAN/Wi-Fi 客户端自动获取 IP/网关/DNS，直接访问 Internet；
 4. `http://192.168.88.1` 可管理 WAN、LAN、DHCP、DNS、Wi-Fi、防火墙、NAT、路由；
-5. 系统中不存在两个组件同时管理同一网络资源（NetworkManager / hostapd / dnsmasq / nftables 均由 Linux-Router 统一编排）；
-6. 故障隔离：WAN 断网、IPv6 失效、Wi-Fi 失败、单网口异常均不影响其他功能；网络服务崩溃由 systemd 自动恢复。
+5. 系统中不存在两个组件同时管理同一网络资源（NetworkManager / hostapd / dnsmasq / nftables
+   均由 Linux-Router 统一编排）；
+6. 故障隔离：WAN 断网、IPv6 失效、Wi-Fi 失败、单网口异常均不影响其他功能；
+   网络服务崩溃由 systemd 自动恢复；
+7. 回退能力：备份的 p4 / p5 可随时恢复，恢复后 ImmortalWrt 原样可用（p1-p3 未动）。
 
 ## 版本约束
 

@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Hiveton H5000M — Debian 13 一键构建（内核 + RootFS + SD/USB 镜像）
+# Hiveton H5000M — Debian 13 一键构建（内核 + RootFS + 刷写包）
+#
+# 刷写包 = h5000m-kernel.fit（→ p4 kernel 分区）+ h5000m-rootfs.ext4.img（→ p5 rootfs 分区），
+# 完全复用设备现有 OpenWrt 分区布局与启动链（不创建 / 不重建分区表）。
 #
 # 用法：
 #   sudo bash scripts/build.sh \
 #     --out /path/to/out \
 #     --hostname h5000m-debian \
 #     [--kernel-version 6.18.54] \
-#     [--admin-password xxx] [--root-password xxx] \
-#     [--dev /dev/sdX | --img h5000m-debian13-sd.img]
+#     [--admin-password xxx] [--root-password xxx]
 #
 # 选项：
 #   --skip-kernel   跳过内核构建（使用已有 --kernel-dir 或 out/kernel）
 #   --skip-rootfs   跳过 RootFS 构建（使用已有 out/rootfs）
-#   --no-image      不生成镜像
+#   --no-image      不生成刷写包
 #
 # 平台：内核/rootfs/镜像构建均需 Linux（Windows 请用 WSL2，macOS 用 Docker/Linux VM）。
 
@@ -42,8 +44,6 @@ HOSTNAME="h5000m-debian"
 KERNEL_VERSION="6.18.54"
 ADMIN_PASSWORD=""
 ROOT_PASSWORD=""
-DEVICE=""
-IMAGE=""
 SKIP_KERNEL=0
 SKIP_ROOTFS=0
 NO_IMAGE=0
@@ -57,8 +57,6 @@ while [[ $# -gt 0 ]]; do
     --kernel-version)  KERNEL_VERSION="$2"; shift 2 ;;
     --admin-password)  ADMIN_PASSWORD="$2"; shift 2 ;;
     --root-password)   ROOT_PASSWORD="$2"; shift 2 ;;
-    --dev)             DEVICE="$2"; shift 2 ;;
-    --img)             IMAGE="$2"; shift 2 ;;
     --skip-kernel)     SKIP_KERNEL=1; shift ;;
     --skip-rootfs)     SKIP_ROOTFS=1; shift ;;
     --no-image)        NO_IMAGE=1; shift ;;
@@ -100,15 +98,16 @@ else
     die "缺少 $OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst（--skip-rootfs 需要已有 RootFS）"
 fi
 
-# ---------------------------------------------------------------- 3. 镜像
-if [[ "$NO_IMAGE" -eq 0 && ( -n "$DEVICE" || -n "$IMAGE" ) ]]; then
-  log "== 步骤 3/3：生成 SD/USB 镜像 =="
-  IMAGE_ARGS=(--out "$OUT_DIR")
-  [[ -n "$DEVICE" ]] && IMAGE_ARGS+=(--dev "$DEVICE")
-  [[ -n "$IMAGE"  ]] && IMAGE_ARGS+=(--img "$IMAGE")
-  bash "$PROJECT_ROOT/build/make-sd-image.sh" "${IMAGE_ARGS[@]}"
+# ---------------------------------------------------------------- 3. 刷写包（FIT + RootFS ext4 镜像）
+if [[ "$NO_IMAGE" -eq 0 ]]; then
+  log "== 步骤 3/3：生成刷写包（h5000m-kernel.fit + h5000m-rootfs.ext4.img）=="
+  bash "$PROJECT_ROOT/build/make-sd-image.sh" \
+    --out "$OUT_DIR" \
+    --kernel-dir "$KERNEL_DIR" \
+    --rootfs "$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst" \
+    --boot-dir "$OUT_DIR/boot"
 else
-  log "== 步骤 3/3：跳过镜像生成（--no-image 或未指定 --dev/--img）=="
+  log "== 步骤 3/3：跳过刷写包生成（--no-image）=="
 fi
 
 log "全部完成。产物："

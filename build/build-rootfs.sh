@@ -273,10 +273,6 @@ rm -f "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
 
 # ---------------------------------------------------------------- 10. 打包
 log "第 10 步：打包 rootfs"
-# 确保 rootfs 根目录的 fstab 含 /boot（nofail：无独立 boot 分区时静默跳过）
-if ! grep -q "H5000MBOOT" "$ROOTFS_DIR/etc/fstab" 2>/dev/null; then
-  printf "LABEL=H5000MBOOT\t/boot\tvfat\tdefaults,nofail\t0\t2\n" >> "$ROOTFS_DIR/etc/fstab"
-fi
 # 预生成凭据清单副本（供构建机/交付查看，不含密钥文件本身）
 cat > "$OUT_DIR/rootfs/initial-credentials.txt" <<CRED
 root(SSH/串口): $ROOT_PASSWORD

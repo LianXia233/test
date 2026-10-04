@@ -25,9 +25,10 @@
 
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| U-Boot 未自动引导 Debian | boot 分区是否含 `boot.scr` | `ls /boot/boot.scr`；重新运行 `build/make-boot.sh` 并 `scripts/install-emmc.sh` |
-| 手动引导 | 串口进入 U-Boot | `setenv bootargs root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8` → `load mmc 0:1 ${scriptaddr} boot.scr` → `source ${scriptaddr}` |
-| 刷入 eMMC 后无法启动 | 分区表 / boot 文件 | 确认 p1 分区名 `boot`（vfat）、p2 `rootfs`（ext4）；`Image`/DTB 与当前内核匹配；重新执行 `install-emmc.sh`（先备份！） |
+| U-Boot 未自动引导 Debian | p4 是否已写入 FIT；p5 是否已写入 Debian | `dd if=/dev/mmcblk0p4 bs=1 count=4 | od -An -tx1` 应为 `d0 0d fe ed`；重新运行 `scripts/install-emmc.sh`（先备份！） |
+| 手动引导（主路径，p4 FIT） | 串口进入 U-Boot | `setenv bootargs 'root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'` → `load mmc 0:4 0x46000000` → `bootm 0x46000000` |
+| 手动引导（兜底，p5 /boot） | 串口进入 U-Boot | `load mmc 0:5 0x47000000 /boot/boot.scr` → `source 0x47000000` |
+| 刷入 eMMC 后无法启动 | 分区表 / FIT / rootfs | `sgdisk -p /dev/mmcblk0` 确认 p4 PARTLABEL=`kernel`、p5 PARTLABEL=`rootfs`；p4 为 FIT（bootm 加载）、p5 为 ext4（PARTLABEL=rootfs 挂载）；`Image`/DTB 与当前内核匹配 |
 | 想恢复 ImmortalWrt | 备份文件 | `dd if=emmc-backup.img of=/dev/mmcblk0 bs=4M conv=fsync` |
 
 ## 4. WAN
@@ -84,12 +85,11 @@ systemctl list-units --all | grep -Ei 'network|dnsmasq|hostapd|resolved|dhcpcd|n
 # 先全盘备份 eMMC
 dd if=/dev/mmcblk0 of=/path/to/backup/mmcblk0.img bs=4M conv=sync status=progress
 
-# 方式一：install-emmc.sh（推荐，自动分区/刷写/放 boot.scr）
-sudo bash scripts/install-emmc.sh --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
-    --boot-dir out/boot --kernel-dir out/kernel --dev /dev/mmcblk0
-
-# 方式二：将 SD 镜像写入 eMMC（危险！会覆盖 ImmortalWrt）
-sudo bash build/make-sd-image.sh --out /path/to/out --dev /dev/mmcblk0
+# 仅写 p4（FIT）+ p5（ext4），其余区域（GPT / p1-p3 / U-Boot / eMMC 硬件配置）不动
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit out/h5000m-kernel.fit \
+  --rootfs-img out/h5000m-rootfs.ext4.img \
+  --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 ```
 
 恢复 ImmortalWrt：`dd if=backup.img of=/dev/mmcblk0 bs=4M conv=fsync`。

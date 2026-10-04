@@ -67,9 +67,9 @@ jobs:
             out/boot/boot.cmd
           retention-days: 7
 
-  # ============================================================ 2. RootFS + 镜像
+  # ============================================================ 2. RootFS + 刷写包
   build-image:
-    name: RootFS + SD 镜像（Debian 13）
+    name: RootFS + 刷写包（FIT / ext4，复用现有 eMMC 分区布局）
     needs: build-kernel
     runs-on: ubuntu-24.04
     steps:
@@ -81,7 +81,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             debootstrap qemu-user-static binfmt-support rsync zstd \
-            parted dosfstools e2fsprogs u-boot-tools
+            xz-utils e2fsprogs u-boot-tools
           # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
           sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
 
@@ -107,12 +107,14 @@ jobs:
             --hostname h5000m-debian \
             --kernel-dir out/kernel
 
-      - name: 生成 SD / USB 启动镜像
+      - name: 生成刷写包（p4 FIT + p5 RootFS ext4 镜像，复用现有分区布局）
         run: |
           sudo bash build/make-sd-image.sh \
             --out out \
-            --img h5000m-debian13-sd.img \
-            --size 2048
+            --kernel-dir out/kernel \
+            --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
+            --boot-dir out/boot \
+            --rootfs-size 4096
 
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
@@ -121,7 +123,8 @@ jobs:
           path: |
             out/rootfs/debian13-arm64-rootfs.tar.zst
             out/rootfs/initial-credentials.txt
-            out/h5000m-debian13-sd.img.gz
+            out/h5000m-kernel.fit
+            out/h5000m-rootfs.ext4.img
             out/kernel/Image
             out/kernel/mt7987a-hiveton-h5000m.dtb
             out/kernel/modules.tar.zst

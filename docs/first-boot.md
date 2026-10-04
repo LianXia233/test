@@ -1,73 +1,81 @@
-# 首次启动指南（不破坏 eMMC 中的 ImmortalWrt）
+# 首次启动指南（复用现有 eMMC 分区，U-Boot 不改）
 
-H5000M 已有可工作的 U-Boot。**不修改 U-Boot**，首次测试优先从 **USB / TFTP** 引导，
-保持 eMMC 中的 ImmortalWrt 原样，可随时回退。
+H5000M 已有可工作的 U-Boot（p3 `fip`）。**不修改 U-Boot / GPT / p1-p3 / eMMC 硬件配置**，
+Debian 13 与 OpenWrt 共用完全相同的分区布局与启动链：
+
+```
+p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
+```
+
+- 主引导：现有 U-Boot 从 **p4** 读取 `h5000m-kernel.fit`（FIT）并 `bootm`；
+- 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**。
+
+完整方案见 [docs/debian13-partition-plan.md](debian13-partition-plan.md)。
 
 > 硬件说明：H5000M 的 DTS 仅定义 eMMC（`mmc0`，non-removable），**没有 SD 卡槽**。
-> 因此首启介质为 USB 盘或 TFTP；若原厂 U-Boot 支持 USB 启动（`usb start` / `usbboot`），
-> 用 USB 盘最方便。
+> 刷写/启动介质一律为 eMMC 本身；如需先在 USB/TFTP 上试运行，见第 6 节备用方案。
 
-## 1. 准备启动介质
+## 1. 准备工作（构建产物）
 
-### 方式 A：USB 盘（推荐，若 U-Boot 支持 USB）
+在 Linux 构建机生成刷写包（见 [docs/build-guide.md](build-guide.md)）：
+
+```
+out/h5000m-kernel.fit        # → p4
+out/h5000m-rootfs.ext4.img   # → p5
+out/rootfs/initial-credentials.txt
+```
+
+## 2. 备份（必须先做）
+
+进入设备（OpenWrt initramfs / Debian live / 已启动的 Debian），先完整备份：
 
 ```bash
-# 生成镜像文件（无需真实 U 盘）
-sudo bash build/make-sd-image.sh --out /path/to/out --img h5000m-debian13-usb.img
-# 写入 USB 盘（会覆盖目标盘全部数据！）
-sudo dd if=/path/to/out/h5000m-debian13-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
+# 整盘备份（8 GiB，最保险）
+dd if=/dev/mmcblk0 of=/tmp/emmc-full.img bs=4M conv=fsync status=progress
+
+# 或仅备份关键区域 + 将被覆盖的 p4/p5（更小）
+mkdir -p /tmp/bk
+for i in 1 2 3 4 5; do
+  dd if=/dev/mmcblk0p$i of=/tmp/bk/p$i.img bs=4M conv=fsync status=progress
+done
+sgdisk --backup=/tmp/bk/gpt.bin /dev/mmcblk0
 ```
 
-镜像布局（GPT）：
+备份文件务必拷贝到 **PC / U 盘**，不要只放在 eMMC 上。
 
-```
-p1  vfat   64MiB  LABEL=H5000MBOOT  分区名 boot    -> Image / dtb / boot.scr / extlinux
-p2  ext4   剩余   LABEL=H5000MROOT  分区名 rootfs  -> Debian 13 rootfs
-```
+## 3. 刷写 Debian 到 eMMC（仅写 p4 / p5）
 
-boot 分区中的 **`boot.scr`**（U-Boot 脚本，由 `build/make-boot.sh` 从 `boot/boot.cmd` 生成）
-兼容 ImmortalWrt / OpenWrt Filogic 系列 U-Boot 的自动加载流程：U-Boot 会优先执行
-`boot.scr`，按 **eMMC → USB** 顺序从各设备 boot 分区加载 `Image` + DTB 后 `booti` 启动。
+```bash
+# 方法一：ext4 镜像（推荐）
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --rootfs-img /path/to/out/h5000m-rootfs.ext4.img \
+  --dev /dev/mmcblk0 --yes
 
-内核通过 `root=PARTLABEL=rootfs` 定位根文件系统（与 H5000M DTS bootargs 一致）。
-
-### 方式 B：TFTP（需确认原厂 U-Boot 的 tftpboot 支持）
-
-1. 搭建 TFTP 服务器，放置：
-
-```
-/tftpboot/
-  Image                    # 内核
-  mt7987a-hiveton-h5000m.dtb
+# 方法二：rootfs tar.zst
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
+  --dev /dev/mmcblk0 --yes
 ```
 
-2. 串口进入 U-Boot，执行（示例，以实际 U-Boot 环境变量为准；`booti` 为 ARM64 Image 启动）：
+脚本只做三件事：**校验现有分区表（只读）→ 写 p4（FIT）→ 写 p5（ext4）→ 校验**。
+不会 `mklabel`、不会重排分区、不会触碰 p1-p3 / GPT / U-Boot / eMMC 硬件配置。
+
+## 4. 启动流程
 
 ```
-setenv ipaddr 192.168.1.2
-setenv serverip 192.168.1.1
-setenv bootargs console=ttyS0,115200n8 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf
-tftpboot 0x46000000 Image
-tftpboot 0x44000000 mt7987a-hiveton-h5000m.dtb
-booti 0x46000000 - 0x44000000
-```
-
-> TFTP 只加载内核/DTB；RootFS 仍需放在 USB / eMMC 上（RootFS 解压方式见第 6 节）。
-> 具体加载地址以原厂 U-Boot 内存布局为准。
-
-## 2. 启动流程
-
-```
-上电 → U-Boot → 从 USB/TFTP 读取 Image + DTB → Linux 6.18
-  → Debian 13 rootfs（systemd）
+上电 → BootROM → BL2 → FIP(U-Boot) → U-Boot 读 p4 FIT → bootm
+  → Linux 6.18 → root=PARTLABEL=rootfs 挂载 p5 → Debian 13（systemd）
   → NetworkManager（WAN=eth1 DHCP / LAN=eth0 桥接）
   → h5000m-router-init（创建 br-lan / WAN / Wi-Fi 连接，装配 nftables）
   → dnsmasq（DHCP + DNS + IPv6 RA，192.168.88.1:53）
+  → h5000m-fancontrol（PWM 风扇温控）
   → Linux-Router（router-panel-agent + router-panel WebUI）
   → http://192.168.88.1
 ```
 
-## 3. 默认状态（首次启动即生效）
+## 5. 默认状态（首次启动即生效）
 
 | 项目 | 默认值 |
 | --- | --- |
@@ -80,7 +88,7 @@ booti 0x46000000 - 0x44000000
 | WebUI | http://192.168.88.1 （admin / 见 /etc/h5000m-initial-credentials） |
 | SSH | 端口 22，root / 见 /etc/h5000m-initial-credentials |
 
-## 4. 首次登录
+## 6. 首次登录
 
 ```bash
 # 串口或 SSH 登录，读取初始凭据（root 与 WebUI 密码均在构建时随机生成并写入该文件）
@@ -90,69 +98,79 @@ cat /etc/h5000m-initial-credentials
 - WebUI：浏览器打开 http://192.168.88.1 ，用户名 `admin`；
 - 登录后请立即在 WebUI「系统 → 安全」修改密码，并 `passwd root` 修改 root 密码。
 
-## 5. 回退到 ImmortalWrt
-
-- USB 启动时不触碰 eMMC 写操作，原 eMMC 中的 ImmortalWrt 不受影响；
-- 拔掉 USB 后上电，U-Boot 回到默认引导顺序（eMMC）即可恢复 ImmortalWrt；
-- 若要固化 Debian 到 eMMC，请先完整备份 eMMC（`dd if=/dev/mmcblk0 of=emmc-backup.img bs=4M conv=fsync`），再按第 6 节操作。
-
-## 6. 安装 Debian 到 eMMC（可选，需先备份）
-
-> 固化会覆盖 eMMC 中原 ImmortalWrt，**务必先完整备份**：
-> `dd if=/dev/mmcblk0 of=emmc-backup.img bs=4M conv=fsync`
-
-### 方式 A：使用 install-emmc.sh（推荐）
-
-在 H5000M 上（Debian 已从 USB 启动）或 USB live 环境执行：
+## 7. 验证
 
 ```bash
-sudo bash scripts/install-emmc.sh \
-  --rootfs debian13-arm64-rootfs.tar.zst \
-  --boot-dir out/boot --kernel-dir out/kernel \
-  --dev /dev/mmcblk0 [--backup /path/to/emmc-backup.img] [--yes]
+cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
+findmnt /                   # /dev/mmcblk0p5 ext4
+lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
+ip -br addr                 # eth0 / eth1 / br-lan
+systemctl status h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+curl -sI http://192.168.88.1
 ```
 
-脚本自动完成：GPT 分区（p1 boot vfat + p2 rootfs ext4）→ 解压 rootfs →
-写入 boot.scr / Image / DTB → 可选 fw_setenv 设置 U-Boot 环境变量
-（`bootcmd` 优先 `load mmc 0:1 ${scriptaddr} boot.scr; source ${scriptaddr}`）。
-
-### 方式 B：手动
+## 8. 回退到 ImmortalWrt
 
 ```bash
-sudo mkdir -p /mnt/h5000m
-# eMMC 需要至少 2 个分区：p1 boot(vfat) + p2 rootfs(ext4, 分区名 rootfs)
-# 分区完成后：
-sudo tar --numeric-owner --xattrs --acls -xJf debian13-arm64-rootfs.tar.zst -C /mnt/h5000m
-sudo cp -a /mnt/h5000m/boot/. /boot-partition/
+# 恢复整盘
+dd if=/tmp/emmc-full.img of=/dev/mmcblk0 bs=4M conv=fsync status=progress
+
+# 或仅恢复 p4/p5（若 p1-p3 与 GPT 未被改动）
+dd if=/tmp/bk/p4.img of=/dev/mmcblk0p4 bs=4M conv=fsync status=progress
+dd if=/tmp/bk/p5.img of=/dev/mmcblk0p5 bs=4M conv=fsync status=progress
 ```
 
-分区名/标签要求：
+## 9. 备用方案：USB / TFTP 试运行（不破坏 eMMC）
 
-```
-p1: 分区名 boot    （任意 vfat，建议 LABEL=H5000MBOOT）→ 放 Image / dtb / boot.scr / extlinux
-p2: 分区名 rootfs  （ext4，建议 LABEL=H5000MROOT）     → 解压 rootfs
-```
+> 若想在固化前先验证 Debian，可从 USB / TFTP 引导；原厂 U-Boot 需支持相应启动方式。
 
-### 手动引导（U-Boot 控制台）
+### 方式 A：USB 盘
 
-若 U-Boot 未自动加载 boot.scr，可手动执行：
-
-```
-setenv bootargs root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
-setenv scriptaddr 0x47000000
-load mmc 0:1 ${scriptaddr} boot.scr
-source ${scriptaddr}
-```
-
-## 7. 常见检查命令
+> 默认刷写包（`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`）面向 **eMMC 复用现有分区**，
+> 不再生成通用 USB/SD 镜像。如需 USB 试运行，按下述手动步骤制作（仅用于临时验证盘）：
 
 ```bash
-ip -br addr                 # 查看接口与地址
-ip route                    # 默认路由
-nft list ruleset            # 防火墙规则
-systemctl status dnsmasq router-panel router-panel-agent h5000m-router-init
-nmcli connection show       # WAN / br-lan / H5000M-AP-2G / H5000M-AP-5G
-iw dev                      # Wi-Fi 接口
-cat /sys/class/thermal/thermal_zone*/temp
-cat /etc/h5000m-initial-credentials
+# 在 PC 上制作 USB 试运行盘（警告：以下命令仅针对临时 USB 盘 /dev/sdX，
+# 绝不可以在设备的 eMMC /dev/mmcblk0 上执行！）
+sudo sgdisk --zap-all /dev/sdX
+sudo sgdisk -n 1:0:0 -t 1:8300 -c 1:rootfs /dev/sdX
+sudo mkfs.ext4 -L rootfs /dev/sdX1
+sudo mount /dev/sdX1 /mnt/usb
+sudo tar --numeric-owner --xattrs --acls -I zstd \
+  -xf /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst -C /mnt/usb
+sudo cp /path/to/out/kernel/Image /mnt/usb/boot/Image
+sudo cp /path/to/out/kernel/mt7987a-hiveton-h5000m.dtb /mnt/usb/boot/
+sudo cp /path/to/out/boot/boot.scr /mnt/usb/boot/ 2>/dev/null || true
+sync && sudo umount /mnt/usb
+```
+
+> 要求 U-Boot 支持 USB 启动（`bootflow scan` 自动尝试 `/boot/boot.scr` / extlinux）。
+> 若 U-Boot 不支持 USB 引导，请使用方式 B（TFTP）。
+
+### 方式 B：TFTP（需确认原厂 U-Boot 支持）
+
+```
+setenv ipaddr 192.168.1.2
+setenv serverip 192.168.1.1
+setenv bootargs console=ttyS0,115200n8 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf
+tftpboot 0x46000000 Image
+tftpboot 0x44000000 mt7987a-hiveton-h5000m.dtb
+booti 0x46000000 - 0x44000000
+```
+
+> TFTP 只加载内核/DTB；RootFS 仍需在 USB / eMMC 上（解压方式见 build-guide）。
+
+## 10. 手动引导（U-Boot 控制台，应急）
+
+若自动引导失败，串口进入 U-Boot 手动引导：
+
+```bash
+# 主路径：从 p4 加载 FIT 并 bootm（与 OpenWrt 相同）
+setenv bootargs 'root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
+load mmc 0:4 0x46000000
+bootm 0x46000000
+
+# 兜底路径：从 p5 的 /boot 加载备用镜像（ext4，distro boot 用）
+load mmc 0:5 0x47000000 /boot/boot.scr
+source 0x47000000
 ```

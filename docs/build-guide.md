@@ -4,7 +4,11 @@
 
 1. Linux 6.18.x 内核（`Image` + H5000M `dtb` + `modules`）
 2. Debian 13 (Trixie) ARM64 RootFS
-3. SD / USB 启动镜像（可选；H5000M 无 SD 卡槽，写入 USB 盘即可）
+3. **刷写包**：`h5000m-kernel.fit`（写入 p4 kernel 分区）+ `h5000m-rootfs.ext4.img`（写入 p5 rootfs 分区）
+
+> **分区原则**：完全复用 H5000M 现有 OpenWrt 的 eMMC 分区布局与启动链
+> （BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置一律不动）。
+> 完整方案见 [docs/debian13-partition-plan.md](debian13-partition-plan.md)。
 
 ## 1. 构建机要求
 
@@ -20,7 +24,7 @@ sudo apt-get install -y \
   crossbuild-essential-arm64 \
   debootstrap qemu-user-static \
   u-boot-tools \
-  kmod cpio rsync parted dosfstools \
+  kmod cpio rsync \
   python3
 ```
 
@@ -31,8 +35,7 @@ git clone <本项目> && cd <本项目>
 sudo bash scripts/build.sh \
   --kernel-version 6.18.54 \
   --out /path/to/out \
-  --hostname h5000m-debian \
-  --img h5000m-debian13-usb.img
+  --hostname h5000m-debian
 ```
 
 > LAN 网段固定为 192.168.88.1/24（见 `rootfs-overlay/etc/default/h5000m-router`），
@@ -49,8 +52,10 @@ kernel/
 rootfs/
   debian13-arm64-rootfs.tar.zst
   initial-credentials.txt     # 首次登录凭据（chmod 600）
-image/
-  h5000m-debian13-sd.img.gz   # 写入 USB/SD 盘即可启动
+boot/
+  boot.scr                    # 备用引导脚本（distro boot 兜底）
+h5000m-kernel.fit             # → 刷入 p4（kernel 分区，U-Boot bootm 直接加载）
+h5000m-rootfs.ext4.img        # → 刷入 p5（rootfs 分区，ext4）
 ```
 
 ## 3. 分步构建
@@ -82,7 +87,8 @@ bash build/build-kernel.sh \
 ```bash
 sudo bash build/build-rootfs.sh \
   --out /path/to/out \
-  --hostname h5000m
+  --hostname h5000m \
+  --kernel-dir /path/to/out/kernel
 ```
 
 脚本流程：
@@ -92,66 +98,72 @@ sudo bash build/build-rootfs.sh \
 3. 拷贝 `qemu-aarch64-static`，`chroot` 内完成第二阶段；
 4. 配置 Debian 13 软件源（`deb.debian.org` stable），`apt-get update`；
 5. 安装 `build/rootfs/packages.list` 中全部软件包；
-6. 应用 `rootfs-overlay/` 覆盖层（网络配置、Linux-Router 集成、systemd 服务）；
+6. 应用 `rootfs-overlay/` 覆盖层（网络配置、Linux-Router 集成、systemd 服务、`/etc/fstab` 使用 `PARTLABEL=rootfs`）；
 7. 集成 Linux-Router 到 `/opt/linux-router`，预初始化运行账号/数据目录/初始密码；
 8. 安装内核产物到 `/boot`、模块到 `/lib/modules`；
 9. 配置 systemd 服务 enable、SSH、locale、首次登录凭据；
 10. 输出 `debian13-arm64-rootfs.tar.zst` 与 `initial-credentials.txt`。
 
-### 3.3 SD / USB 镜像
+### 3.3 刷写包（FIT + RootFS ext4 镜像）
 
 ```bash
-# 生成镜像文件（推荐，可先校验再写入）
-sudo bash build/make-sd-image.sh --out /path/to/out --img h5000m-debian13-usb.img
-# 写入 USB 盘（危险操作，会覆盖目标盘全部数据）
-sudo dd if=/path/to/out/h5000m-debian13-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
+sudo bash build/make-sd-image.sh \
+  --out /path/to/out \
+  --kernel-dir /path/to/out/kernel \
+  --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
+  --boot-dir /path/to/out/boot \
+  --rootfs-size 4096
 ```
 
-> H5000M 无 SD 卡槽（DTS 仅定义 eMMC），USB 盘优先；若原厂 U-Boot 不支持 USB 启动，请改用 TFTP（见 `docs/first-boot.md`）。
-
-分区布局（GPT）：
+输出（对应现有 eMMC 分区，**不创建任何分区表**）：
 
 ```
-p1  vfat  64MB   /boot  （Image、dtb、boot.scr、extlinux.conf）
-p2  ext4  剩余    /      （Debian 13 rootfs）
+out/h5000m-kernel.fit        → dd 到 p4（kernel，30 MiB）
+out/h5000m-rootfs.ext4.img   → dd 到 p5（rootfs，~7.24 GiB）
 ```
 
-boot 分区中的 **`boot.scr`**（U-Boot 脚本）是优先引导入口：ImmortalWrt / OpenWrt
-Filogic 系列 U-Boot 会按 `boot.scr -> extlinux (distro boot)` 顺序尝试，因此
-**无需修改 U-Boot 本体**即可从 eMMC / USB 引导 Debian。
+- `h5000m-kernel.fit`：内核 LZMA 压缩 + H5000M DTB 的 FIT 镜像，**与 OpenWrt 同型**
+  （U-Boot 现有 `bootm` 流程原样加载），p4 无需文件系统；
+- `h5000m-rootfs.ext4.img`：ext4 根文件系统镜像，内含 `/boot` 备用引导
+  （`boot.scr` / `extlinux.conf` / `Image` / DTB，供 distro boot 兜底）。
 
-### 3.4 U-Boot 启动脚本（boot.scr）
+### 3.4 U-Boot 启动脚本（备用引导，可选）
 
 ```bash
 # 由 boot/boot.cmd 编译生成 boot.scr（依赖 u-boot-tools 的 mkimage）
 bash build/make-boot.sh --out /path/to/out/boot
 ```
 
-产物：
+产物：`out/boot/boot.scr` + `out/boot/boot.cmd`。
 
-```
-out/boot/boot.scr     # U-Boot 脚本二进制（放入 boot 分区）
-out/boot/boot.cmd     # 脚本源文件副本
-```
+> **主引导不依赖 boot.scr**：现有 U-Boot 直接从 p4 加载 FIT 并 `bootm`。
+> `boot.scr` 仅作为 distro boot（`bootflow scan`）U-Boot 的兜底路径，
+> 由 `make-sd-image.sh` 自动放入 rootfs 的 `/boot/boot.scr`。
 
-`boot.cmd` 默认尝试顺序：**eMMC (mmc 0:1) → USB (usb 0:1 / usb 1:1)**，
-每个设备从 GPT 分区 1（vfat）加载 `Image` + `mt7987a-hiveton-h5000m.dtb` 后 `booti` 启动。
-`make-sd-image.sh` 在制作镜像时若发现 `out/boot/boot.scr` 会自动拷入 boot 分区。
-
-### 3.5 eMMC 刷入（在目标设备上执行）
+### 3.5 eMMC 刷入（在目标设备上执行，仅写 p4 / p5）
 
 ```bash
+# 方法一：使用 ext4 镜像（推荐）
 sudo bash scripts/install-emmc.sh \
-  --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
-  --boot-dir out/boot --kernel-dir out/kernel \
-  --dev /dev/mmcblk0
+  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --rootfs-img /path/to/out/h5000m-rootfs.ext4.img \
+  --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
+
+# 方法二：使用 rootfs tar.zst（脚本内部挂载解压）
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit /path/to/out/h5000m-kernel.fit \
+  --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
+  --dev /dev/mmcblk0 [--yes]
 ```
 
-- GPT 分区：p1 boot（vfat，64MiB）+ p2 rootfs（ext4，剩余）
-- 可选 `--backup <文件>` 先整盘备份 eMMC
-- 若设备上有 `fw_setenv`（u-boot-tools），脚本会顺带设置 U-Boot 环境变量
-  （`bootcmd` 优先加载 boot.scr）；没有则提示在 U-Boot 控制台手动引导。
-- **先备份 eMMC 再刷入**（原 ImmortalWrt 将被覆盖）。
+`install-emmc.sh` 会：
+
+1. **只读**读取现有 GPT，校验 p4（kernel）/ p5（rootfs）存在且 p5 的 PARTLABEL 为 `rootfs`；
+2. **绝不**执行 `mklabel` / `mkpart` / GPT 写操作 / `mmc` 写操作，**绝不**触碰 p1-p3；
+3. 可选备份（`--backup-full` 整盘 / `--backup-p45` 仅 p4+p5）；
+4. 写入 p4（FIT）+ p5（ext4），完成后回读校验 FIT 魔数与 e2fsck。
+
+> 必须在 **OpenWrt initramfs / Debian live / 已启动的 Debian** 中执行（p5 未挂载状态）。
 
 ## 3.6 GitHub Actions 云编译
 
@@ -159,9 +171,11 @@ sudo bash scripts/install-emmc.sh \
 `.github/workflows/build.yml`：
 
 1. **build-kernel**：ubuntu-24.04 上编译 6.18 内核（含源码缓存）+ 生成 boot.scr，上传 artifact；
-2. **build-image**：下载内核产物，debootstrap 构建 Debian 13 RootFS，生成 SD/USB 镜像，上传 artifact。
+2. **build-image**：下载内核产物，debootstrap 构建 Debian 13 RootFS，生成刷写包
+   （`h5000m-kernel.fit` + `h5000m-rootfs.ext4.img`），上传 artifact。
 
-产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`（rootfs、img.gz、内核、boot.scr、初始凭据）。
+产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`
+（rootfs、kernel.fit、rootfs.ext4.img、内核、boot.scr、初始凭据）。
 
 ## 4. 内核版本说明
 
@@ -184,6 +198,8 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware
 
 - [ ] `Image` 为 arm64 且含 MT7987A 驱动（`strings Image | grep -i mt7987`）
 - [ ] `mt7987a-hiveton-h5000m.dtb` 生成成功
+- [ ] `h5000m-kernel.fit` 首 4 字节为 FIT 魔数 `d0 0d fe ed`，且体积 < 30 MiB
+- [ ] `h5000m-rootfs.ext4.img` 可 `e2fsck -fn` 通过
 - [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 与 `mt7987/` 固件齐全
 - [ ] rootfs 内 Linux-Router 服务已 enable
-- [ ] SD 镜像可被 `fdisk -l` 识别且分区正确
+- [ ] rootfs 内 `/etc/fstab` 根挂载为 `PARTLABEL=rootfs`

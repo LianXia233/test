@@ -4,6 +4,41 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — 分区方案重构：完整复用现有 OpenWrt eMMC 布局（不重建 / 不重排）
+
+**核心原则落地**：以设备当前正常运行的 OpenWrt 分区布局 / 启动链 / DTS 为唯一基准，
+BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置 **零写入、零改动**；
+Debian 13 仅复用并替换 kernel（p4）与 rootfs（p5）两个分区的**内容**。
+
+**新增：**
+
+- `docs/debian13-partition-plan.md`：完整分区方案
+  - 当前 OpenWrt 分区表（p1 u-boot-env 1MiB / p2 factory 2MiB / p3 fip 4MiB /
+    p4 kernel 30MiB / p5 rootfs ~7.2GiB）与启动链对应关系（BootROM → BL2 → FIP →
+    U-Boot 读 p4 FIT → bootm → root=PARTLABEL=rootfs 挂载 p5）
+  - 不可修改区域清单；Debian 13 最终分区表（与 OpenWrt 完全一致，零结构变化）
+  - U-Boot 加载 Debian Kernel 的方式（p4 FIT + bootm，与 OpenWrt 同型，无需 EFI/GRUB）
+  - 内核定位 RootFS 的 bootargs、`/etc/fstab`、覆盖区域、备份方案、GPT 备份损坏分析与处理、
+    刷写后验证方案
+
+**修改（对齐新分区方案）：**
+
+- `scripts/install-emmc.sh`：**不再创建/重建 GPT**（删除 mklabel/mkpart），仅：
+  只读校验现有分区表（含 p5 PARTLABEL=rootfs 校验）→ 写 p4（FIT）→ 写 p5（ext4 /
+  解压 tar.zst）→ 回读校验；支持 `--kernel-fit` / `--rootfs` / `--rootfs-img` /
+  `--backup-full` / `--backup-p45`；绝不触碰 p1-p3 / GPT / eMMC 硬件配置
+- `boot/boot.cmd`：备用引导脚本，主引导为 p4 FIT（现有 U-Boot bootm，无需本脚本）；
+  兜底路径从 p5（mmc 0:5）`/boot` 加载 Image + DTB 后 booti
+- `build/make-sd-image.sh`：改为生成**刷写包**（`h5000m-kernel.fit` → p4、
+  `h5000m-rootfs.ext4.img` → p5），不再创建分区表 / 不写块设备；
+  FIT 内核 LZMA 压缩（p4 仅 30MiB），与 OpenWrt 同型；rootfs 内预置 `/boot` 备用引导文件
+- `scripts/build.sh`：一键构建步骤 3 改为生成刷写包（移除废弃的 `--dev/--img` 参数）
+- `.github/workflows/build.yml`：构建步骤改为生成 `h5000m-kernel.fit` +
+  `h5000m-rootfs.ext4.img` 刷写包产物
+- 文档：README（分区与启动 / 首次启动 / 目录结构 / 验收标准）、
+  docs/build-guide.md（刷写包生成与 eMMC 刷入）、docs/first-boot.md（仅写 p4/p5 流程、
+  USB 试运行改为手动制作）、docs/troubleshooting.md（U-Boot 引导 / eMMC 刷入排查对齐新流程）
+
 ### 2026-10-04 — 风扇温控 + U-Boot 兼容 + eMMC 刷入 + GitHub Actions 云编译
 
 **风扇控制（参考 luci-app-h5000m-fancontrol 行为）：**
