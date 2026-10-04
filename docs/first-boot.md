@@ -87,6 +87,7 @@ sudo bash scripts/install-emmc.sh \
 | Wi-Fi | 双频 AP（NM 连接，桥接进 br-lan）：2.4G / 5G 同名 `OWRT`，密码 `12345678` |
 | WebUI | http://192.168.88.1 （admin / password，见 /etc/h5000m-initial-credentials） |
 | SSH | 端口 22，root / password（仅局域网访问，WAN 侧不放行；见 /etc/h5000m-initial-credentials） |
+| LED | 参考官方固件：启动早期蓝色状态灯快闪；系统就绪后熄灭（h5000m-led.service 编排） |
 
 ## 6. 首次登录
 

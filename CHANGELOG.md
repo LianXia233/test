@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 2026-10-04 — LED 控制：复刻官方 OpenWrt 固件方案
+
+- 实测官方固件 `H5000M-.-sysupgrade.bin`（diag.sh / leds.sh / 内核 FIT DTB）：
+  - 官方 DTS 与我们一致：`led-3=amber:wlan-2ghz`、`led-4=blue:wlan-5ghz`（gpio-leds，GPIO3/4 active-low）
+  - aliases：`led-boot=led-4`（蓝）、`led-failsafe/upgrade=led-3`（琥珀）；系统就绪后无运行 LED
+- 新增 `/usr/local/sbin/h5000m-led.sh`：复刻官方 get_dt_led 解析（label→chan-name→color:function）
+  与 set_state 行为（boot=蓝灯 100/100 快闪、failsafe=琥珀 50/50、upgrade=琥珀 200/200、done=熄灯）
+- 新增 systemd 服务（rootfs-overlay/etc/systemd/system/）：
+  - `h5000m-led-boot.service`：启动早期蓝灯快闪（内核 timer trigger，oneshot 退出仍闪烁）
+  - `h5000m-led.service`：multi-user.target 后就绪熄灯（done 状态）
+- 同步更新：docs/hardware.md（LED 章节）、docs/first-boot.md（默认状态表）
+
 ### 2026-10-04 — 默认配置统一：SSH 局域网访问 + 固定默认密码 + 同名双频 WiFi
 
 - Releases 编译产物默认即为「系统默认配置」：

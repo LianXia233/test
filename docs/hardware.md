@@ -12,6 +12,10 @@
 
 - GPIO 按键：reset = GPIO1，wps = GPIO0（gpio-keys）
 - LED：GPIO3（amber，WLAN 2.4G）、GPIO4（blue，WLAN 5G）（gpio-leds）
+  - 软件可控制两个指示灯（GPIO3/GPIO4）；LED1（5G 模块）、LED5（电源）为硬件直控
+  - DTS aliases：`led-boot=led-4`（蓝）、`led-failsafe/upgrade=led-3`（琥珀），与官方固件一致
+  - 控制脚本：`/usr/local/sbin/h5000m-led.sh`（复刻官方 diag.sh/leds.sh 方案）
+  - systemd：`h5000m-led-boot.service`（启动早期蓝灯快闪）→ `h5000m-led.service`（就绪后熄灯）
 - 网络：
   - `gmac0`：2500base-x，PHY handle = `phy0`（RTL8221B，mdio addr 1，GPIO42 reset）
   - `gmac1`：internal，PHY handle = `phy1`（内置 2.5G PHY，mdio addr 15）
