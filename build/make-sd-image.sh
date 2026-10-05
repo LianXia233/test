@@ -55,7 +55,19 @@ OUT_DIR="$PROJECT_ROOT/out"
 KERNEL_DIR="$OUT_DIR/kernel"
 SQUASHFS="$OUT_DIR/rootfs/rootfs.squashfs"
 BOOT_DIR="$OUT_DIR/boot"
-EXTRA_MB="24"                     # 引导层除 SquashFS 外的余量（busybox + DTB + ext4 元数据 + 缓冲）
+# 引导层除 SquashFS 外的余量（busybox + DTB + boot 文件 + ext4 journal/元数据 + OverlayFS 缓冲）。
+#
+# 【为什么必须是 128 而不是 24 —— 实机启动失败根因之一，勿随意调小】
+# 启动时序是：内核挂 p5 引导层 → /sbin/init 组装 OverlayFS → pivot_root → systemd →
+#             h5000m-grow-rootfs.service 才执行 resize2fs 把 ext4 扩到 p5 实际大小（~7.2 GiB）。
+# 也就是说 systemd 冷启动阶段，OverlayFS 的 upper/work 只能落在**引导层镜像内**这点空间上；
+# 在 grow-rootfs 完成前，/var/log/journal、NetworkManager state、随机种子、tmp 等全部写这里。
+# EXTRA_MB=24 时实测引导层 152 MiB 仅剩 **2.8 MiB** 空闲（journal + 5% root 预留吃掉大半），
+# 内核直接报 "overlayfs: failed to create directory /overlay/work/work (errno: 28)" 并降级为
+# 只读挂载，随后 pivot_root 失败 → 系统起不来（QEMU 已复现，与实机现象一致）。
+# EXTRA_MB=128 时引导层 256 MiB、空闲 **100.2 MiB**，足以支撑到 grow-rootfs 扩容接手。
+# 代价：sysupgrade 由 ~164 MiB 增至 ~270 MiB，仍在设备 /tmp(tmpfs) ≤600 MiB 门槛内。
+EXTRA_MB="128"
 BUSYBOX_LOCAL=""                  # 本地 busybox（arm64 静态）路径；空则从 Debian 下载
 MIRROR="http://deb.debian.org/debian"
 FIT_LOAD_ADDR="0x40000000"       # 与官方 OpenWrt FIT 一致（实测 H5000M sysupgrade.bin：Load/Entry = 0x40000000）
@@ -200,20 +212,22 @@ else
     log "busybox：使用缓存 $CACHE_BIN"
   else
     log "busybox：从 Debian trixie 下载 busybox-static（arm64 静态，~2 MiB）"
-    # 注意：不能用 "curl | xz | awk" 管道解析。awk 匹配后 exit 会关闭下游管道，
-    # 使 xz / curl 收到 SIGPIPE（curl 退出码 23），在 set -Eeuo pipefail 下直接终止脚本。
-    # 改为：先完整落盘 → 解压到文件 → awk 读文件，彻底规避 SIGPIPE。
+    # SIGPIPE 陷阱（务必保留）：本脚本使用 set -Eeuo pipefail。若 awk 命中目标即 exit，
+    # 上游 curl/xz 会在写完前被关闭管道写入端而收到 SIGPIPE，整条流水线返回非 0 并被
+    # set -e 捕获 —— 表现为"日志停在『下载 busybox-static』后静默退出"，极易误判为网络问题。
+    # 规避：①curl 单独落盘（不进管道）；②awk 命中后清标志并读完输入，不提前关闭管道。
     PKG_XZ="$WORK/Packages.xz"
     curl -sfL -o "$PKG_XZ" "$MIRROR/dists/trixie/main/binary-arm64/Packages.xz" \
       || die "下载 Packages.xz 失败：$MIRROR/dists/trixie/main/binary-arm64/Packages.xz"
-    xz -dc "$PKG_XZ" > "$WORK/Packages" \
-      || die "解压 Packages.xz 失败（检查 xz-utils 是否安装）"
-    REL="$(awk '/^Package: busybox-static$/{f=1} f && /^Filename:/{print $2; exit}' "$WORK/Packages")"
+    REL="$(xz -dk -c "$PKG_XZ" | awk '/^Package: busybox-static$/{f=1} f && /^Filename:/{print $2; f=0}')"
     [[ -n "$REL" ]] || die "无法从 $MIRROR 解析 busybox-static 包路径（检查网络/镜像）"
     mkdir -p "$BB_CACHE_DIR"
     curl -sfL -o "$CACHE_DEB" "$MIRROR/$REL" || die "下载失败：$MIRROR/$REL"
     dpkg-deb -x "$CACHE_DEB" "$WORK/bb-extract"
-    BB_CAND="$(find "$WORK/bb-extract" -type f -name busybox | head -1)"
+    # 同理避免 head -1 提前关闭管道（pipefail 下的第二类 SIGPIPE 来源）
+    BB_CAND=""
+    while IFS= read -r cand; do BB_CAND="$cand"; break; done \
+      < <(find "$WORK/bb-extract" -type f -name busybox)
     [[ -n "$BB_CAND" ]] || die "busybox-static.deb 内未找到 busybox 二进制"
     cp -f "$BB_CAND" "$BUSYBOX_BIN"
     cp -f "$BUSYBOX_BIN" "$CACHE_BIN"   # 缓存供后续构建复用
@@ -260,6 +274,11 @@ overlay_fail() {
     $BB mkdir -p tmpold
     $BB pivot_root . tmpold 2>/dev/null || true
     cd /
+    # 同上：救援路径 pivot 成功后 busybox 也要改经 /tmpold 引用；
+    # 若 pivot 本身失败（仍在引导层根）则沿用原路径。
+    if [ -x /tmpold/usr/bin/busybox ]; then
+        BB=/tmpold/usr/bin/busybox
+    fi
     $BB mount --move /tmpold/dev /dev 2>/dev/null || true
     $BB mount --move /tmpold/proc /proc 2>/dev/null || true
     $BB mount --move /tmpold/sys /sys 2>/dev/null || true
@@ -273,6 +292,12 @@ cd "$MERGED"
 $BB mkdir -p tmpold
 $BB pivot_root . tmpold || overlay_fail "pivot_root 失败"
 cd /
+# 【关键】pivot_root 之后，当前根目录已切换为 OverlayFS 合并视图，其中并不包含
+# /usr/bin/busybox —— busybox 只存在于引导层 ext4，此刻已被移动到 /tmpold 之下。
+# 若继续沿用 $BB（相对新根的路径），后续每条 busybox 调用都会 "not found"，
+# 最终 exec 失败 → init 退出 → "Attempted to kill init!" 内核 panic
+# （该缺陷已在 QEMU 真实复现，累及实机无法启动，切勿删除下面这行）。
+BB=/tmpold/usr/bin/busybox
 $BB mount --move /tmpold/dev /dev 2>/dev/null || true
 $BB mount --move /tmpold/proc /proc 2>/dev/null || true
 $BB mount --move /tmpold/sys /sys 2>/dev/null || true

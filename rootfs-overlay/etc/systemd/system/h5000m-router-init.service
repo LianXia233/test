@@ -9,7 +9,13 @@ Before=router-panel.service router-panel-agent.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/h5000m-router-init.sh
-TimeoutStartSec=180
+# 【TimeoutStartSec 180 → 600】本服务一次性完成：等待物理接口出现 + 创建
+# WAN/LAN/br-lan/AP-2G/AP-5G 共 5 条 NetworkManager 连接 + 逐个 nmcli 拉起 +
+# dnsmasq/nftables 重启。在低频 CPU 或慢速存储上（QEMU TCG 软件模拟实测
+# ~250s 仍未跑完，被 180s 的 SIGTERM 打断 → systemd 标记 failed）会误判。
+# 放宽到 600s；脚本本身对各步骤失败只告警不中断，结尾恒 exit 0，
+# 因此该服务失败只可能是超时，不会阻塞 multi-user.target 或 LAN/WebUI。
+TimeoutStartSec=600
 
 [Install]
 WantedBy=multi-user.target

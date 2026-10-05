@@ -35,6 +35,14 @@ tcpdump
 rsync
 iproute2
 
+# ---------- 文件系统工具（e2fsprogs 必须安装） ----------
+# 【为什么必须有 e2fsprogs —— 实机无法启动根因之三，勿删】
+# rootfs 交付形态是 ext4 引导层（内含 squashfs + overlay），首次刷入 eMMC 后
+# 分区大小等于镜像尺寸；若不带 resize2fs，h5000m-grow-rootfs.service 无法把
+# p5(rootfs) 扩到分区末尾，可用空间被永久锁死在 EXTRA_MB 预留量。
+# 另：resize2fs 依赖 libext2fs.so.2 / libe2p.so.2，由本包一并带入。
+e2fsprogs
+
 # ---------- 网络管理（唯一控制面：NetworkManager，受 Linux-Router 编排） ----------
 network-manager
 wpasupplicant

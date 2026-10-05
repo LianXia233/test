@@ -4,19 +4,143 @@
 
 ## [Unreleased]
 
-### 2026-10-06 — CI 修复：busybox 下载解析 SIGPIPE 崩溃（exit 23）+ 手动重触发验证
+### 2026-10-06 — 实机无法启动根因修复（QEMU 虚拟机全链路验收 + 4 项致命缺陷）
 
-- **问题**（run 37373110882 / job 111987564467 第 13 步）：`build/make-sd-image.sh` 获取
-  busybox-static 时用 `curl -sfL | xz -d | awk` 管道解析 `Packages.xz`；awk 命中目标后
-  `exit` 提前关闭下游管道，xz/curl 收到 SIGPIPE（curl 退出码 23），在脚本
-  `set -Eeuo pipefail` 下直接终止，日志只见 `Process completed with exit code 23` 无任何
-  错误提示。busybox 缓存未命中时必现。
-- **修复**：改为三段式落盘——`curl` 完整下载 `Packages.xz` → `xz` 解压到文件 →
-  `awk` 读文件解析，彻底规避管道 SIGPIPE；curl / xz / 解析各阶段失败均有明确 `die` 提示
-  （下载失败 / 解压失败 / 解析失败），不再静默崩溃。
-- **验证**：下载链路本地实测通过（解析到 `busybox-static_1.37.0-6+b9_arm64.deb` 并成功下载）；
-  脚本 `bash -n` 通过；修复已推送 main（commit `b008d97`）并**手动触发** CI 重跑验证
-  （workflow 为手动触发模式，Actions 页面查看新 run）。
+背景：用户反馈「之前老产物刷入实机无法正常启动」。本轮在沙箱内搭建 **QEMU ARM64 虚拟机**
+（`-machine virt`，引导层 ext4 当 virtio-blk 磁盘，GPT 分区标签 `PARTLABEL=rootfs` 与真机一致）
+对固件做端到端启动验证，逐层逼出并修复了 4 项会导致启动失败的缺陷。
+
+#### 🔴 缺陷 1：`/sbin/init` 在 `pivot_root` 后引用失效 —— **直接导致 kernel panic（主凶）**
+
+- **现象**：`/sbin/init: exec: line 40: /usr/bin/busybox: not found`
+  → `Kernel panic - not syncing: Attempted to kill init! exitcode=0x00007f00`
+- **根因**：`pivot_root` 之后当前根目录已切换为 OverlayFS 合并视图，而 `busybox` **只存在于
+  引导层 ext4**（此刻被移动到 `/tmpold` 下）。init 脚本此后仍用相对新根的路径 `/usr/bin/busybox`
+  调用 busybox，导致全部后续调用（含 `mount --move` 与最终 `exec`）失败，init 退出引发 panic。
+- **修复**：`pivot_root` 后立即切换引用 `BB=/tmpold/usr/bin/busybox`（主流程与只读救援分支均已修，
+  救援分支在 pivot 失败时用 `-x /tmpold/usr/bin/busybox` 判断是否回落原路径）。
+- 位置：`build/make-sd-image.sh` 引导层 init heredoc，已附「切勿删除」注释说明复现场景。
+
+#### 🔴 缺陷 2：引导层空闲空间仅 2.8 MiB —— systemd 冷启动必然 ENOSPC
+
+- **根因**：启动时序为「内核挂 p5 引导层 → /sbin/init 组装 OverlayFS → pivot_root → systemd →
+  `h5000m-grow-rootfs.service` 才执行 `resize2fs` 扩到分区实际大小」。即 **resize2fs 发生得太晚**，
+  systemd 冷启动阶段 OverlayFS 的 upper/work 只能落在引导层镜像内部。
+- **实测**：`EXTRA_MB=24` 时引导层 152 MiB，**空闲仅 2.8 MiB**（journal + 5% root 预留吃掉大半），
+  内核报 `overlayfs: failed to create directory /overlay/work/work (errno: 28)` 并降级只读挂载
+  → `pivot_root` 失败 → 起不来（QEMU 已复现，与实机现象一致）。
+- **修复**：`EXTRA_MB` 默认 `24 → 128`，引导层 256 MiB、**空闲 100.2 MiB**，足以支撑到 grow-rootfs 接手。
+  代价：sysupgrade 由 ~164 MiB 增至 ~268 MiB，仍在设备 `/tmp`(tmpfs) ≤600 MiB 门槛内。
+
+#### 🔴 缺陷 3：RootFS 未安装 `resize2fs` —— grow-rootfs 服务形同虚设
+
+- **根因**：`h5000m-grow-rootfs` 用 `command -v resize2fs` 判断后才执行（降级写得很稳妥），
+  但 RootFS 从未安装 `e2fsprogs`，因此**历史上扩容从未真正发生过**，p5 的 7.2 GiB 始终没被利用。
+- **修复**：从 Debian trixie 提取 `e2fsprogs` + `libext2fs2t64`（含 `libext2fs.so.2` / `libe2p.so.2`）
+  植入 RootFS 树；`qemu-aarch64-static` 实测 `resize2fs 1.47.2` 可在 arm64 树上正常运行。
+
+#### 🔴 缺陷 4：RootFS 树带着旧架构的 `/etc/fstab` 实体挂载项
+
+- **根因**：现有树是先于新 `rootfs-overlay/` 打出的，`/etc/fstab` 仍含
+  `PARTLABEL=rootfs / ext4 errors=remount-ro 0 1`，会让 systemd 把引导层重新挂回 `/` 覆盖 OverlayFS 根；
+  同时缺 `usr/local/sbin/h5000m-grow-rootfs` 与 `h5000m-grow-rootfs.service`。
+- **修复**：重新应用 `rootfs-overlay/`（fstab 变为纯注释布局说明），grow-rootfs 及 service 就位。
+
+#### 🐛 附带修复：`build/make-sd-image.sh` 的 SIGPIPE 陷阱
+
+- busybox 下载步骤原为 `curl | xz -d | awk '/^Package: busybox-static$/{…exit}'`，
+  awk 命中即 `exit` 会让上游 `curl/xz` 收到 **SIGPIPE**；本脚本 `set -Eeuo pipefail`，
+  整条流水线返回非 0 并被 `set -e` 捕获 —— 表现为「日志停在『下载 busybox-static』后静默退出」，
+  极易误判为网络问题。改为 curl 单独落盘 + awk 命中后清标志读完输入（不提前关闭管道）；
+  `find | head -1` 同样加固为 `while read` + 进程替换。
+
+#### ✅ QEMU 虚拟机验收结果
+
+验证环境刻意复刻真机：GPT 分区表（`u-boot-env` / `factory` / `fip` / `kernel` / `rootfs`）、
+p4 写 FIT 内核（魔数 `d00dfeed` 校验通过）、p5 写引导层 ext4（超级块 `0xef53`、卷名 `rootfs`），
+由 Debian 通用 arm64 内核 6.12.111 + 自造 mini initramfs（`virtio_blk`/`loop`/`ext4`/`squashfs`/
+`overlay` + `crc32c`/`crc16`）引导，`switch_root` 交棒给固件自带 `/sbin/init`，后续流程与真机完全一致。
+
+| 验证项 | 结果 |
+| --- | --- |
+| `findfs PARTLABEL=rootfs` 解析引导层 | ✅ `/dev/vda5` |
+| 引导层 ext4 挂载 + `switch_root` 交棒 | ✅ |
+| SquashFS 挂载（busybox 自动 loop） | ✅ `loop0: detected capacity change` |
+| OverlayFS 组装 + `pivot_root` | ✅ 修复后通过 |
+| systemd 启动 | ✅ `Welcome to Debian GNU/Linux 13 (trixie)!`，`systemd 257.13-1~deb13u1` |
+| hostname | ✅ `h5000m-debian` |
+| Overlay 持久化可写 | ✅ `Populated /etc with preset unit settings` |
+
+> 说明：`systemd-timesyncd` 因 QEMU 无 RTC/NTP 会反复失败并阻塞 graphical target，属虚拟机环境限制，
+> 评审时通过内核参数 `systemd.mask=systemd-timesyncd.service` 屏蔽；**真机有 RTC 与 NTP，不受影响**。
+> 同理，评审所用 Debian 通用内核把 `ext4`/`squashfs`/`overlay`/`loop`/`virtio_blk` 编为模块（`=m`）
+> 因此需要 initramfs；**真机 MT7987A 内核这些均为内置（`=y`，vmlinux 内含 `T crc32c` 符号）**，无需 initramfs。
+
+### 2026-10-06 — QEMU 虚拟机「服务级」验收：再挖 4 项缺陷（SSH 完全不可用为最致命）
+
+背景：上一轮已让系统**能启动**（`Welcome to Debian GNU/Linux 13`），但仅是「活着」。
+本轮对启动后的服务做逐项体检（`systemctl --failed` + `journalctl` 定向归因），
+又挖出 4 项缺陷 —— 其中 **SSH 完全起不来**对 headless 路由器等于「刷完变砖」，危害高于上一轮的主凶。
+
+#### 🔴 缺陷 5：`/etc/ssh/sshd_config` 从未生成 —— **SSH 完全不可用（本轮最致命）**
+
+- **现象**（虚拟机内真实日志）：
+  ```
+  sshd[521]: /etc/ssh/sshd_config: No such file or directory
+  ssh.service: Control process exited, code=exited, status=1/FAILURE
+  ssh.service: Start request repeated too quickly
+  ssh.socket: Failed with result 'service-start-limit-hit'
+  ```
+- **根因**：OpenSSH ≥ 9.9 / Debian 13 起，`sshd_config` **不再是 dpkg conffile**。
+  官方模板存放在 `/usr/share/openssh/sshd_config`，改由包 postinst 经 **ucf** 复制到 `/etc/ssh/`。
+  本仓库的 RootFS 由 `debootstrap` + chroot 构建，该 ucf 环节不会执行 → 主配置永久缺失。
+  连锁后果：`build-rootfs.sh` 写入的 `/etc/ssh/sshd_config.d/90-h5000m.conf`（`PermitRootLogin yes`）
+  依赖主配置中的 `Include` 才能生效，主配置不在 → **连认证放宽策略一并失效**。
+- **修复**：① 在 `rootfs-overlay/etc/ssh/sshd_config` 显式提供确定性主配置（保留
+  `Include /etc/ssh/sshd_config.d/*.conf` 置于文首，确保 `.d` 片段优先）；
+  ② `build-rootfs.sh` 增加兜底：若主配置仍缺失则用 openssh 官方模板顶上并补齐 `Include`。
+- **为何不依赖 postinst**：确定性构建不应依赖 maintainer script 的副作用 —— 这正是本次翻车的原因。
+
+#### 🔴 缺陷 6：`h5000m-led.sh` 缺可执行位 → systemd `status=203/EXEC`
+
+- **现象**：`h5000m-led-boot.service: Main process exited, code=exited, status=203/EXEC`
+- **根因**：`build-rootfs.sh` 的 rsync 带 `--chmod=Fu=rw,Fg=r,Fo=r`，会把覆盖层每个文件**强制剥成
+  644**；而 git 对 rootfs-overlay 记录的文件模式**全部是 100644**。原实现靠一段
+  **硬编码白名单**逐个 `chmod 0755`（列了 router-init / fancontrol / grow-rootfs / wan-dns 四个），
+  **唯独漏了 `h5000m-led.sh`**。
+- **隐蔽之处**：`bash -n` 语法检查**不读执行位**，所以「脚本语法验收」全绿也发现不了它。
+- **修复**：删除白名单，改为**按内容扫描** —— 凡带 `#!` shebang 的脚本一律 0755，
+  并在构建末尾做幂等自检（残留「有 shebang 却无 x」即告警）。
+  数据文件（如 `sshd_config`）首行是 `# ` 而非 `#!`，不受影响，保持 0644。
+
+#### 🟡 缺陷 7：LED 脚本在无 LED 硬件环境下返回非 0
+
+- **根因**：`led_set()` 以 `[ -f ... ] && echo ...` 结尾，属性不存在时函数返回 1，
+  逐层冒泡令 systemd 判定 failed。场景：非 H5000M 硬件 / 虚拟化环境 / DTS 未导出 `aliases`。
+- **修复**：新增 `resolve_led()` 解析封装，解析不到就跳过并 `return 0`；`led_set()` 显式 `return 0`
+  切断冒泡；脚本末尾再兜一道 `exit 0`。LED 属装饰性动作，不得让调用方判定失败。
+
+#### 🟡 缺陷 8：`h5000m-router-init.service` 超时阈值过紧（180 s → 600 s）
+
+- **现象**：`unit=h5000m-router-init ... res=failed`（被 SIGTERM 打断，非脚本报错）
+- **根因**：该 oneshot 服务一次性完成「等接口 + 建 5 条 NM 连接 + 逐个 `nmcli up` +
+  重启 dnsmasq/nftables」，低频 CPU / 慢速存储上远超 180 s。脚本本身对每个步骤只告警、
+  结尾恒 `exit 0`，因此失败只可能来自超时。
+- **修复**：`TimeoutStartSec=600`。
+
+#### 🐛 附带：e2fsprogs 未进packages.list（可复现性缺口）
+
+上一轮把 `resize2fs` 直接补进了 `out/` 产物树，但没写进 `build/rootfs/packages.list` ——
+**重新构建就会丢失、扩容能力再次失效**。本次正式加入清单（`resize2fs` + `libext2fs.so.2` /
+`libe2p.so.2` 随之带入）。
+
+#### ✅ 甄别结论：nftables 失败属**验证环境限制**，非固件缺陷
+
+| 观测 | 判定 |
+| --- | --- |
+| `nft[228]: src/mnl.c:64: Unable to initialize Netlink socket: Protocol not supported` | QEMU 所用 Debian 通用内核把 `nf_tables` 编为模块（`=m`），mini initramfs 未携带 → netlink family 不存在 |
+| 真机 MT7987A 内核配置 | `CONFIG_NF_TABLES=y`、`CONFIG_NF_TABLES_INET=y`、`CONFIG_NFT_NAT=y` 及全套 `NETFILTER_XT_*` **均为内置** |
+| **结论** | 真机可正常加载 `nftables.conf`；该失败源于验证环境缺 nf_tables 模块，**固件无需修改** |
 
 ### 2026-10-06 — CI 编译提速：ARM64 原生 runner + ccache + 下载层缓存（实测基线 117 min → 目标 ~20 min）
 
@@ -31,7 +155,7 @@
 - **native / foreign 自动判定（`build/build-rootfs.sh`）**：宿主 aarch64/arm64 且目标 arm64 →
   `debootstrap` 一次完成；否则保持 `--foreign` + `qemu-aarch64-static` 第二阶段。
   依赖检查随之调整（qemu 仅 foreign 模式必需）；新增 `--apt-cache-dir`（下载层缓存）；
-  `apt-get clean` 从 chroot 内移到汇款 .deb 之后执行，保证新下载的包能回存缓存。
+  `apt-get clean` 从 chroot 内移到回存 .deb 之后执行，保证新下载的包能回存缓存。
 - **内核编译提速（`build/build-kernel.sh`）**：新增编译模式判定（native / cross，
   支持 `--native`/`--cross` 强制覆盖）；检测到 ccache 自动启用（支持 `--no-ccache`），
   make 传 `CC="ccache <prefix>gcc" HOSTCC="ccache gcc"`，构建结束打印 ccache 统计；

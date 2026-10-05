@@ -1,0 +1,66 @@
+# Hiveton H5000M — SSH 服务端主配置
+#
+# 【为什么这个文件必须显式存在于 overlay 中 —— 实机 SSH 完全不可用，勿删】
+# OpenSSH ≥ 9.9 / Debian 13(trixie) 起，sshd_config 不再由 dpkg 直接铺设为
+# conffile，官方模板放在 /usr/share/openssh/sshd_config，改由包 postinst 经
+# ucf 复制到 /etc/ssh/sshd_config。在 debootstrap + chroot 构建链路里该 ucf
+# 环节不会执行，导致 /etc/ssh/sshd_config 缺失：
+#     sshd[521]: /etc/ssh/sshd_config: No such file or directory
+#     ssh.service: Failed with result 'exit-code'
+#     → Start request repeated too quickly → ssh.socket: service-start-limit-hit
+# 路由器是 headless 设备，SSH 是唯一远程管理入口，该缺陷等于「刷完变砖」。
+# 因此这里直接提供确定性主配置，不依赖任何 maintainer script 的副作用。
+#
+# 注意：OpenSSH 采用「先出现者优先」语义，Include 置于文首，
+# 以便 /etc/ssh/sshd_config.d/*.conf（含 90-h5000m.conf 的 PermitRootLogin yes）
+# 能正确覆盖下文同名默认值。
+#
+# 行尾：本文件为 LF。
+
+Include /etc/ssh/sshd_config.d/*.conf
+
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# ---- 认证 ----
+# 默认值由 sshd_config.d/90-h5000m.conf 放宽为 yes（首次启动需 root 密码登录，
+# 交付时附 h5000m-initial-credentials）。此处保留保守默认，二者冲突时以 .d 优先。
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+LoginGraceTime 2m
+MaxAuthTries 6
+MaxSessions 10
+StrictModes yes
+
+AuthorizedKeysFile	.ssh/authorized_keys
+
+KbdInteractiveAuthentication no
+UsePAM yes
+
+# ---- 会话 ----
+X11Forwarding no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+UseDNS no
+Compression delayed
+
+# 路由器没有图形/clipflow 需求，关闭降低攻击面
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+Banner none
+
+AcceptEnv LANG LC_* COLORTERM NO_COLOR
+
+Subsystem	sftp	/usr/lib/openssh/sftp-server

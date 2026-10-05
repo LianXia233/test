@@ -70,8 +70,18 @@ get_dt_led() {
 	fi
 }
 
-led_set() { # sysfs名 属性 值（仅当属性存在时写入，避免噪声）
-	[ -f "$LEDS_BASE/$1/$2" ] && echo "$3" > "$LEDS_BASE/$1/$2"
+# LED 缺失必须「静默成功」而非返回非 0 —— 见下方 led_set 说明。
+# 典型场景：虚拟机 / 非 H5000M 硬件 / DTS 未导出 aliases，此时 /sys/class/leds
+# 下没有对应条目，脚本应视为无可操作硬件直接成功，不能让 systemd 标记 failed。
+led_set() { # sysfs名 属性 值（仅当属性存在时写入）
+	# [重要] 原实现以 `[ -f ... ] && echo ...` 结尾：属性不存在时整个函数返回 1，
+	# 逐层冒泡导致 systemd 判定 service failed（QEMU 已复现 h5000m-led-boot /
+	# h5000m-led 双双 failed）。此处显式 return 0 切断冒泡。
+	[ -n "$1" ] || return 0
+	if [ -f "$LEDS_BASE/$1/$2" ]; then
+		echo "$3" > "$LEDS_BASE/$1/$2" 2>/dev/null || true
+	fi
+	return 0
 }
 
 led_timer() { # sysfs名 delay_on delay_off —— 内核态持续闪烁，无需守护进程
@@ -90,9 +100,25 @@ led_off() {
 	led_set "$1" brightness 0
 }
 
+# resolve_led：解析 role → sysfs LED 名；解析不到返回 1（调用方据此跳过并成功退出）
+resolve_led() {
+	local ledpath led
+	ledpath="$(get_dt_led_path "$1" 2>/dev/null)" || return 1
+	[ -n "$ledpath" ] || return 1
+	led="$(get_dt_led "$ledpath" 2>/dev/null)" || return 1
+	[ -n "$led" ] || return 1
+	printf '%s' "$led"
+}
+
 # ---- 阶段动作（与官方 diag.sh 的 set_state 对应） ----
 cmd_boot() {
-	led_timer "$(get_dt_led "$(get_dt_led_path boot)")" 100 100
+	local led
+	if led="$(resolve_led boot)"; then
+		led_timer "$led" 100 100
+	else
+		log "跳过 boot LED：未解析到 led-boot（非 H5000M 硬件 / 虚拟化环境，属正常降级）"
+	fi
+	return 0
 }
 
 cmd_done() {
@@ -110,16 +136,28 @@ cmd_done() {
 }
 
 cmd_failsafe() {
-	led_timer "$(get_dt_led "$(get_dt_led_path failsafe)")" 50 50
+	local led
+	if led="$(resolve_led failsafe)"; then
+		led_timer "$led" 50 50
+	else
+		log "跳过 failsafe LED：未解析到 led-failsafe"
+	fi
+	return 0
 }
 
 cmd_upgrade() {
-	led_timer "$(get_dt_led "$(get_dt_led_path upgrade)")" 200 200
+	local led
+	if led="$(resolve_led upgrade)"; then
+		led_timer "$led" 200 200
+	else
+		log "跳过 upgrade LED：未解析到 led-upgrade"
+	fi
+	return 0
 }
 
-cmd_on()    { led_on "$1"; }
-cmd_off()   { led_off "$1"; }
-cmd_blink() { led_timer "$1" "${2:-500}" "${3:-500}"; }
+cmd_on()    { led_on "${1:-}"; return 0; }
+cmd_off()   { led_off "${1:-}"; return 0; }
+cmd_blink() { led_timer "${1:-}" "${2:-500}" "${3:-500}"; return 0; }
 
 usage() {
 	sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'
@@ -141,3 +179,7 @@ case "${1:-}" in
 		exit 1
 		;;
 esac
+
+# LED 属于「尽力而为」的装饰性动作：即便某分支异常也不得让调用方（systemd）
+# 判定服务失败。上面各 cmd_* 已各自 return 0，此处再兜一道显式 exit 0。
+exit 0

@@ -172,6 +172,15 @@ fi
 
 log "构建模式：$([[ "$IS_NATIVE" -eq 1 ]] && echo native || echo foreign)（宿主 Arch=$HOST_ARCH）"
 
+# foreign 模式下，树内必须存在 qemu 静态解释器才能 chroot 执行 arm64 命令。
+# 该注入原先只在 debootstrap 阶段做：若树已存在而跳过 debootstrap（本地迭代常见），
+# 后续 chroot apt/chpasswd 会以 "Exec format error" 直接失败。此处统一前置保证，
+# 末尾统一清理（见"清理构建期文件"）。
+if [[ "$IS_NATIVE" -eq 0 ]]; then
+  install -m 0755 /usr/bin/qemu-aarch64-static "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
+  log "  qemu-aarch64-static 已注入树内（foreign 模式 chroot 依赖）"
+fi
+
 # ---------------------------------------------------------------- 4. 软件源与软件包
 log "第 4 步：配置 Debian 13 软件源"
 # 绑定宿主机 resolv.conf 供 chroot 内 apt 使用（构建期 DNS）
@@ -213,10 +222,43 @@ chroot "$ROOTFS_DIR" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-ge
 # ---------------------------------------------------------------- 6. 覆盖层
 log "第 6 步：应用 rootfs-overlay 覆盖层"
 rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r "$OVERLAY_DIR/" "$ROOTFS_DIR/"
-chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-router-init.sh"
-chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-fancontrol"
-chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-grow-rootfs"
-chmod 0755 "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d/90-h5000m-wan-dns"
+
+# 【为什么要「扫描」而不是「逐个列举」——h5000m-led.sh 曾因漏列变成不可执行】
+# rsync 的 --chmod=Fu=rw,Fg=r,Fo=r 会把覆盖层里每个文件强制成 644（剥掉 x 位），
+# 而 git 对 rootfs-overlay 记录的 mode 也全是 100644。原先依赖硬编码白名单逐条
+# chmod 0755，恰好漏了 h5000m-led.sh，于是 systemd 直接报：
+#     h5000m-led-boot.service: Main process exited, code=exited, status=203/EXEC
+#     h5000m-led-boot.service: Failed with result 'exit-code'
+# （QEMU 虚拟机已复现；注意 bash -n 语法检查不读执行位，测不出来这类问题。）
+# 白名单每新增一个脚本就要记得同步，是不可持续的做法 → 改为按内容判定：
+# 凡覆盖层里带 shebang 的脚本一律 0755，永不遗漏；纯数据文件（如 sshd_config）
+# 首行不是 #!，不受影响，保持 0644。
+log "  按 shebang 扫描并修复覆盖层脚本可执行位"
+while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    head -c 2 "$f" 2>/dev/null | grep -q '#!' || continue
+    if [ ! -x "$f" ]; then
+        chmod 0755 "$f"
+        log "    +x ${f#$ROOTFS_DIR}"
+    fi
+done < <(find "$ROOTFS_DIR/usr/local/sbin" "$ROOTFS_DIR/usr/local/bin" \
+              "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d" \
+              -type f 2>/dev/null)
+
+# 幂等自检：覆盖层内不得残留「有 shebang 却无执行位」的脚本，否则 systemd 必报 203/EXEC
+BAD_EXEC=$(while IFS= read -r f; do
+               [ -f "$f" ] || continue
+               head -c 2 "$f" 2>/dev/null | grep -q '#!' || continue
+               [ -x "$f" ] || printf '%s\n' "${f#$ROOTFS_DIR}"
+           done < <(find "$ROOTFS_DIR/usr/local/sbin" "$ROOTFS_DIR/usr/local/bin" \
+                         "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d" \
+                         -type f 2>/dev/null))
+if [ -n "$BAD_EXEC" ]; then
+    echo "[build-rootfs] 警告：以下脚本缺可执行位，systemd 将报 203/EXEC："
+    echo "$BAD_EXEC" | sed 's/^/    /'
+else
+    log "  覆盖层脚本可执行位校验通过"
+fi
 
 # ---------------------------------------------------------------- 7. luci-app-mt5700（Debian 分支）预装
 # 单服务架构：at-webserver 一体化承载 WebUI + HTTP API + WebSocket（0.0.0.0:9000），
@@ -322,6 +364,22 @@ chroot "$ROOTFS_DIR" /bin/bash -e -c '
 
   # SSH：允许首次启动 root 密码登录（交付物同时提供 h5000m-initial-credentials）
   mkdir -p /etc/ssh/sshd_config.d
+
+  # 【兜底】/etc/ssh/sshd_config 缺失会让 sshd 直接退出 ROS(No such file or directory)
+  # → ssh.service restart-limit-hit → 实机刷完连不上 SSH（headless 设备等同变砖）。
+  # 正常情况由 rootfs-overlay/etc/ssh/sshd_config 提供；此处再兜一道：若 overlay
+  # 未覆盖到，就用 openssh 自带的官方模板顶上，保证 sshd 永远有主配置可读。
+  if [[ ! -f /etc/ssh/sshd_config ]] && [[ -f /usr/share/openssh/sshd_config ]]; then
+    echo "[build-rootfs] 警告：/etc/ssh/sshd_config 缺失，回落到 openssh 官方模板"
+    install -m 0644 /usr/share/openssh/sshd_config /etc/ssh/sshd_config
+    # 模板不带 Include 时补上，否则 sshd_config.d/*.conf 的定制会被忽略
+    grep -q '^Include /etc/ssh/sshd_config.d/\*.conf' /etc/ssh/sshd_config \
+      || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+  fi
+  # 最终自检：主配置必须存在且能被 sshd 解析（只能在 chroot 内自检一次）
+  [[ -f /etc/ssh/sshd_config ]] \
+    || echo "[build-rootfs] 警告：/etc/ssh/sshd_config 仍然缺失，SSH 将无法启动"
+
   printf "PermitRootLogin yes\nPasswordAuthentication yes\n" \
     > /etc/ssh/sshd_config.d/90-h5000m.conf
   chmod 0644 /etc/ssh/sshd_config.d/90-h5000m.conf

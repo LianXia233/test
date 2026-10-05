@@ -7,5 +7,16 @@
 *.png binary
 *.ico binary
 
+# 【为什么 *.bin / *.squashfs / *.dtb 必须显式声明 binary】
+# 文件头的 `* text=auto eol=lf` 作用范围是全体文件。虽然 git 对含 NUL 字节的文件
+# 通常会自动判为二进制而不转换，但一旦误判，eol=lf 归一化会**改写二进制内容**，
+# 这对 Firmware blob（MT7992 Wi-Fi / MT7987 2.5G PHY）尤其致命 —— 它们必须
+# 字节级保持不变，任何行尾扰动都会让模组加载失败或校验和不符。
+# 显式声明，杜绝依赖 git 的自动推断。
+*.bin binary
+*.squashfs binary
+*.dtb binary
+*.img binary
+
 # luci-app-mt5700 预装产物（Debian 13 rootfs）
 build/rootfs/vendor/mt5700/bin/mt5700-web binary
