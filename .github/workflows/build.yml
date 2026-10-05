@@ -50,18 +50,29 @@ jobs:
       - name: 生成 U-Boot 启动脚本 boot.scr
         run: bash build/make-boot.sh --out out/boot
 
+      - name: 整理内核产物为扁平目录
+        # upload-artifact@v4 以所有上传路径的公共根为基准保留相对路径：
+        # 混合上传 out/kernel/* 与 out/boot/* 时公共根为 out/，artifact 内会保留
+        # kernel/ 与 boot/ 子前缀，下游按扁平路径取值即报 cp: cannot stat。
+        # 先集中到同一目录再上传，产物在 artifact 内即为扁平文件名。
+        run: |
+          mkdir -p out/kernel-artifacts
+          cp -f \
+            out/kernel/Image \
+            out/kernel/mt7987a-hiveton-h5000m.dtb \
+            out/kernel/modules.tar.zst \
+            out/kernel/kernel-config-exported.config \
+            out/kernel/kernel-mt7987-options.txt \
+            out/boot/boot.scr \
+            out/boot/boot.cmd \
+            out/kernel-artifacts/
+          ls -l out/kernel-artifacts
+
       - name: 上传内核产物
         uses: actions/upload-artifact@v4
         with:
           name: kernel-artifacts
-          path: |
-            out/kernel/Image
-            out/kernel/mt7987a-hiveton-h5000m.dtb
-            out/kernel/modules.tar.zst
-            out/kernel/kernel-config-exported.config
-            out/kernel/kernel-mt7987-options.txt
-            out/boot/boot.scr
-            out/boot/boot.cmd
+          path: out/kernel-artifacts/*
           retention-days: 7
 
   # ============================================================ 2. RootFS + 刷写包
@@ -93,11 +104,26 @@ jobs:
       - name: 整理内核目录
         run: |
           mkdir -p out/kernel out/boot
-          cp -f artifacts/kernel/Image out/kernel/Image
-          cp -f artifacts/kernel/mt7987a-hiveton-h5000m.dtb out/kernel/mt7987a-hiveton-h5000m.dtb
-          cp -f artifacts/kernel/modules.tar.zst out/kernel/modules.tar.zst
-          cp -f artifacts/kernel/boot.scr out/boot/boot.scr
-          cp -f artifacts/kernel/boot.cmd out/boot/boot.cmd
+          echo "下载到的内核产物结构："
+          find artifacts/kernel -type f | sort
+          # 期望扁平结构；若 artifact 意外保留子目录前缀，则按文件名定位兜底
+          KART="artifacts/kernel"
+          if [[ ! -f "$KART/Image" ]]; then
+            KART="$(find artifacts/kernel -type f -name 'Image' -printf '%h\n' -quit)"
+            echo "扁平结构未命中，回退到：$KART"
+          fi
+          [[ -n "$KART" ]] || { echo "错误：artifacts/kernel 下未找到 Image"; exit 1; }
+          cp -f "$KART/Image" out/kernel/Image
+          cp -f "$KART/mt7987a-hiveton-h5000m.dtb" out/kernel/mt7987a-hiveton-h5000m.dtb
+          cp -f "$KART/modules.tar.zst" out/kernel/modules.tar.zst
+          cp -f "$KART/boot.scr" out/boot/boot.scr
+          cp -f "$KART/boot.cmd" out/boot/boot.cmd
+          # 附加产物（配置导出），存在才复制
+          [[ -f "$KART/kernel-config-exported.config" ]] && \
+            cp -f "$KART/kernel-config-exported.config" out/kernel/kernel-config-exported.config || true
+          [[ -f "$KART/kernel-mt7987-options.txt" ]] && \
+            cp -f "$KART/kernel-mt7987-options.txt" out/kernel/kernel-mt7987-options.txt || true
+          ls -l out/kernel out/boot
 
       - name: 构建 Debian 13 RootFS
         run: |
