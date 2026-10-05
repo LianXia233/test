@@ -4,6 +4,52 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — 844 cpufreq 补丁适配 6.18.54 + 跨 job 产物路径修复 + 参考 ctr54188/h5000m-debian 补齐配置
+
+**内核补丁（CI run 37264647296：35 秒失败）：**
+
+- **844-cpufreq MT7987 补丁重写**：原补丁针对含 `mt7986_platform_data` 与 `mediatek,mt7988d`
+  的内核版本编写，6.18.54 两者皆无 → 两个 hunk 上下文均不匹配，`git apply` 与 `patch` 回退
+  双失败，`--strict` 下内核 job 直接终止（旧 CI 靠 `--skip-failed-patches` 跳过，
+  MT7987 cpufreq 从未真正启用）。现按 6.18.54 实际源码重排 hunk：插入点移至
+  `mt7623_platform_data` 之后、移除不存在的 mt7988d 上下文行；语义不变
+  （`proc_max_volt=1023000` + `mediatek,mt7987` DT match）
+- **验证**：干净 6.18.54 树全补丁序列（backport/pending/hack/mediatek，200+）应用成功；
+  aarch64 交叉编译 `mediatek-cpufreq.o` 通过，`nm` 确认 `mt7987_platform_data` 与
+  `mediatek,mt7987` 编入目标文件
+
+**CI 跨 job 产物传递（CI run 37265754864：build-image `cp: cannot stat`）：**
+
+- **根因**：`upload-artifact@v4` 以所有上传路径的公共根为基准保留相对路径；混合上传
+  `out/kernel/*` 与 `out/boot/*` 时公共根为 `out/`，artifact 内实际为 `kernel/Image`、
+  `boot/boot.scr`，下载侧按扁平路径取值即失败
+- **修复**：上传前集中到 `out/kernel-artifacts/` 单一目录；下载侧打印产物结构并按文件名
+  兜底定位；顺带复制 `kernel-config-exported.config` / `kernel-mt7987-options.txt`
+
+**参考 ctr54188/h5000m-debian 的优化（配置与 CI）：**
+
+- **内核配置补全**（16 项，均本地验证 olddefconfig 生效 + 交叉编译通过）：
+  - WAN 拨号：`PPP` / `PPPOE` / `PPP_ASYNC` / `PPP_MPPE`
+  - 硬件流卸载：`NF_FLOW_TABLE` / `NF_FLOW_TABLE_INET` / `NFT_FLOW_OFFLOAD`
+  - 2.5G PHY：`MEDIATEK_2P5GE_PHY` / `MTK_NET_PHYLIB`（752 补丁已支持 MT7987，此前未编驱动）
+  - 5G 模组 USB WWAN 栈：`WWAN` / `MTK_T7XX` / `USB_NET_QMI_WWAN` / `USB_NET_CDC_MBIM` /
+    `USB_WDM` / `USB_ACM` / `USB_SERIAL_OPTION`（MT5700M 等 USB 模组必需）
+- **配置回归校验扩充**：`REQUIRED_SYMBOLS` 由 21 项增至 31 项，覆盖上述新增项
+  （参考库 README §5.1.1 教训：配置未写进片段会在换环境重编时静默丢失）
+- **CI 健壮性**：`cancel-in-progress: true` → `false`（此前已误杀一次完整编译）；
+  两个 job 增加 `timeout-minutes`（内核 330 / RootFS 180）
+- **产物校验**：RootFS 构建前校验 `modules.tar.zst` 内 `qmi_wwan` / `cdc_mbim` / `option` /
+  `mtk_t7xx` 存在（mt7996e / mt76-connac-lib / pwm-fan 为 `=y` builtin 不产生 .ko，
+  由 `REQUIRED_SYMBOLS` 按 .config 校验）
+
+**未采纳的参考库方案（附理由）：**
+
+| 参考库方案 | 不采纳原因 |
+|---|---|
+| hostapd 5GHz 80MHz 配置 | 本库无线走 NetworkManager（`h5000m-router-init.sh` 用 nmcli 建 wlan0/wlan1 AP），无 hostapd |
+| 首启 resize2fs + swap 服务 | 用户明确要求分区与 CI 对齐、暂不扩容 |
+| eth IRQ 修复（997 补丁，注册 8 条中断线） | 针对 6.12 的驱动级改动，6.18 移植需实机验证，风险高，列入待办 |
+
 ### 2026-10-05 — 内核产物收集修复 + RootFS 预装 luci-app-mt5700（局域网可访问）
 
 **编译失败修复（CI run 37258658236：`tar: lib: Cannot stat`）：**

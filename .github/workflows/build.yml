@@ -11,7 +11,10 @@ on:
 
 concurrency:
   group: h5000m-build-${{ github.ref }}
-  cancel-in-progress: true
+  # 内核编译耗时 1~2 小时；cancel-in-progress: true 会让新的 push 杀掉正在跑的
+  # 长构建（此前已因此丢失过一次完整编译）。改为排队，配合下方 timeout-minutes
+  # 防止无限占用 runner。
+  cancel-in-progress: false
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -22,6 +25,7 @@ jobs:
   build-kernel:
     name: 内核 6.18 (MT7987A)
     runs-on: ubuntu-24.04
+    timeout-minutes: 330
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -80,6 +84,7 @@ jobs:
     name: RootFS + 刷写包（FIT / ext4，复用现有 eMMC 分区布局）
     needs: build-kernel
     runs-on: ubuntu-24.04
+    timeout-minutes: 180
     permissions:
       contents: write   # 上传固件到 GitHub Releases 需要写权限
     steps:
@@ -124,6 +129,30 @@ jobs:
           [[ -f "$KART/kernel-mt7987-options.txt" ]] && \
             cp -f "$KART/kernel-mt7987-options.txt" out/kernel/kernel-mt7987-options.txt || true
           ls -l out/kernel out/boot
+
+      - name: 校验关键内核模块已产出
+        # 在 RootFS 构建前校验，避免跑完整轮才发现驱动缺失。
+        # 只校验以模块(=m)形式构建的项：5G 模组 USB 栈与 WWAN。
+        # 注意：mt7996e / mt76-connac-lib / pwm-fan 在配置中为 =y（编进 vmlinux），
+        # 不产生 .ko，由 build-kernel.sh 的 REQUIRED_SYMBOLS 按 .config 校验。
+        run: |
+          tar -I zstd -tf out/kernel/modules.tar.zst > /tmp/mods.list
+          echo "模块总数：$(wc -l < /tmp/mods.list)"
+          MISS=0
+          for ko in qmi_wwan cdc_mbim option mtk_t7xx; do
+            if grep -q "/${ko}\.ko" /tmp/mods.list; then
+              echo "  [OK]   ${ko}.ko"
+            else
+              echo "  [MISS] ${ko}.ko 未编入模块包"
+              MISS=1
+            fi
+          done
+          if [[ "$MISS" -ne 0 ]]; then
+            echo "错误：关键驱动缺失，请检查内核配置片段（build/kernel-conf/）。"
+            echo "模块包内 USB-WWAN 相关条目："
+            grep -E "wwan|qmi|mbim|usbserial|option" /tmp/mods.list | head -20
+            exit 1
+          fi
 
       - name: 构建 Debian 13 RootFS
         run: |
