@@ -88,6 +88,9 @@ x86_64 runner（交叉编译 + qemu 第二阶段）。
 - **Actions Artifact**：每次运行保留 14 天（含 `initial-credentials.txt` 首次登录凭据）。
 - **构建健壮性**：内核构建默认 `--strict`，补丁应用失败 / 关键配置符号缺失直接终止构建；
   CI 缓存仅保留原始源码包 `linux-<版本>.tar.xz`，源码树每次干净解压，补丁幂等。
+  引导层 busybox-static 由 `make-sd-image.sh` 从 Debian trixie 自动下载（`Packages.xz`
+  落盘解析，规避管道 SIGPIPE；构建机缓存于 `out/rootfs/.cache/busybox`，也可
+  `--busybox /path/to/busybox` 指定本地文件），下载/解压/解析任一环节失败都会明确报错终止。
 
 ## 分区与启动（复用现有 OpenWrt 布局，不改 U-Boot）
 
