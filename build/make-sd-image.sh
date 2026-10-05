@@ -200,8 +200,15 @@ else
     log "busybox：使用缓存 $CACHE_BIN"
   else
     log "busybox：从 Debian trixie 下载 busybox-static（arm64 静态，~2 MiB）"
-    REL="$(curl -sfL "$MIRROR/dists/trixie/main/binary-arm64/Packages.xz" | xz -d | \
-      awk '/^Package: busybox-static$/{f=1} f && /^Filename:/{print $2; exit}')"
+    # 注意：不能用 "curl | xz | awk" 管道解析。awk 匹配后 exit 会关闭下游管道，
+    # 使 xz / curl 收到 SIGPIPE（curl 退出码 23），在 set -Eeuo pipefail 下直接终止脚本。
+    # 改为：先完整落盘 → 解压到文件 → awk 读文件，彻底规避 SIGPIPE。
+    PKG_XZ="$WORK/Packages.xz"
+    curl -sfL -o "$PKG_XZ" "$MIRROR/dists/trixie/main/binary-arm64/Packages.xz" \
+      || die "下载 Packages.xz 失败：$MIRROR/dists/trixie/main/binary-arm64/Packages.xz"
+    xz -dc "$PKG_XZ" > "$WORK/Packages" \
+      || die "解压 Packages.xz 失败（检查 xz-utils 是否安装）"
+    REL="$(awk '/^Package: busybox-static$/{f=1} f && /^Filename:/{print $2; exit}' "$WORK/Packages")"
     [[ -n "$REL" ]] || die "无法从 $MIRROR 解析 busybox-static 包路径（检查网络/镜像）"
     mkdir -p "$BB_CACHE_DIR"
     curl -sfL -o "$CACHE_DEB" "$MIRROR/$REL" || die "下载失败：$MIRROR/$REL"
