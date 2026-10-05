@@ -7,11 +7,17 @@ Add mt7987_platform_data with proc_max_volt=1023000 uV and register
 it for the "mediatek,mt7987" DT compatible. The MT7987 CPU voltage is
 not software-controllable (no proc_fixed_volt field in 6.18 kernel).
 
+Context and line numbers rebased onto vanilla 6.18.54:
+- 6.18.54 has no mt7986_platform_data; insertion point moved after
+  mt7623_platform_data (right before mt7988_platform_data).
+- 6.18.54 of_device_id table has no "mediatek,mt7988d" entry, which
+  broke the original hunk context.
+
 Signed-off-by: Daniel Golle <daniel@makrotopia.org>
 ---
 --- a/drivers/cpufreq/mediatek-cpufreq.c
 +++ b/drivers/cpufreq/mediatek-cpufreq.c
-@@ -787,6 +787,12 @@ static const struct mtk_cpufreq_platform
+@@ -707,6 +707,11 @@
  	.ccifreq_supported = false,
  };
  
@@ -23,11 +29,11 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
  static const struct mtk_cpufreq_platform_data mt7988_platform_data = {
  	.min_volt_shift = 100000,
  	.max_volt_shift = 200000,
-@@ -831,6 +837,7 @@ static const struct of_device_id mtk_cpu
+@@ -749,6 +754,7 @@
  	{ .compatible = "mediatek,mt2712", .data = &mt2701_platform_data },
  	{ .compatible = "mediatek,mt7622", .data = &mt7622_platform_data },
  	{ .compatible = "mediatek,mt7623", .data = &mt7623_platform_data },
 +	{ .compatible = "mediatek,mt7987", .data = &mt7987_platform_data },
  	{ .compatible = "mediatek,mt7988a", .data = &mt7988_platform_data },
- 	{ .compatible = "mediatek,mt7988d", .data = &mt7988_platform_data },
  	{ .compatible = "mediatek,mt8167", .data = &mt8516_platform_data },
+ 	{ .compatible = "mediatek,mt817x", .data = &mt2701_platform_data },
