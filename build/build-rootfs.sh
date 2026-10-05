@@ -260,6 +260,34 @@ else
     log "  覆盖层脚本可执行位校验通过"
 fi
 
+# ---- SSH 主配置兜底（必须在宿主机侧执行，勿搬进 chroot 脚本）----
+# 【为什么不能写进第 10 步的 chroot bash -c '...'】
+# 第 10 步整段脚本本体是单引号字符串（chroot "$ROOTFS_DIR" /bin/bash -e -c ' ... '），
+# 里面靠 '"$VAR"' 这种技巧注入变量。任何字面单引号都会提前闭合外层串，
+# 使后续内容泄漏到外层 shell —— 曾导致 CI "unexpected end of file" 直接构建失败
+# （run 37386212969）。故凡涉及引号较复杂的操作，一律放在宿主机侧用 $ROOTFS_DIR 前缀处理。
+#
+# 【为什么必须有这段】OpenSSH ≥ 9.9 / Debian 13 起 sshd_config 不再是 dpkg conffile，
+# 官方模板位于 /usr/share/openssh/sshd_config，需 postinst 经 ucf 落地，而 debootstrap
+# + chroot 链路不会触发该环节。主配置缺失 → sshd 直接 "No such file or directory" 退出
+# → restart limit hit → headless 设备刷完无法管理。
+SSHD_CFG="$ROOTFS_DIR/etc/ssh/sshd_config"
+SSHD_TMPL="$ROOTFS_DIR/usr/share/openssh/sshd_config"
+if [ ! -f "$SSHD_CFG" ] && [ -f "$SSHD_TMPL" ]; then
+    log "  警告：$SSHD_CFG 缺失，回落到 openssh 官方模板"
+    install -m 0644 "$SSHD_TMPL" "$SSHD_CFG"
+fi
+# 主配置必须 Include sshd_config.d，否则 90-h5000m.conf 的定制会被静默忽略
+if [ -f "$SSHD_CFG" ] && ! grep -q "^Include /etc/ssh/sshd_config.d/" "$SSHD_CFG"; then
+    sed -i "1i Include /etc/ssh/sshd_config.d/*.conf" "$SSHD_CFG"
+    log "  已为 sshd_config 补 Include /etc/ssh/sshd_config.d/*.conf"
+fi
+if [ -f "$SSHD_CFG" ]; then
+    log "  sshd_config 主配置就位（$SSHD_CFG）"
+else
+    echo "[build-rootfs] 警告：sshd_config 仍然缺失，SSH 将无法启动"
+fi
+
 # ---------------------------------------------------------------- 7. luci-app-mt5700（Debian 分支）预装
 # 单服务架构：at-webserver 一体化承载 WebUI + HTTP API + WebSocket（0.0.0.0:9000），
 # 移除 OpenWrt/LuCI/ubus/rpcd/UCI 依赖；安装布局与上游 debian/install.sh 一致。
@@ -363,22 +391,10 @@ chroot "$ROOTFS_DIR" /bin/bash -e -c '
   printf "root:%s\n" "$ROOT_PASSWORD" | chpasswd
 
   # SSH：允许首次启动 root 密码登录（交付物同时提供 h5000m-initial-credentials）
+  # 注意：/etc/ssh/sshd_config 主配置的兜底放在宿主机侧第 6 步执行，不在本脚本内。
+  # 原因见下方第 6 步注释 —— 本整段脚本是 chroot bash -c '...' 的单引号字符串，
+  # 内部出现任何字面单引号都会提前闭合外层字符串，导致 "unexpected end of file"。
   mkdir -p /etc/ssh/sshd_config.d
-
-  # 【兜底】/etc/ssh/sshd_config 缺失会让 sshd 直接退出 ROS(No such file or directory)
-  # → ssh.service restart-limit-hit → 实机刷完连不上 SSH（headless 设备等同变砖）。
-  # 正常情况由 rootfs-overlay/etc/ssh/sshd_config 提供；此处再兜一道：若 overlay
-  # 未覆盖到，就用 openssh 自带的官方模板顶上，保证 sshd 永远有主配置可读。
-  if [[ ! -f /etc/ssh/sshd_config ]] && [[ -f /usr/share/openssh/sshd_config ]]; then
-    echo "[build-rootfs] 警告：/etc/ssh/sshd_config 缺失，回落到 openssh 官方模板"
-    install -m 0644 /usr/share/openssh/sshd_config /etc/ssh/sshd_config
-    # 模板不带 Include 时补上，否则 sshd_config.d/*.conf 的定制会被忽略
-    grep -q '^Include /etc/ssh/sshd_config.d/\*.conf' /etc/ssh/sshd_config \
-      || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
-  fi
-  # 最终自检：主配置必须存在且能被 sshd 解析（只能在 chroot 内自检一次）
-  [[ -f /etc/ssh/sshd_config ]] \
-    || echo "[build-rootfs] 警告：/etc/ssh/sshd_config 仍然缺失，SSH 将无法启动"
 
   printf "PermitRootLogin yes\nPasswordAuthentication yes\n" \
     > /etc/ssh/sshd_config.d/90-h5000m.conf
