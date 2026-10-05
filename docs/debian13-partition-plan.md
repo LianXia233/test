@@ -17,7 +17,7 @@
 | p2 | `factory` | 4096 | 8191 | 2 MiB | 出厂校准 / Wi-Fi EEPROM（NVMEM） | **不可修改** |
 | p3 | `fip` | 8192 | 16383 | 4 MiB | BL2 + FIP（U-Boot 本体） | **不可修改** |
 | p4 | `kernel` | 16384 | 77823 | 30 MiB | OpenWrt FIT 镜像（`fit.itb`） | **复用**（写入 Debian FIT） |
-| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | OpenWrt SquashFS + overlay | **复用**（改为 ext4 Debian RootFS） |
+| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | OpenWrt SquashFS + overlay | **复用**（改为引导层 ext4：init + busybox + SquashFS + overlay） |
 
 > 主 GPT：LBA 0（保护 MBR）/ LBA 1（GPT 头）/ LBA 2–33（分区表）。
 > 备份 GPT：磁盘末尾最后 33 个扇区（LBA-34 … LBA-1）。
@@ -80,7 +80,7 @@ U-Boot 从 p4（`kernel` 分区，GPT PARTLABEL=kernel）读取 FIT 镜像到内
    ↓  bootm ${kernel_addr_r}
 Kernel（FIT 内：LZMA 压缩 Image + H5000M DTB）
    ↓  解析 bootargs：root=PARTLABEL=rootfs
-挂载 p5（`rootfs`）→ OpenWrt SquashFS / overlay
+挂载 p5（`rootfs`，引导层 ext4）→ /sbin/init：SquashFS 只读根 + OverlayFS 可写层
 ```
 
 **U-Boot 加载 Kernel 的方式（结论，已由官方固件实测确认）**：Filogic（MT7987）平台的
@@ -115,7 +115,7 @@ FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），boot
 | 分区 | 说明 |
 | --- | --- |
 | p4 `kernel`（30 MiB） | **原位置 / 原大小 / 原 GPT 项 / 原启动逻辑复用**，仅把内容从 OpenWrt FIT 替换为 Debian FIT 镜像 |
-| p5 `rootfs`（~7.24 GiB） | **原分区不变（Start/End/PARTLABEL=rootfs 均不动）**，仅内容从 SquashFS 重新格式化为 ext4 并写入 Debian 13 |
+| p5 `rootfs`（~7.24 GiB） | **原分区不变（Start/End/PARTLABEL=rootfs 均不动）**，仅内容重新格式化为**引导层 ext4**（`/sbin/init` + busybox + `rootfs.squashfs` 只读基础系统 + `/overlay` 可写持久层 + `/boot` 兜底） |
 
 其余空间（p5 之后的磁盘末尾区域）无独立分区，全部并入 p5，**无需新增 Data 分区**（满足"只有确实有必要时才新增"的优先级原则）。
 
@@ -131,7 +131,7 @@ FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），boot
 | p2 | `factory` | 4096 | 8191 | 2 MiB | 裸（校准数据） | 原样保留（Wi-Fi EEPROM） |
 | p3 | `fip` | 8192 | 16383 | 4 MiB | 裸（FIP） | 原样保留（BL2/U-Boot） |
 | p4 | `kernel` | 16384 | 77823 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（H5000M-debian13-kernel.bin） |
-| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian RootFS 所在** |
+| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian 引导层所在**（init + busybox + rootfs.squashfs + overlay 持久层） |
 
 - **PARTUUID**：保持不变（现有 GPT 中已存在，全部保留；Debian 不依赖 PARTUUID）。
 - **PARTLABEL**：保持 `u-boot-env` / `factory` / `fip` / `kernel` / `rootfs` 不变。
@@ -144,11 +144,13 @@ FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），boot
 
 | 内容 | 位置 |
 | --- | --- |
-| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 内 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb` |
-| **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb` |
-| **RootFS** | p5 `rootfs` 分区（ext4，PARTLABEL=`rootfs`），Debian 13 (Trixie) ARM64 |
-| **Data** | p5 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
-| **U-Boot 启动脚本（备用）** | p5 内 `/boot/boot.scr`（由 boot/boot.cmd 编译）+ `/boot/extlinux/extlinux.conf` |
+| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb` |
+| **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb`（p5 引导层内） |
+| **RootFS（只读基础系统）** | p5 引导层内 `/squashfs/rootfs.squashfs`（Debian 13 Trixie ARM64，zstd 压缩，~120 MiB，只读不可变） |
+| **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；首启 `h5000m-grow-rootfs` 在线扩容 p5 至 ~7.2 GiB |
+| **引导脚本** | p5 引导层 `/sbin/init`（busybox 静态）：挂 SquashFS → 组装 OverlayFS → pivot_root → systemd；失败进入只读救援模式 |
+| **Data** | p5 引导层 overlay 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
+| **U-Boot 启动脚本（备用）** | p5 引导层 `/boot/boot.scr`（由 boot/boot.cmd 编译）+ `/boot/extlinux/extlinux.conf` |
 
 ---
 
@@ -192,15 +194,19 @@ earlycon=uart8250,mmio32,0x11000000
 
 ## 9. /etc/fstab（Debian 13）
 
-[rootfs-overlay/etc/fstab](/workspace/rootfs-overlay/etc/fstab)：
+[rootfs-overlay/etc/fstab](/workspace/rootfs-overlay/etc/fstab) 仅作布局说明注释，**无运行时挂载项**：
 
 ```
-# Hiveton H5000M rootfs 挂载（由 U-Boot 通过 root=PARTLABEL=rootfs 指定）
-PARTLABEL=rootfs	/	ext4	errors=remount-ro	0	1
+# 根文件系统 = OverlayFS：
+#   lower = /sq        （只读 SquashFS：/squashfs/rootfs.squashfs 挂载）
+#   upper = /overlay/upper、work = /overlay/work（位于 p5 引导层 ext4，持久化）
+# 由引导层 /sbin/init 在内核按 root=PARTLABEL=rootfs 挂载 p5 后组装，
+# 经 pivot_root 切换；本文件仅作布局说明，无运行时挂载项（root 由内核 + 引导层 init 处理）。
 ```
 
-- 根挂载与内核 cmdline 一致使用 `PARTLABEL=rootfs`（稳定、与分区顺序无关）。
-- 无需其他挂载项（p5 覆盖全部用户区）。
+- root 挂载链：内核 `root=PARTLABEL=rootfs` 挂 p5（引导层 ext4）→ `/sbin/init` 组装
+  OverlayFS → `pivot_root` 切换，全程无需 fstab 参与；
+- 无需其他挂载项（p5 覆盖全部用户区，overlay upper 即持久数据区）。
 
 ---
 
@@ -219,7 +225,7 @@ PARTLABEL=rootfs	/	ext4	errors=remount-ro	0	1
 | 区域 | 操作 |
 | --- | --- |
 | p4 `kernel`（30 MiB） | **覆盖**：写入 `H5000M-debian13-kernel.bin`（原 OpenWrt FIT 被替换） |
-| p5 `rootfs`（~7.24 GiB） | **覆盖**：`mkfs.ext4` 重建文件系统 + 写入 Debian 13 RootFS（原 OpenWrt SquashFS/overlay 全部被替换） |
+| p5 `rootfs`（~7.24 GiB） | **覆盖**：格式化为引导层 ext4 并写入 `/sbin/init` + busybox + `rootfs.squashfs` + overlay 目录（原 OpenWrt SquashFS/overlay 全部被替换；p5 分区本身 Start/End 不变，首启在线扩容至 ~7.2 GiB） |
 | p1 / p2 / p3 | **零写入** |
 | GPT（主 + 备份） | **零写入**（不重建、不重排） |
 | eMMC 硬件配置 | **零写入** |
@@ -314,19 +320,21 @@ sgdisk -p /dev/mmcblk0
 # 2. p4 已写入 FIT（魔数 0xd00dfeed）
 dd if=/dev/mmcblk0p4 bs=1 count=4 status=none | od -An -tx1   # 应输出 d0 0d fe ed
 
-# 3. p5 为 ext4 且可挂载
+# 3. p5 为引导层 ext4 且可挂载（内含 init / busybox / squashfs / overlay）
 blkid /dev/mmcblk0p5          # 应显示 TYPE="ext4" LABEL="rootfs" PARTLABEL="rootfs"
 e2fsck -fn /dev/mmcblk0p5
+debugfs -R 'stat /sbin/init' /dev/mmcblk0p5 2>/dev/null | grep Size
+debugfs -R 'stat /squashfs/rootfs.squashfs' /dev/mmcblk0p5 2>/dev/null | grep Size
 
 # 4. 启动验证（串口 115200n8）
 #    - U-Boot 输出 "Loading FIT image" / bootm 解压内核
-#    - 内核日志出现 mmc0 挂载 rootfs、systemd 启动
+#    - 内核日志出现 mmc0 挂载 rootfs、/sbin/init 挂 SquashFS 组装 OverlayFS、systemd 启动
 #    - 进入 Debian 后：
 cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
-findmnt /                   # /dev/mmcblk0p5 ext4
-lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
-ip a                       # eth0(LAN 192.168.88.1/24) / eth1(WAN DHCP)
-systemctl status h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+findmnt /                    # overlay（upperdir=/overlay/upper ...）
+findmnt /sq                  # squashfs ro
+df -h /                      # overlay 可写容量（首启扩容后 ~7.2 GiB）
+systemctl status h5000m-grow-rootfs h5000m-fancontrol h5000m-router-init dnsmasq router-panel
 
 # 5. 网络/服务自检
 curl -sI http://192.168.88.1    # WebUI 可达
@@ -338,11 +346,13 @@ curl -sI http://192.168.88.1    # WebUI 可达
 
 ```
 build/build-kernel.sh        → out/kernel/Image + mt7987a-hiveton-h5000m.dtb + modules.tar.zst
-build/build-rootfs.sh        → out/rootfs/debian13-arm64-rootfs.tar.zst
+build/build-rootfs.sh        → out/rootfs/rootfs/（RootFS 树；默认另打 tar.zst，--skip-tar 跳过）
+build/make-squashfs.sh       → out/rootfs/rootfs.squashfs（只读基础系统，zstd，~120 MiB）
 build/make-boot.sh           → out/boot/boot.scr（备用引导）
 build/make-sd-image.sh       → out/H5000M-debian13-kernel.bin（→ p4）
-                               out/H5000M-debian13-rootfs.bin（→ p5）
+                               out/H5000M-debian13-rootfs.bin（→ p5 引导层 ext4）
 scripts/install-emmc.sh      → 校验现有分区 → 仅写 p4 / p5 → 校验
+                               （--rootfs-squashfs 为运行中在线升级：原子替换 SquashFS）
 ```
 
 ---
@@ -353,4 +363,6 @@ scripts/install-emmc.sh      → 校验现有分区 → 仅写 p4 / p5 → 校�
 - **最大复用**：kernel 分区（p4）与 rootfs 分区（p5）的起始位置、大小、GPT 项、PARTLABEL
   及启动逻辑全部保留，仅替换内容。
 - **启动方式延续**：U-Boot 直接从 p4 加载 FIT（`bootm`），内核以 `root=PARTLABEL=rootfs`
-  挂载 p5 —— 与当前 OpenWrt 完全同构，Debian 13 无需任何传统 PC 式 EFI/GRUB 组件。
+  挂载 p5 —— 与当前 OpenWrt 完全同构，Debian 13 无需任何传统 PC 式 EFI/GRUB 组件；
+  p5 之上再由引导层 `/sbin/init` 组装 SquashFS（只读根）+ OverlayFS（持久层），
+  该层组装对内核与 U-Boot 完全透明。

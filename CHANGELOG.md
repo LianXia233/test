@@ -4,6 +4,37 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 文档同步至 SquashFS+OverlayFS 架构 + 一键构建链路修复
+
+- **scripts/build.sh 链路修复**（全链改造时遗漏的一键入口）：第 2 步 `build-rootfs.sh`
+  加 `--skip-tar`（SquashFS 直接消费树）；新增第 2.5 步调用 `make-squashfs.sh`；
+  第 3 步 `make-sd-image.sh` 改传 `--squashfs`（旧 `--rootfs tar.zst` 参数已不存在，
+  原链路会直接报"未知参数"）；`--skip-rootfs` 校验改为 RootFS 树存在性；
+  产物列表补 `rootfs.squashfs` / 两个 .bin。`bash -n` 语法通过。
+- **README.md**：新增"系统架构（SquashFS + OverlayFS）"章节（p5 引导层语义 / 164 MiB
+  收益 / 在线升级）；构建命令补 make-squashfs 步骤；Releases 产物更新为
+  sysupgrade.bin（≈164 MiB）/ kernel.bin / rootfs.bin / rootfs.squashfs（移除
+  tar.zst 与 .bin.zst 解压指引）；首次启动改为"全新刷写 + 在线升级"双命令示例；
+  目录结构补 `make-squashfs.sh` 与 `h5000m-grow-rootfs`；验收标准补持久化/可升级条目。
+- **docs/architecture.md**：系统总览插入引导层/OverlayFS 层级；新增 §2 存储架构
+  （p5 布局、/sbin/init 启动序列、关键保证表、体积收益表）；服务启动顺序补
+  init 前置阶段与 h5000m-grow-rootfs；故障矩阵补"OverlayFS 组装失败 → 只读救援模式"行。
+- **docs/build-guide.md**：产物清单重写（RootFS 树 + rootfs.squashfs + 引导层镜像 +
+  sysupgrade）；依赖补 squashfs-tools；新增 §3.3 SquashFS 章节（瘦身/压缩参数/自检）；
+  §3.4 刷写包重写（--squashfs 参数、引导层内容详解、尺寸公式、resize2fs 扩容语义）；
+  §3.6 eMMC 刷入改三方法（引导层镜像 / tar.zst 兼容模式 / --rootfs-squashfs 在线升级
+  含 .bak 回退）；§3.7 CI 描述更新；验证清单改 SquashFS/引导层逐项检查。
+- **docs/first-boot.md**：三方法刷写 + 启动流程插入 /sbin/init 序列（overlay 组装 /
+  pivot_root / 救援模式 / grow-rootfs）；验证命令改 overlay 视角（findmnt / 为 overlay、
+  /sq 为 squashfs ro）；USB 试运行补引导层 dd 说明（tar 解压 = 兼容模式）。
+- **docs/debian13-partition-plan.md**：p5 全文档语义更新为"引导层 ext4"；§6 存放位置
+  拆只读基础系统/可写层/引导脚本三行；§9 fstab 同步为布局说明注释（无运行时挂载项）；
+  §14 验证补 debugfs 引导层检查与 overlay 启动验证；§15 构建流程补 make-squashfs。
+- **docs/troubleshooting.md**：新增 §4「SquashFS / OverlayFS / 只读根」七类故障
+  （救援模式进入、根只读、overlay 空间不足、配置丢失、在线升级失败/回退、squashfs
+  魔数）；§10 eMMC 固化补在线升级命令；§11 重启恢复补 overlay 检查项。
+- **docs/hardware.md**：核对无需改动（无旧架构描述）。
+
 ### 2026-10-06 — 固件架构重构：Debian RootFS → SquashFS 只读根 + OverlayFS 持久层（sysupgrade 579 → 164 MiB）
 
 - **背景与目标**：sysupgrade 整包需上传到设备 /tmp（tmpfs 占 RAM）；旧 ext4 固定尺寸镜像

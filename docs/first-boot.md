@@ -4,11 +4,13 @@ H5000M 已有可工作的 U-Boot（p3 `fip`）。**不修改 U-Boot / GPT / p1-p
 Debian 13 与 OpenWrt 共用完全相同的分区布局与启动链：
 
 ```
-p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
+p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层 ext4：init + busybox + SquashFS + overlay）
 ```
 
 - 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`；
-- 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**。
+- 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**（引导层 ext4），随后 p5 上的
+  `/sbin/init` 挂载只读基础系统 `rootfs.squashfs`、组装 OverlayFS（可写层 = p5 剩余空间，
+  重启持久）后交棒 systemd。
 
 完整方案见 [docs/debian13-partition-plan.md](debian13-partition-plan.md)。
 
@@ -21,7 +23,8 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 
 ```
 out/H5000M-debian13-kernel.bin        # → p4
-out/H5000M-debian13-rootfs.bin   # → p5
+out/H5000M-debian13-rootfs.bin   # → p5（引导层：init + busybox + rootfs.squashfs + overlay）
+out/rootfs/rootfs.squashfs           # 只读基础系统（在线升级用，包含在 rootfs.bin 内）
 out/rootfs/initial-credentials.txt
 ```
 
@@ -46,27 +49,45 @@ sgdisk --backup=/tmp/bk/gpt.bin /dev/mmcblk0
 ## 3. 刷写 Debian 到 eMMC（仅写 p4 / p5）
 
 ```bash
-# 方法一：ext4 镜像（推荐）
+# 方法一：引导层 ext4 镜像（推荐，SquashFS+OverlayFS 完整架构）
 sudo bash scripts/install-emmc.sh \
   --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
   --rootfs-img /path/to/out/H5000M-debian13-rootfs.bin \
   --dev /dev/mmcblk0 --yes
 
-# 方法二：rootfs tar.zst
+# 方法二：rootfs tar.zst（兼容模式：p5 直接展开纯 Debian 树，无只读根/在线升级能力）
 sudo bash scripts/install-emmc.sh \
   --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
   --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
   --dev /dev/mmcblk0 --yes
+
+# 方法三：在线升级（仅当设备已在运行 SquashFS+OverlayFS 架构；不重启、配置/数据全保留）
+sudo bash scripts/install-emmc.sh \
+  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --rootfs-squashfs /path/to/out/rootfs/rootfs.squashfs \
+  --dev /dev/mmcblk0 --yes
 ```
 
-脚本只做三件事：**校验现有分区表（只读）→ 写 p4（FIT）→ 写 p5（ext4）→ 校验**。
+脚本只做：**校验现有分区表（只读）→ 写 p4（FIT）→ 写 p5 → 校验**。
 不会 `mklabel`、不会重排分区、不会触碰 p1-p3 / GPT / U-Boot / eMMC 硬件配置。
+
+- 方法一：p5 格式化为引导层 ext4（`mkfs.ext4 -d` 内容直写），e2fsck 校验；
+- 方法二：p5 格式化后解压 tar（整层重写 = 恢复出厂，overlay 旧配置不保留）；
+- 方法三：**在线升级模式**——复制新 `rootfs.squashfs` 到 p5（经 `/tmpold/squashfs/` 路径）→
+  hsqs 魔数校验 → 旧版 `mv` 为 `rootfs.squashfs.bak` → 新版原子替换 → 回读校验。
+  运行中的系统继续使用旧 SquashFS（overlay 引用旧 inode，安全），**重启后新系统生效**；
+  回退 = `mv /tmpold/squashfs/rootfs.squashfs.bak rootfs.squashfs`（挂载 p5 后操作）。
 
 ## 4. 启动流程
 
 ```
 上电 → BootROM → BL2 → FIP(U-Boot) → U-Boot 读 p4 FIT → bootm
-  → Linux 6.18 → root=PARTLABEL=rootfs 挂载 p5 → Debian 13（systemd）
+  → Linux 6.18 → root=PARTLABEL=rootfs 挂载 p5（引导层 ext4）
+  → /sbin/init（busybox）：挂 /squashfs/rootfs.squashfs（ro）
+      → 组装 OverlayFS（lower=SquashFS，upper/work=/overlay）
+      → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
+  → systemd（Debian 13）
+  → h5000m-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
   → NetworkManager（WAN=eth1 DHCP / LAN=eth0 桥接）
   → h5000m-router-init（创建 br-lan / WAN / Wi-Fi 连接，装配 nftables）
   → dnsmasq（DHCP + DNS + IPv6 RA，192.168.88.1:53）
@@ -103,10 +124,12 @@ cat /etc/h5000m-initial-credentials
 
 ```bash
 cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
-findmnt /                   # /dev/mmcblk0p5 ext4
+findmnt /                    # overlay（upperdir=/overlay/upper ...），lowerdir 含 /sq
+findmnt /sq                  # /dev/mmcblk0p5[/squashfs/rootfs.squashfs] squashfs ro
+df -h /                      # 根可写容量 ≈ p5 引导层剩余空间（首启扩容后 ~7.2 GiB）
 lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
 ip -br addr                 # eth0 / eth1 / br-lan
-systemctl status h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+systemctl status h5000m-grow-rootfs h5000m-fancontrol h5000m-router-init dnsmasq router-panel
 curl -sI http://192.168.88.1
 ```
 
@@ -128,7 +151,9 @@ dd if=/tmp/bk/p5.img of=/dev/mmcblk0p5 bs=4M conv=fsync status=progress
 ### 方式 A：USB 盘
 
 > 默认刷写包（`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`）面向 **eMMC 复用现有分区**，
-> 不再生成通用 USB/SD 镜像。如需 USB 试运行，按下述手动步骤制作（仅用于临时验证盘）：
+> 不再生成通用 USB/SD 镜像。如需 USB 试运行，按下述手动步骤制作（仅用于临时验证盘）。
+> 注意：tar 直接解压为**纯 Debian 树（兼容模式）**，无引导层/只读根；
+> 如需在 USB 上体验完整 SquashFS+OverlayFS 架构，可 `dd if=H5000M-debian13-rootfs.bin of=/dev/sdX1`。
 
 ```bash
 # 在 PC 上制作 USB 试运行盘（警告：以下命令仅针对临时 USB 盘 /dev/sdX，

@@ -9,7 +9,12 @@ U-Boot（现有，不修改）
   ↓
 Linux Kernel 6.18.x（自定义，含 MT7987A 补丁 + H5000M DTB）
   ↓
-Debian 13 (Trixie) ARM64 RootFS（systemd）
+p5 引导层 ext4（root=PARTLABEL=rootfs）：/sbin/init（busybox）
+  ├── 挂载 /squashfs/rootfs.squashfs（只读基础系统，zstd）
+  ├── 组装 OverlayFS：lower=SquashFS，upper/work=p5 /overlay（可写持久层）
+  ├── pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式）
+  ↓
+Debian 13 (Trixie) ARM64 RootFS（systemd，根 = OverlayFS merged）
   ↓
 Linux-Router（唯一网络控制面 / 路由编排层）
   ├── NetworkManager（WAN/LAN 网口基础管理，受 Linux-Router 编排）
@@ -20,7 +25,56 @@ Linux-Router（唯一网络控制面 / 路由编排层）
 WebUI http://192.168.88.1
 ```
 
-## 2. 硬件适配
+## 2. 存储架构：只读根（SquashFS）+ OverlayFS 持久层
+
+### 2.1 p5 引导层布局
+
+p5（PARTLABEL=`rootfs`，~7.2 GiB ext4）不再是整分区 Debian rootfs，而是**引导层**：
+
+```
+p5 引导层 ext4
+├── /sbin/init                  busybox 引导脚本（挂 SquashFS → OverlayFS → pivot_root → systemd）
+├── /usr/bin/busybox            静态 busybox（Debian busybox-static arm64）
+├── /squashfs/rootfs.squashfs   Debian 13 只读基础系统（zstd 压缩，~120 MiB）
+├── /overlay/{upper,work,merged} OverlayFS upper/work/挂载点（p5 剩余空间 = 持久化数据）
+└── /boot/                      备用引导文件（DTB / extlinux.conf / boot.scr）
+```
+
+### 2.2 启动序列（/sbin/init）
+
+```
+内核挂 p5 为根（root=PARTLABEL=rootfs，与旧方案内核行为完全一致）
+  ↓ /sbin/init（busybox 静态，无 glibc 依赖）
+mount -o ro /squashfs/rootfs.squashfs → /sq
+  ↓
+mount -t overlay -o lowerdir=/sq,upperdir=/overlay/upper,workdir=/overlay/work /overlay/merged
+  ↓
+cd /overlay/merged && pivot_root . tmpold    # 旧根（p5 引导层）保留于 /tmpold
+  ↓                                          # → /tmpold/squashfs/ 即在线升级用的 SquashFS 路径
+mount --move /tmpold/{dev,proc,sys} → 新根
+  ↓
+exec busybox env -i /sbin/init               # 交棒 systemd（Debian 正常启动）
+```
+
+### 2.3 关键保证
+
+| 特性 | 机制 |
+| --- | --- |
+| 系统完整性 | 基础系统在 SquashFS 中**只读不可变**，意外断电/写坏不影响系统本体 |
+| 配置持久化 | `/etc` `/var` `/opt` 等全部写入经 OverlayFS 落 p5 upper，重启保留 |
+| 在线升级 | 仅替换 `/tmpold/squashfs/rootfs.squashfs` + 刷 p4 FIT；overlay 数据零丢失；旧版自动备份 `.bak`（mv 回即回退） |
+| 空间在线扩容 | `h5000m-grow-rootfs.service`（oneshot）首启 `findfs PARTLABEL=rootfs` + `resize2fs` 把引导层扩到 ~7.2 GiB |
+| 防砖救援 | OverlayFS 组装失败 → **只读救援模式**：直接以 SquashFS 为根 + tmpfs upper，可 SSH 登录修复 overlay |
+
+### 2.4 体积收益
+
+| 产物 | 旧方案（整分区 ext4） | 新方案（SquashFS + 引导层） |
+| --- | --- | --- |
+| rootfs.bin（p5 镜像） | 540 MiB（空闲空间封进固件） | ~152 MiB（引导层，p5 剩余空间刷后首启自动扩容） |
+| sysupgrade.bin（上传 /tmp） | 579 MiB（≈600 MiB RAM 门槛边缘） | **~164 MiB**（缩 72%） |
+| 只读基础系统 | —（无） | rootfs.squashfs ~120 MiB（zstd -19，514 MiB 树） |
+
+## 3. 硬件适配
 
 | 硬件 | 内核支持方式 | 说明 |
 | --- | --- | --- |
@@ -36,7 +90,7 @@ WebUI http://192.168.88.1
 | PWM 风扇 | pwm-mediatek（补丁）+ pwm-fan | pwm1 50kHz；`/sys/class/hwmon/*/pwm1` |
 | 风扇温控 | h5000m-fancontrol（systemd） | 自动曲线 / 手动 PWM / 故障保护 |
 
-### 2.1 WAN / LAN 物理确认
+### 3.1 WAN / LAN 物理确认
 
 依据 ImmortalWrt 官方已验证配置（`target/linux/mediatek/filogic/base-files/etc/board.d/02_network`）：
 
@@ -58,9 +112,9 @@ hiveton,h5000m)  →  ucidef_set_interfaces_lan_wan eth0 eth1
 
 MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC = LAN MAC + 1。
 
-## 3. 网络管理职责（唯一控制者）
+## 4. 网络管理职责（唯一控制者）
 
-### 3.1 职责表
+### 4.1 职责表
 
 | 功能 | 唯一控制者 | 底层实现 |
 | --- | --- | --- |
@@ -79,7 +133,7 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 | WebUI | Linux-Router | Gunicorn + Flask |
 | 配置持久化 | Linux-Router | /var/lib/linux-router |
 
-### 3.2 明确的禁止项
+### 4.2 明确的禁止项
 
 - ❌ NetworkManager 自行创建热点（Linux-Router 创建 `DebianRouterHotspot` NM 连接时也禁用自己的独立 DHCP，改用 dnsmasq）
 - ❌ systemd-networkd / dhcpcd 管理任何接口（Debian 安装阶段即禁用）
@@ -87,13 +141,13 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 - ❌ firewalld / ufw（不安装，nftables 为唯一防火墙）
 - ❌ 第二套 DHCP Server（仅 dnsmasq 一个 DHCP 实例）
 
-### 3.3 DNS 架构
+### 4.3 DNS 架构
 
 ```
 LAN 客户端 ──► 192.168.88.1:53 ──► dnsmasq ──► WAN 上游 DNS（自动获取 / 8.8.8.8 兜底）
 ```
 
-## 4. 默认网络结构
+## 5. 默认网络结构
 
 ```
 Internet
@@ -120,11 +174,14 @@ LAN（eth0，远离电源的 2.5G 口，192.168.88.1/24）
 
 > Wi-Fi AP 后端说明：Linux-Router 与开机初始化均通过 NetworkManager 管理 Wi-Fi AP（wpa_supplicant 实现 AP 模式）。`hostapd` 已预装，作为独立 AP 后端备用（用户可禁用 NM AP 后改用 `hostapd@.service`），但系统默认不启用 hostapd.service，避免与 NM 争抢接口。
 
-## 5. 服务启动顺序（systemd 依赖编排）
+## 6. 服务启动顺序（systemd 依赖编排）
 
 ```
+内核挂 p5 引导层 → /sbin/init（busybox）：SquashFS → OverlayFS → pivot_root → 救援模式兜底
+  ↓
 systemd
  ├── sys-kernel 固件加载（mt7992 / mt7987 phy 固件，由内核按需加载）
+ ├── h5000m-grow-rootfs.service（oneshot：首启 findfs + resize2fs 在线扩容 p5 至 ~7.2 GiB，marker 防重复）
  ├── h5000m-fancontrol.service（sysinit.target：PWM 风扇温控，温度曲线/手动/故障保护）
  ├── NetworkManager（WAN/LAN 网口管理）
  ├── h5000m-router-init.service（OneShot：创建 WAN/LAN/br-lan/Wi-Fi 连接，装配 nftables）
@@ -147,7 +204,7 @@ systemd
 - **WebUI 失败不阻塞转发**：内核转发由 sysctl + nftables 生效，与 WebUI 无关。
 - **自动恢复**：所有服务 `Restart=on-failure` + `RestartSec=3`，systemd 自动拉起。
 
-## 6. 数据面 / 控制面分离
+## 7. 数据面 / 控制面分离
 
 | 层 | 归属 |
 | --- | --- |
@@ -158,7 +215,7 @@ systemd
 
 用户只通过 WebUI 管理网络，不要求手动编辑 `/etc/network/interfaces`、`/etc/NetworkManager/*`、`/etc/dnsmasq.conf`、`/etc/hostapd/*`、`/etc/nftables.conf` 完成日常配置。
 
-## 7. 故障隔离矩阵
+## 8. 故障隔离矩阵
 
 | 故障 | 影响 | 保证 |
 | --- | --- | --- |
@@ -169,4 +226,5 @@ systemd
 | DHCP 异常 | WebUI 仍在 | WebUI 依赖 agent，不依赖 dnsmasq |
 | WebUI 异常 | 转发仍工作 | 内核转发 + nftables 已由 bringup 一次性装配 |
 | Linux-Router 崩溃 | 自动恢复 | Restart=on-failure + RestartSec=3 |
-| 重启 | 配置恢复 | Linux-Router 持久化配置 + NM connection 持久化 |
+| OverlayFS 组装失败 | 只读救援模式 | /sbin/init 自动降级：SquashFS 根 + tmpfs upper，SSH 可登录修复 |
+| 重启 | 配置恢复 | 写入经 OverlayFS 落 p5 upper 持久保留 + Linux-Router 持久化配置 + NM connection 持久化 |
