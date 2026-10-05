@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — FIT 打包缺 dtc 导致 mkimage 失败（CI run 37325207380）
+
+- **进展**：mt5700 交叉编译 step 通过（上轮 glibc 头修复生效）；RootFS 构建完成；
+  失败点推进到最后的"生成刷写包"——`mkimage 打包 FIT 失败`。
+- **根因**：`mkimage -f` 打包 FIT 时会**调用外部 `dtc` 二进制**编译 ITS（并非内嵌）；
+  workflow 用 `--no-install-recommends` 安装 u-boot-tools 不会带入
+  device-tree-compiler → ITS 编译失败。此前该代码路径从未真正执行到（上上轮死于
+  自拷贝、更早轮死于其他错误），本次为首次暴露。沙箱因已装 device-tree-compiler
+  1.7.0 而通过（环境差异型失败，与上轮同类）。
+- **修复**：workflow apt 增加 `device-tree-compiler`（附注释说明原因）；
+  make-sd-image.sh 工具检测加 `dtc`；mkimage 失败时不再吞 stderr（仅屏蔽 stdout），
+  die 提示指向 dtc；`SIGN_ARGS=()` 显式空数组初始化（set -u 防御）。
+
 ### 2026-10-05 — 交叉编译环境补全：aarch64 glibc 头文件缺失（CI run 37317806045）
 
 - **失败现象**：新 step "交叉编译 luci-app-mt5700" 中 ring 0.17.14 的 C 代码编译报

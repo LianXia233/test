@@ -78,15 +78,17 @@ DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
 FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
 ROOTFS_IMG="$OUT_DIR/H5000M-debian13-rootfs.bin"
 SIGN_KEY=""            # FIT 签名密钥目录；留空则不签名
+SIGN_ARGS=()           # mkimage 附加参数（签名时填充；显式空数组保证 set -u 安全）
 
 [[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh）"
 [[ -f "$DTB"   ]] || die "缺少 DTB：$DTB"
 [[ -f "$ROOTFS_TAR" ]] || die "缺少 RootFS：$ROOTFS_TAR（先运行 build/build-rootfs.sh）"
 
 # ---------------------------------------------------------------- 工具检测
-for tool in mkimage lzma losetup mkfs.ext4 tar zstd; do
+# mkimage -f 打包 FIT 时会调用外部 dtc 编译 ITS（device-tree-compiler 包）
+for tool in mkimage dtc lzma losetup mkfs.ext4 tar zstd; do
   command -v "$tool" >/dev/null 2>&1 || \
-    die "缺少 $tool。请安装：sudo apt-get install u-boot-tools xz-utils e2fsprogs tar zstd"
+    die "缺少 $tool。请安装：sudo apt-get install u-boot-tools device-tree-compiler xz-utils e2fsprogs tar zstd"
 done
 if [[ $(id -u) -ne 0 ]]; then
   echo "[make-sd-image] 需要 root 权限（losetup / mount / mkfs）。请用 sudo 运行。" >&2
@@ -166,10 +168,11 @@ EOF
 # ITS 的 /incbin/() 相对 cwd（cd "$WORK"）解析，无需也不能再复制到自身。
 cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
 log "  mkimage 打包 FIT ..."
+# 失败时保留 mkimage/dtc 的 stderr 以便诊断（仅屏蔽 stdout 进度噪声）
 (
   cd "$WORK"
-  mkimage "${SIGN_ARGS[@]}" -f h5000m.its "$FIT_OUT" >/dev/null 2>&1
-) || die "mkimage 打包 FIT 失败（请安装 u-boot-tools）"
+  mkimage "${SIGN_ARGS[@]}" -f h5000m.its "$FIT_OUT" >/dev/null
+) || die "mkimage 打包 FIT 失败（检查上方 dtc/mkimage 输出；需安装 u-boot-tools + device-tree-compiler）"
 log "  [OK] $FIT_OUT（$(stat -c %s "$FIT_OUT") 字节）"
 dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd0 0d fe ed' \
   && log "  [OK] FIT 魔数校验通过" \

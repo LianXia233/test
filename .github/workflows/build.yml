@@ -94,9 +94,12 @@ jobs:
       - name: 安装构建依赖
         run: |
           sudo apt-get update
+          # device-tree-compiler：mkimage -f 打包 FIT 时调用外部 dtc 编译 ITS
+          #（--no-install-recommends 不会随 u-boot-tools 带入，缺它则 FIT 打包失败）
           sudo apt-get install -y --no-install-recommends \
             debootstrap qemu-user-static binfmt-support rsync zstd \
-            xz-utils e2fsprogs u-boot-tools crossbuild-essential-arm64
+            xz-utils e2fsprogs u-boot-tools device-tree-compiler \
+            crossbuild-essential-arm64
           # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
           sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
 
