@@ -143,7 +143,7 @@ cp "$PACKAGES_FILE" "$ROOTFS_DIR/packages.list"
 chroot "$ROOTFS_DIR" /bin/bash -c '
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends $(tr "\n" " " < /packages.list | sed "s/  */ /g")
+  apt-get install -y --no-install-recommends $(grep -vE '^\s*#' /packages.list | tr "\n" " " | sed "s/  */ /g")
   apt-get clean
 '
 
@@ -171,7 +171,7 @@ if [[ -n "$KERNEL_DIR" ]]; then
     install -m 0644 "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" "$ROOTFS_DIR/boot/mt7987a-hiveton-h5000m.dtb"
   if [[ -f "$KERNEL_DIR/modules.tar.zst" ]]; then
     mkdir -p "$ROOTFS_DIR/lib/modules"
-    tar -xJf "$KERNEL_DIR/modules.tar.zst" -C "$ROOTFS_DIR"
+    tar -I zstd -xf "$KERNEL_DIR/modules.tar.zst" -C "$ROOTFS_DIR"
   fi
   # distro boot（U-Boot 支持 extlinux 时的备用入口）
   mkdir -p "$ROOTFS_DIR/boot/extlinux"
@@ -180,7 +180,7 @@ DEFAULT h5000m
 LABEL h5000m
     LINUX /Image
     FDT /mt7987a-hiveton-h5000m.dtb
-    APPEND root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
+    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
 EOF
 fi
 

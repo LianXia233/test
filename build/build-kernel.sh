@@ -9,7 +9,8 @@
 #
 # 用法：
 #   bash build-kernel.sh [--kernel-version 6.18.54] [--config 文件]
-#                        [--out 目录] [--jobs N] [--skip-failed-patches]
+#                        [--out 目录] [--jobs N]
+#                        [--skip-failed-patches] [--strict]
 #
 # 平台：Linux（Windows 请使用 WSL / Git-Bash；脚本内含平台检测与提示）
 
@@ -40,6 +41,7 @@ CONFIG_FILE="$PROJECT_ROOT/build/kernel-conf/h5000m-6.18.config"
 OUT_DIR="$PROJECT_ROOT/out/kernel"
 JOBS="$(nproc 2>/dev/null || echo 2)"
 SKIP_FAILED=0
+STRICT=0
 
 # 补丁层级（OpenWrt/ImmortalWrt 标准顺序）：
 #   generic/backport -> generic/pending -> generic/hack -> mediatek
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --out)            OUT_DIR="$2"; shift 2 ;;
     --jobs)           JOBS="$2"; shift 2 ;;
     --skip-failed-patches) SKIP_FAILED=1; shift ;;
+    --strict)             STRICT=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
@@ -181,8 +184,12 @@ for sym in "${REQUIRED_SYMBOLS[@]}"; do
     CONFIG_MISSING=1
   fi
 done
-if [[ "$CONFIG_MISSING" -eq 1 && "$SKIP_FAILED" -eq 0 ]]; then
-  log "提示：以上 WARN 项可能因内核版本与补丁不匹配导致；可使用 --skip-failed-patches 继续构建验证流程。"
+if [[ "$CONFIG_MISSING" -eq 1 ]]; then
+  if [[ "$STRICT" -eq 1 ]]; then
+    die "关键配置项缺失（见上方 WARN）。--strict 模式下终止构建；如确认不需要请去掉 --strict。"
+  else
+    log "提示：以上 WARN 项可能因内核版本与补丁不匹配导致；加 --strict 可在缺失时终止构建。"
+  fi
 fi
 
 # ---------------------------------------------------------------- 5. 编译

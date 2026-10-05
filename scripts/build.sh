@@ -76,7 +76,8 @@ if [[ "$SKIP_KERNEL" -eq 0 ]]; then
   bash "$PROJECT_ROOT/build/build-kernel.sh" \
     --kernel-version "$KERNEL_VERSION" \
     --config "$PROJECT_ROOT/build/kernel-conf/h5000m-6.18.config" \
-    --out "$KERNEL_DIR"
+    --out "$KERNEL_DIR" \
+    --strict
 else
   log "== 步骤 1/3：跳过内核构建（使用 $KERNEL_DIR）=="
   for f in Image mt7987a-hiveton-h5000m.dtb modules.tar.zst; do

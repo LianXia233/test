@@ -16,8 +16,6 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   KERNEL_VERSION: 6.18.54
-  ACTIONS_STEP_DEBUG: true
-  ACTIONS_RUNNER_DEBUG: true
 
 jobs:
   # ============================================================ 1. 内核编译
@@ -34,14 +32,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             crossbuild-essential-arm64 bc xz-utils u-boot-tools zstd curl
 
-      - name: 缓存内核源码与编译产物
+      - name: 缓存内核源码压缩包（只缓存 tar，源码树每次干净解压保证补丁幂等）
         uses: actions/cache@v4
         with:
-          path: |
-            out/kernel/src
-          key: kernel-src-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'build/kernel-conf/h5000m-6.18.config', 'dts/**') }}
-          restore-keys: |
-            kernel-src-${{ env.KERNEL_VERSION }}-
+          path: out/kernel/linux-${{ env.KERNEL_VERSION }}.tar.xz
+          key: kernel-tar-${{ env.KERNEL_VERSION }}
 
       - name: 编译 Linux 内核（Image / DTB / modules）
         run: |
@@ -117,8 +112,7 @@ jobs:
             --out out \
             --kernel-dir out/kernel \
             --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
-            --boot-dir out/boot \
-            --rootfs-size 4096
+            --boot-dir out/boot
 
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
@@ -144,7 +138,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(date -u +%y.%m.%d)"     # e.g. 26.10.04，与官方 H5000M Release 版本风格一致
+          VERSION="$(date -u +%y.%m.%d)-r${GITHUB_RUN_NUMBER}"   # e.g. 26.10.05-r42，追加运行序号避免同日重跑覆盖旧 Release
           TAG="H5000M-debian13-${VERSION}"   # 命名带机型（H5000M）+ 版本
           RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
           mkdir -p "$RELEASE_DIR"

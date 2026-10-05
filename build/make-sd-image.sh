@@ -74,6 +74,7 @@ IMAGE="$KERNEL_DIR/Image"
 DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
 FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
 ROOTFS_IMG="$OUT_DIR/H5000M-debian13-rootfs.bin"
+SIGN_KEY=""            # FIT 签名密钥目录；留空则不签名
 
 [[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh）"
 [[ -f "$DTB"   ]] || die "缺少 DTB：$DTB"
@@ -166,7 +167,7 @@ cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
 log "  mkimage 打包 FIT ..."
 (
   cd "$WORK"
-  mkimage -f h5000m.its "$FIT_OUT" >/dev/null 2>&1
+  mkimage "${SIGN_ARGS[@]}" -f h5000m.its "$FIT_OUT" >/dev/null 2>&1
 ) || die "mkimage 打包 FIT 失败（请安装 u-boot-tools）"
 log "  [OK] $FIT_OUT（$(stat -c %s "$FIT_OUT") 字节）"
 dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd0 0d fe ed' \
