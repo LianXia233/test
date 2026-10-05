@@ -85,8 +85,14 @@ else
   done
 fi
 
+# ---------------------------------------------------------------- 1.5 mt5700（RootFS 前置依赖）
+if [[ "$SKIP_ROOTFS" -eq 0 ]]; then
+  log "== 步骤 1.5/3：交叉编译 luci-app-mt5700 at-webserver（Debian 分支）=="
+  bash "$PROJECT_ROOT/build/build-mt5700.sh" --out "$OUT_DIR"
+fi
+
 # ---------------------------------------------------------------- 2. RootFS
-ROOTFS_ARGS=(--out "$OUT_DIR" --hostname "$HOSTNAME" --kernel-dir "$KERNEL_DIR")
+ROOTFS_ARGS=(--out "$OUT_DIR" --hostname "$HOSTNAME" --kernel-dir "$KERNEL_DIR" --mt5700-dir "$OUT_DIR/mt5700")
 [[ -n "$ADMIN_PASSWORD" ]] && ROOTFS_ARGS+=(--admin-password "$ADMIN_PASSWORD")
 [[ -n "$ROOT_PASSWORD"  ]] && ROOTFS_ARGS+=(--root-password "$ROOT_PASSWORD")
 

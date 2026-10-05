@@ -96,7 +96,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             debootstrap qemu-user-static binfmt-support rsync zstd \
-            xz-utils e2fsprogs u-boot-tools
+            xz-utils e2fsprogs u-boot-tools gcc-aarch64-linux-gnu
           # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
           sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
 
@@ -154,12 +154,28 @@ jobs:
             exit 1
           fi
 
+      - name: 交叉编译 luci-app-mt5700 at-webserver（Debian 分支）
+        # 单一 Rust 后端（HTTP API + WebSocket + WebUI 托管，:9000）。
+        # rustls → ring 含 C/asm 代码，默认 aarch64-gnu 交叉编译
+        # （gcc-aarch64-linux-gnu，glibc 2.39 ≤ Debian 13 的 2.41 向后兼容）；
+        # 源码固定 commit 保证可复现（见 build/build-mt5700.sh 头注释）。
+        run: |
+          # 兜底：GitHub 托管 runner 通常预装 rustup/cargo，缺失时经 rustup.rs 安装
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          bash build/build-mt5700.sh --out out
+          ls -lh out/mt5700 out/mt5700/debian
+          cat out/mt5700/PROVENANCE.txt
+
       - name: 构建 Debian 13 RootFS
         run: |
           sudo bash build/build-rootfs.sh \
             --out out \
             --hostname h5000m-debian \
-            --kernel-dir out/kernel
+            --kernel-dir out/kernel \
+            --mt5700-dir out/mt5700
 
       - name: 生成刷写包（p4 kernel .bin + p5 RootFS .bin，复用现有分区布局）
         run: |

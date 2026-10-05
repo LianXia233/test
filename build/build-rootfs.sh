@@ -8,7 +8,7 @@
 #   2. debootstrap --arch=arm64 --foreign trixie + qemu-user-static 第二阶段
 #   3. 安装 build/rootfs/packages.list 全部软件包（Debian 13 稳定版，不使用 Testing/Unstable）
 #   4. 应用 rootfs-overlay/ 覆盖层（网络、systemd 服务、Linux-Router 集成）
-#   5. 预装 luci-app-mt5700（at-webserver-rust AT 后端 + MT5700M 管理面板，局域网可访问）
+#   5. 预装 luci-app-mt5700（Debian 分支 at-webserver 单服务：WebUI + HTTP API :9000）
 #   6. 预初始化 Linux-Router（用户、数据目录、初始密码、WebUI 凭据）
 #   7. 安装内核产物（Image / DTB / modules）到 /boot 与 /lib/modules
 #   8. 输出 debian13-arm64-rootfs.tar.zst
@@ -61,9 +61,10 @@ FIRMWARE_DIR="$PROJECT_ROOT/build/rootfs/firmware"
 LINUX_ROUTER_SRC="$PROJECT_ROOT/linux-router/vendor"
 LINUX_ROUTER_DIR="/opt/linux-router"
 LINUX_ROUTER_DATA="/var/lib/linux-router"
-# luci-app-mt5700 预装（AT 后端经 Release ipk 下发；面板二进制/资源 vendor 入库，见 PROVENANCE.md）
-MT5700_VENDOR_DIR="$PROJECT_ROOT/build/rootfs/vendor/mt5700"
-MT5700_IPK_URL="https://github.com/LianXia233/luci-app-mt5700/releases/download/v1.14.2/aarch64_generic-luci-app-mt5700_1.14.2-r1_aarch64_generic.ipk"
+# luci-app-mt5700（Debian 分支）预装 staging 目录：
+#   由 build/build-mt5700.sh 交叉编译产出（at-webserver + webui/ + debian/ 配置），
+#   来源仓库与固定 commit 见该脚本头注释与 staging 内 PROVENANCE.txt
+MT5700_DIR="$OUT_DIR/mt5700"
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -78,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --timezone)       TIMEZONE="$2"; shift 2 ;;
     --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
     --root-password)  ROOT_PASSWORD="$2"; shift 2 ;;
+    --mt5700-dir)     MT5700_DIR="$2"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
@@ -158,39 +160,33 @@ chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-router-init.sh"
 chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-fancontrol"
 chmod 0755 "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d/90-h5000m-wan-dns"
 
-# ---------------------------------------------------------------- 7. luci-app-mt5700 预装
-log "第 7 步：预装 luci-app-mt5700（at-webserver-rust + MT5700M 管理面板）"
-command -v curl >/dev/null 2>&1 || die "缺少 curl（下载 luci-app-mt5700 Release）"
-[[ -x "$MT5700_VENDOR_DIR/bin/mt5700-web" ]] || die "缺少 vendor 面板二进制 $MT5700_VENDOR_DIR/bin/mt5700-web（见 PROVENANCE.md）"
+# ---------------------------------------------------------------- 7. luci-app-mt5700（Debian 分支）预装
+# 单服务架构：at-webserver 一体化承载 WebUI + HTTP API + WebSocket（0.0.0.0:9000），
+# 移除 OpenWrt/LuCI/ubus/rpcd/UCI 依赖；安装布局与上游 debian/install.sh 一致。
+log "第 7 步：预装 luci-app-mt5700 at-webserver（Debian 分支，:9000）"
+for f in "$MT5700_DIR/at-webserver" \
+         "$MT5700_DIR/debian/config.json" \
+         "$MT5700_DIR/debian/on-uplink.sh" \
+         "$MT5700_DIR/debian/at-webserver.service"; do
+  [[ -f "$f" ]] || die "缺少 $f。请先运行 build/build-mt5700.sh（或用 --mt5700-dir 指定 staging 目录）"
+done
+[[ -d "$MT5700_DIR/webui" ]] || die "缺少 $MT5700_DIR/webui（staging 不完整，重新运行 build/build-mt5700.sh）"
 
-MT5700_TMP="$(mktemp -d)"
-trap 'rm -rf "$MT5700_TMP"' EXIT
-
-# 7.1 AT 后端：luci-app-mt5700 Release ipk 内的 at-webserver-rust 为静态链接 musl，
-#     可直接运行于 Debian glibc；配置与 systemd 单元来自 rootfs-overlay（不在 ipk 内覆盖）。
-log "  下载 luci-app-mt5700 Release ipk：$MT5700_IPK_URL"
-curl -fL --retry 3 --retry-delay 2 -o "$MT5700_TMP/mt5700.ipk" "$MT5700_IPK_URL" \
-  || die "luci-app-mt5700 ipk 下载失败：$MT5700_IPK_URL"
-tar -xzf "$MT5700_TMP/mt5700.ipk" -C "$MT5700_TMP" \
-  || die "ipk 解包失败（非标准 ipk 结构）"
-tar -xzf "$MT5700_TMP/data.tar.gz" -C "$MT5700_TMP" \
-  || die "data.tar.gz 解包失败"
-[[ -f "$MT5700_TMP/usr/bin/at-webserver-rust" ]] || die "ipk 内未找到 usr/bin/at-webserver-rust（Release 资产结构变更？）"
-
-install -d -m 0755 "$ROOTFS_DIR/usr/bin" "$ROOTFS_DIR/usr/libexec/at-webserver"
-install -m 0755 "$MT5700_TMP/usr/bin/at-webserver-rust" "$ROOTFS_DIR/usr/bin/at-webserver-rust"
-install -m 0755 "$MT5700_TMP/usr/libexec/at-webserver/on-uplink.sh" \
-  "$ROOTFS_DIR/usr/libexec/at-webserver/on-uplink.sh"
-
-# 7.2 MT5700M 管理面板（vendor 二进制 + 静态资源；面板绑定 0.0.0.0:8181，LAN 可访问，
-#     WAN/5G 上行由 nftables input 策略 drop 拦截）
-install -m 0755 "$MT5700_VENDOR_DIR/bin/mt5700-web" "$ROOTFS_DIR/usr/bin/mt5700-web"
-mkdir -p "$ROOTFS_DIR/usr/share/mt5700-panel"
+install -d -m 0755 "$ROOTFS_DIR/usr/bin" "$ROOTFS_DIR/etc/mt5700" \
+                   "$ROOTFS_DIR/usr/share/mt5700" "$ROOTFS_DIR/etc/systemd/system"
+# 后端二进制 + WebUI 静态资源（后端经 web_root 直接托管）
+install -m 0755 "$MT5700_DIR/at-webserver" "$ROOTFS_DIR/usr/bin/at-webserver"
 rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r \
-  "$MT5700_VENDOR_DIR/www/" "$ROOTFS_DIR/usr/share/mt5700-panel/www/"
+  "$MT5700_DIR/webui/" "$ROOTFS_DIR/usr/share/mt5700/webui/"
+# 配置与拨号钩子（config.json: http_bind=0.0.0.0 / http_port=9000，LAN 可直达；
+# WAN/5G 上行侧由 nftables input policy drop 拦截，见 rootfs-overlay/etc/nftables.conf）
+install -m 0644 "$MT5700_DIR/debian/config.json"        "$ROOTFS_DIR/etc/mt5700/config.json"
+install -m 0755 "$MT5700_DIR/debian/on-uplink.sh"       "$ROOTFS_DIR/etc/mt5700/on-uplink.sh"
+# systemd 单元（SupplementaryGroups=dialout 串口权限 + ProtectSystem=strict 安全基线）
+install -m 0644 "$MT5700_DIR/debian/at-webserver.service" "$ROOTFS_DIR/etc/systemd/system/at-webserver.service"
 
-# 7.3 产物自检：ELF 魔数 + aarch64 架构（构建机无需运行二进制）
-python3 - "$ROOTFS_DIR/usr/bin/at-webserver-rust" "$ROOTFS_DIR/usr/bin/mt5700-web" <<'PYEOF'
+# 产物自检：ELF 魔数 + aarch64 架构（构建机无需运行二进制）
+python3 - "$ROOTFS_DIR/usr/bin/at-webserver" <<'PYEOF'
 import struct, sys
 for path in sys.argv[1:]:
     with open(path, "rb") as f:
@@ -199,9 +195,9 @@ for path in sys.argv[1:]:
         raise SystemExit(f"[build-rootfs] ERROR: {path} 不是 ELF 文件")
     if struct.unpack_from("<H", hdr, 18)[0] != 183:  # EM_AARCH64
         raise SystemExit(f"[build-rootfs] ERROR: {path} 非 aarch64 架构")
-print("[build-rootfs]   [OK] 预装二进制 ELF/aarch64 校验通过")
+print("[build-rootfs]   [OK] at-webserver ELF/aarch64 校验通过")
 PYEOF
-log "  [OK] at-webserver-rust + mt5700-web + 面板静态资源已预装"
+log "  [OK] at-webserver + webui + /etc/mt5700 配置已预装（来源见 $MT5700_DIR/PROVENANCE.txt）"
 
 # ---------------------------------------------------------------- 8. Linux-Router 集成
 log "第 8 步：集成 Linux-Router 到 $LINUX_ROUTER_DIR"
@@ -301,7 +297,7 @@ CRED
   cat > /etc/motd <<MOTD
 Welcome to Hiveton H5000M Debian 13 Router
 LAN: 192.168.88.1  |  WebUI: http://192.168.88.1
-模组面板: http://192.168.88.1:8181（MT5700M 5G 管理，仅局域网可访问）
+模组面板: http://192.168.88.1:9000（MT5700M 5G 管理，WebUI + HTTP API，仅局域网可访问）
 Wi-Fi: OWRT（2.4G / 5G 同名，与 LAN 同一二层网络）
 初始凭据：cat /etc/h5000m-initial-credentials
 MOTD
@@ -315,7 +311,6 @@ MOTD
   systemctl enable router-panel-agent.service >/dev/null 2>&1 || true
   systemctl enable router-panel.service >/dev/null 2>&1 || true
   systemctl enable at-webserver.service >/dev/null 2>&1 || true
-  systemctl enable mt5700-web.service >/dev/null 2>&1 || true
   systemctl enable ssh.service >/dev/null 2>&1 || true
   systemctl enable systemd-timesyncd.service >/dev/null 2>&1 || true
 

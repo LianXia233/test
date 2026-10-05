@@ -70,6 +70,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+log() { printf '[make-sd-image] %s\n' "$*"; }
+die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
+
 IMAGE="$KERNEL_DIR/Image"
 DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
 FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
@@ -79,9 +82,6 @@ SIGN_KEY=""            # FIT 签名密钥目录；留空则不签名
 [[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh）"
 [[ -f "$DTB"   ]] || die "缺少 DTB：$DTB"
 [[ -f "$ROOTFS_TAR" ]] || die "缺少 RootFS：$ROOTFS_TAR（先运行 build/build-rootfs.sh）"
-
-log() { printf '[make-sd-image] %s\n' "$*"; }
-die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- 工具检测
 for tool in mkimage lzma losetup mkfs.ext4 tar zstd; do
@@ -162,7 +162,8 @@ cat > "$WORK/h5000m.its" <<EOF
 };
 EOF
 
-cp -f "$IMAGE_LZMA" "$WORK/Image.lzma"
+# Image.lzma 已由上方 lzma 压缩直接输出到 $WORK/Image.lzma（见 IMAGE_LZMA 定义），
+# ITS 的 /incbin/() 相对 cwd（cd "$WORK"）解析，无需也不能再复制到自身。
 cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
 log "  mkimage 打包 FIT ..."
 (

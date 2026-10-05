@@ -4,6 +4,52 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — MT5700M 插件切换为 luci-app-mt5700 Debian 分支（单服务架构）+ 修复 make-sd-image.sh 自拷贝（CI run 37295444686）
+
+**变更 A：mt5700 预装方案重写（"Release ipk + vendor 面板"双服务 → Debian 分支单服务）**
+
+- **新架构**：luci-app-mt5700 `Debian` 分支（commit `76d1f82`）——单一 Rust 后端
+  `at-webserver` 2.0.0 一体化承载 **WebUI + HTTP API + WebSocket（0.0.0.0:9000）**，
+  移除 OpenWrt/LuCI/ubus/rpcd/UCI 依赖；替代原 `at-webserver-rust`(RPC :8765) +
+  `mt5700-web`(面板 :8181) 双服务。
+- **二进制来源**：Releases 无 Debian 分支资产（仅 OpenWrt musl ipk/apk），改为
+  **CI 内交叉编译**：新增 `build/build-mt5700.sh`，浅克隆 Debian 分支并 **pin commit
+  `76d1f82e5a00b6622da15ffb64d8be630073ffb2`**（可复现，升级插件时同步更新）；
+  依赖链 tokio/serde/ureq(rustls)——rustls 的 ring 组件含 C/asm 代码，需目标平台
+  C 编译器：默认 **aarch64-unknown-linux-gnu**（gcc-aarch64-linux-gnu，构建机
+  ubuntu-24.04 glibc 2.39 ≤ Debian 13 的 2.41，向后兼容；rootfs 已含 libgcc-s1），
+  musl 静态备选需自备 aarch64-linux-musl-gcc（apt 无此包）。staging 产物
+  （二进制 + webui/ + debian/ 配置 + PROVENANCE.txt）经 `--mt5700-dir` 供
+  build-rootfs.sh 消费。
+- **安装布局**（与上游 debian/install.sh 一致）：`/usr/bin/at-webserver` +
+  `/usr/share/mt5700/webui/` + `/etc/mt5700/{config.json,on-uplink.sh}` +
+  `/etc/systemd/system/at-webserver.service`（SupplementaryGroups=dialout、
+  ProtectSystem=strict + ReadWritePaths）。
+- **清理**：删除 rootfs-overlay 的旧 `at-webserver.service`(ExecStart=at-webserver-rust)、
+  `mt5700-web.service`、`etc/config/at-webserver`（UCI 残留）、
+  `usr/libexec/at-webserver/on-uplink.sh`，以及整个 `build/rootfs/vendor/mt5700/`
+  （面板二进制 + LuCI 静态资源 + PROVENANCE.md，约 60 文件）；systemd enable 列表
+  移除 mt5700-web.service。
+- **端口/防火墙**：motd 模组面板提示 8181 → 9000；nftables 无需改动（`iifname
+  "br-lan" accept` 已覆盖 :9000，WAN 侧 policy drop 不变）。
+- **CI**：build-image job 新增"交叉编译 luci-app-mt5700 at-webserver"step（RootFS
+  构建前执行），build-rootfs.sh 调用加 `--mt5700-dir out/mt5700`。
+
+**变更 B：make-sd-image.sh 修复（run 37295444686 "生成刷写包"失败）**
+
+- 失败现象：`cp: '/tmp/h5000m-img.XXXX/Image.lzma' and '/tmp/h5000m-img.XXXX/Image.lzma'
+  are the same file`。
+- 根因：`IMAGE_LZMA="$WORK/Image.lzma"`（lzma 压缩已直接输出到该路径）后，ITS
+  heredoc 之前遗留一行 `cp -f "$IMAGE_LZMA" "$WORK/Image.lzma"` 自拷贝（源=目标），
+  GNU cp 报错退出。`/incbin/("Image.lzma")` 以 `cd "$WORK"` 为 cwd，文件本就在
+  正确位置，该行纯冗余 → 删除（DTB 跨目录复制保留）。
+- 顺手修复：`die()`/`log()` 定义移至文件入参校验之前（原 79-81 行在函数定义前
+  调用 die，触发时报 command not found 而非友好错误信息）。
+
+**本地验证**：`bash -n` 全部脚本通过；FIT 打包段 mkimage 模拟（假 Image/DTB，魔数
+d0 0d fe ed 校验）通过；沙箱实测 build-mt5700.sh 完整链路（浅克隆固定 commit →
+cargo 交叉编译 aarch64-gnu → staging → ELF/aarch64 自检）通过。
+
 ### 2026-10-05 — Release 的 rootfs 镜像改为 .zst 压缩发布（规避 GitHub 单文件 2 GB 上限）
 
 - **产物变更**：Release 中 `H5000M-debian13-<版本>-rootfs.bin`（裸 ext4）替换为

@@ -36,7 +36,8 @@ sudo bash scripts/build.sh --kernel-version 6.18.54 --out /path/to/out
 # 分步构建
 bash build/build-kernel.sh --kernel-version 6.18.54 --out /path/to/out/kernel
 bash build/make-boot.sh --out /path/to/out/boot     # 生成 boot.scr（备用引导，主引导为 p4 FIT）
-sudo bash build/build-rootfs.sh --out /path/to/out
+bash build/build-mt5700.sh --out /path/to/out       # 交叉编译 luci-app-mt5700 at-webserver（Debian 分支，musl 静态）
+sudo bash build/build-rootfs.sh --out /path/to/out  # 自动消费 out/mt5700（或 --mt5700-dir 指定）
 sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：H5000M-debian13-kernel.bin + H5000M-debian13-rootfs.bin
 ```
 
@@ -79,7 +80,8 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 2. 进入设备（OpenWrt initramfs / Debian live），**先完整备份**（整盘 dd 或逐分区备份）；
 3. 执行 `scripts/install-emmc.sh`，脚本**仅写 p4（FIT）+ p5（ext4）**，其余区域零写入；
 4. 重启后由现有 U-Boot 直接引导 Debian 13；WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、
-   Wi-Fi 默认开启、风扇自动温控、WebUI 就绪、MT5700M 模组面板（http://192.168.88.1:8181，仅局域网）就绪；
+   Wi-Fi 默认开启、风扇自动温控、WebUI 就绪、MT5700M 模组面板（http://192.168.88.1:9000，
+   luci-app-mt5700 Debian 分支 at-webserver 单服务，仅局域网）就绪；
 5. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）。
 
 ```bash
@@ -111,6 +113,7 @@ sudo bash scripts/install-emmc.sh \
 ├── build/
 │   ├── build-kernel.sh          # 内核构建（6.18.54 + ImmortalWrt 补丁集）
 │   ├── build-rootfs.sh          # Debian 13 ARM64 rootfs 构建
+│   ├── build-mt5700.sh          # luci-app-mt5700（Debian 分支）at-webserver 交叉编译
 │   ├── make-boot.sh             # 生成 boot.scr（备用引导）
 │   ├── make-sd-image.sh         # 生成刷写包（p4 FIT + p5 ext4 镜像）
 │   ├── kernel-conf/             # 内核 defconfig 片段
@@ -122,7 +125,7 @@ sudo bash scripts/install-emmc.sh \
 │   │   ├── dnsmasq.d/           # 唯一 DHCP+DNS(:53)
 │   │   ├── nftables.conf        # 唯一防火墙/NAT
 │   │   ├── default/             # h5000m-router / h5000m-fancontrol 配置
-│   │   └── systemd/system/      # h5000m-router-init / h5000m-fancontrol / router-panel / agent / at-webserver / mt5700-web
+│   │   └── systemd/system/      # h5000m-router-init / h5000m-fancontrol / router-panel / agent
 │   └── usr/local/sbin/          # h5000m-router-init.sh、h5000m-fancontrol（风扇温控）
 ├── kernel/
 │   ├── patches/                 # MT7987A 内核补丁（ImmortalWrt 4 层）
