@@ -9,14 +9,18 @@
 #   sysupgrade-hiveton_h5000m/
 #   ├── CONTROL   "BOARD=hiveton_h5000m\n"     ← 板名匹配校验（防刷错设备）
 #   ├── kernel    FIT 镜像                      ← sysupgrade 自动 dd 到 p4 kernel
-#   └── root      ext4 rootfs 镜像              ← sysupgrade 自动 dd 到 p5 rootfs
+#   └── root      引导层 ext4 镜像              ← sysupgrade 自动 dd 到 p5 rootfs
+#                 （引导层 = init + busybox + SquashFS 只读根 + OverlayFS 目录；
+#                   首启自动组装 overlay 并扩满 p5 供持久化）
 #
 # 刷写（目标设备运行 OpenWrt/ImmortalWrt 时，一条命令完成 p4+p5 写入并重启）：
 #   sysupgrade -n /tmp/H5000M-debian13-sysupgrade.bin
 #
 # 【内存约束】sysupgrade 会把整包上传到设备 /tmp（tmpfs，占用 RAM）。
 # 包体必须控制在设备内存可容纳的范围（本仓库产出门槛 ≤600 MiB）：
-# kernel FIT ~13 MiB + rootfs 540 MiB ≈ 553 MiB。
+# kernel FIT ~13 MiB + 引导层 ~150 MiB ≈ 165 MiB 级（SquashFS 方案）。
+# 注意：sysupgrade 整包重写 p5 = 恢复出厂；升级保留配置用设备内在线升级：
+#   sudo bash scripts/install-emmc.sh --rootfs-squashfs rootfs.squashfs --kernel-fit kernel.bin
 #
 # 用法：
 #   bash build/make-sysupgrade-tar.sh \
@@ -100,4 +104,4 @@ TAR_ROOT_SIZE=$(tar -tvf "$OUT_BIN" "${DIRNAME}/root" | awk '{print $3}')
 log "=========================================="
 log "sysupgrade-tar 单文件固件生成完成：$OUT_BIN（$(stat -c %s "$OUT_BIN") 字节）"
 log "刷写（目标设备 OpenWrt/ImmortalWrt）：sysupgrade -n -v /tmp/$(basename "$OUT_BIN")"
-log "首启由 h5000m-grow-rootfs.service 自动 resize2fs 扩满 p5（~7.2 GiB）"
+log "首启：引导层 init 组装 OverlayFS；h5000m-grow-rootfs.service 自动 resize2fs 扩满 p5（~7.2 GiB 持久化层）"

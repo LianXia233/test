@@ -4,6 +4,49 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 固件架构重构：Debian RootFS → SquashFS 只读根 + OverlayFS 持久层（sysupgrade 579 → 164 MiB）
+
+- **背景与目标**：sysupgrade 整包需上传到设备 /tmp（tmpfs 占 RAM）；旧 ext4 固定尺寸镜像
+  （540 MiB，更早 1.15 GiB）把空闲空间也封进固件导致 /tmp 放不下。本次从整条构建链改造为
+  「Debian 13 Minimal RootFS → SquashFS → OverlayFS 可写层 → H5000M 固件」，同时保持
+  BL2 / U-Boot / FIP / u-boot-env / factory / GPT 分区布局与现有启动链 **零改动**。
+- **新布局（p5 引导层 ext4，取代整分区 ext4 Debian）**：
+  - `/sbin/init`（busybox 引导脚本）：挂 `/squashfs/rootfs.squashfs`（只读）→ 组装
+    OverlayFS（lower=/sq，upper/work=p5 引导层 `/overlay`）→ `pivot_root`（旧根保留于
+    `/tmpold`，运行期可直接访问 SquashFS 文件）→ 交棒 systemd；
+  - OverlayFS 组装失败时进入**只读救援模式**（squashfs 根 + tmpfs，可 SSH 修复，防砖）；
+  - `/etc` `/var` `/opt` 等全部写入经 overlay 落在 p5，重启持久保留。
+- **构建链改动**：
+  1. 新增 `build/make-squashfs.sh`：RootFS 树 → 副本瘦身（apt lists/doc/man/info/locale/日志）
+     → `mksquashfs`（默认 zstd -19 -b 256K，`--comp xz` 可选）→ 自检（超块格式 + 抽样 cmp）。
+     沙箱实测 514 MiB 树 → zstd **119 MiB** / xz 106 MiB（选 zstd：解压快 5-10 倍，A53 首启友好）；
+  2. 重写 `build/make-sd-image.sh`：p5 产物改为引导层 ext4（init + busybox + SquashFS +
+     overlay 目录 + /boot 兜底），`mkfs.ext4 -d` 免挂载构建 + e2fsck + debugfs 三重自检；
+     busybox-static arm64 自动从 Debian mirror 下载（本地缓存，`--busybox` 可指定）；
+  3. `build/build-rootfs.sh`：新增 `--skip-tar`（SquashFS 直接消费树，CI 跳过 tar.zst）；
+  4. `build/make-sysupgrade-tar.sh`：root 成员语义更新为引导层镜像，600 MiB 门槛保留；
+  5. `scripts/install-emmc.sh`：新增 **`--rootfs-squashfs` 运行中在线升级模式**——仅原子替换
+     p5 上的 SquashFS 文件 + 刷新 p4 FIT，overlay 持久化数据全部保留，旧版自动备份
+     `rootfs.squashfs.bak`（mv 回即回退）；
+  6. 内核 config：`CONFIG_SQUASHFS_ZSTD=y`（XZ/OverlayFS/DEVTMPFS_MOUNT 原已就绪），
+     沙箱增量编译 `zstd_wrapper.o` 通过；
+  7. workflow：串联 make-squashfs 步骤、依赖加 squashfs-tools、Release 产物
+     （sysupgrade + kernel.bin + rootfs.bin + rootfs.squashfs，移除 tar.zst）、
+     **新增产物 chown 步骤**（修复旧 run 37353387707 的 upload-artifact EACCES：
+     sudo 构建产物为 root 属主，runner 读不了 initial-credentials.txt）。
+- **产物体积（沙箱全链实跑）**：kernel FIT 12.4 MiB + 引导层 152 MiB → **sysupgrade.bin
+  164 MiB**（v2 slim ext4 579 MiB → 缩小 72%；v1 1.15 GiB → 缩小 86%）；
+  设备 /tmp 占用 164 MiB ≪ 600 MiB 约束。字节级闭环校验：sysupgrade 解包 → CONTROL/
+  kernel/root 成员 → 引导层内 init/busybox/squashfs 大小全部一致。
+- **沙箱验证**：① mksquashfs zstd 超块 + 抽样文件 cmp 一致；② 引导层镜像 e2fsck clean；
+  ③ busybox applet（pivot_root/mount/env）核对；④ 两段式真机等价 pivot 序列（引导层成根 →
+  pivot 进 merged → `/tmpold/squashfs` 在线升级路径可见）+ chroot(qemu) 执行 arm64 /bin/echo
+  全链通过；⑤ overlay 真实挂载与重启持久化端到端列为真机首启验证项（容器无 overlay 挂载权限）。
+- **功能兼容**：packages.list 全量保留（NetworkManager / dnsmasq / nftables / hostapd /
+  Wi-Fi / Modem / Linux-Router / WebUI / systemd）；fstab 改为布局说明（root 由引导层处理）；
+  `h5000m-grow-rootfs` 服务迁入 rootfs-overlay（改用 `findfs PARTLABEL=rootfs` 在线扩容
+  p5 引导层至 ~7.2 GiB，作为 overlay 持久层）。
+
 ### 2026-10-06 — MT7987 以太网修复：内核 IRQ 三缺陷 + DTS 八中断/板级 MAC（参考 ctr54188/h5000m-debian 真机逆向）
 
 - **来源**：参考仓库 `ctr54188/h5000m-debian`（同型号设备，作者对厂商出货内核 6.6.94 做了

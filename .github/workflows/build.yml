@@ -77,7 +77,7 @@ jobs:
 
   # ============================================================ 2. RootFS + 刷写包
   build-image:
-    name: RootFS + 刷写包（FIT / ext4，复用现有 eMMC 分区布局）
+    name: RootFS + 刷写包（FIT / 引导层 ext4 = init + busybox + SquashFS + OverlayFS）
     needs: build-kernel
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -92,10 +92,11 @@ jobs:
           sudo apt-get update
           # device-tree-compiler：mkimage -f 打包 FIT 时调用外部 dtc 编译 ITS
           #（--no-install-recommends 不会随 u-boot-tools 带入，缺它则 FIT 打包失败）
+          # squashfs-tools：mksquashfs 生成只读基础系统（zstd/xz）
           sudo apt-get install -y --no-install-recommends \
             debootstrap qemu-user-static binfmt-support rsync zstd \
             xz-utils e2fsprogs u-boot-tools device-tree-compiler \
-            crossbuild-essential-arm64
+            squashfs-tools curl crossbuild-essential-arm64
           # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
           sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
 
@@ -174,21 +175,29 @@ jobs:
             --out out \
             --hostname h5000m-debian \
             --kernel-dir out/kernel \
-            --mt5700-dir out/mt5700
+            --mt5700-dir out/mt5700 \
+            --skip-tar
 
-      - name: 生成刷写包（p4 kernel .bin + p5 RootFS .bin，复用现有分区布局）
-        # make-sd-image.sh 默认开启瘦身模式（apt lists/文档/locale 清理 +
-        # 跳过 /boot/Image 冗余副本）+ 注入首启自动扩容服务，rootfs 镜像 540 MiB
-        # ——保证 sysupgrade 单文件 ≤600 MiB（整包需进设备 /tmp tmpfs）。
+      - name: 生成只读基础系统 SquashFS（zstd）
+        # RootFS 树 → 瘦身副本 → mksquashfs zstd -19 -b 256K → out/rootfs/rootfs.squashfs。
+        # 514 MiB 树 ≈ 120 MiB SquashFS（解压速度比 xz 快 5-10 倍，内核已启用 SQUASHFS_ZSTD）。
+        run: |
+          sudo bash build/make-squashfs.sh --out out --rootfs-dir out/rootfs/rootfs
+          ls -lh out/rootfs/rootfs.squashfs
+
+      - name: 生成刷写包（p4 kernel .bin + p5 引导层 .bin，复用现有分区布局）
+        # make-sd-image.sh 生成引导层 ext4（init + busybox + SquashFS + overlay 目录），
+        # 首启组装 OverlayFS 并扩满 p5（~7.2 GiB）供 /etc /var 持久化；
+        # sysupgrade 单文件 ≈ 150 MiB 级（远低于 600 MiB /tmp 内存约束）。
         run: |
           sudo bash build/make-sd-image.sh \
             --out out \
             --kernel-dir out/kernel \
-            --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
+            --squashfs out/rootfs/rootfs.squashfs \
             --boot-dir out/boot
 
       - name: 封装 sysupgrade-tar 单文件固件（≤600 MiB 内存约束）
-        # OpenWrt 标准 sysupgrade-tar 格式（CONTROL + kernel FIT + root ext4），
+        # OpenWrt 标准 sysupgrade-tar 格式（CONTROL + kernel FIT + root 引导层 ext4），
         # 与官方 sysupgrade.bin 同构：目标设备 sysupgrade -n 一条命令完成 p4/p5 写入。
         run: |
           bash build/make-sysupgrade-tar.sh \
@@ -198,13 +207,22 @@ jobs:
             --out out/H5000M-debian13-sysupgrade.bin
           ls -lh out/H5000M-debian13-sysupgrade.bin
 
+      - name: 修正产物属主（sudo 构建产物 → runner 用户）
+        # build-rootfs / make-squashfs / make-sd-image 均以 sudo 运行，产物属主为 root；
+        # upload-artifact 以 runner 用户打 zip，读不了 root 0600 文件（旧 run 37353387707
+        # 正因 initial-credentials.txt EACCES 失败），上传前统一 chown+放宽读权限。
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" out
+          chmod -R u+rwX out
+          ls -l out/H5000M-debian13-sysupgrade.bin out/rootfs/initial-credentials.txt
+
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
           name: h5000m-debian13-release
           path: |
             out/H5000M-debian13-sysupgrade.bin
-            out/rootfs/debian13-arm64-rootfs.tar.zst
+            out/rootfs/rootfs.squashfs
             out/rootfs/initial-credentials.txt
             out/H5000M-debian13-kernel.bin
             out/H5000M-debian13-rootfs.bin
@@ -223,46 +241,56 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(date -u +%y.%m.%d)-r${GITHUB_RUN_NUMBER}"   # e.g. 26.10.05-r42，追加运行序号避免同日重跑覆盖旧 Release
+          VERSION="$(date -u +%y.%m.%d)-r${GITHUB_RUN_NUMBER}"   # e.g. 26.10.06-r43，追加运行序号避免同日重跑覆盖旧 Release
           TAG="H5000M-debian13-${VERSION}"   # 命名带机型（H5000M）+ 版本
           RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
           mkdir -p "$RELEASE_DIR"
-          # 主交付：sysupgrade-tar 单文件（~579 MiB，sysupgrade -n 一条命令刷写）
+          # 主交付：sysupgrade-tar 单文件（~150 MiB 级，sysupgrade -n 一条命令刷写）
           cp -f out/H5000M-debian13-sysupgrade.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-sysupgrade.bin"
-          # 分区级刷写产物（rootfs 540 MiB < 2 GB 上限，无需 zst 压缩规避）
+          # 分区级刷写产物 + 在线升级用 SquashFS
           cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
           cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
-          cp -f out/rootfs/debian13-arm64-rootfs.tar.zst "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.tar.zst"
+          cp -f out/rootfs/rootfs.squashfs "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.squashfs"
           cp -f out/rootfs/initial-credentials.txt "$RELEASE_DIR/initial-credentials.txt"
           (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
           cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<EOF
-          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}
+          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}（SquashFS + OverlayFS）
 
           完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）。
 
-          ## 方式一（推荐）：sysupgrade 单文件刷写
+          ## 方式一（推荐）：sysupgrade 单文件刷写（~150 MiB 级）
 
           sysupgrade-tar 格式与官方 OpenWrt sysupgrade.bin 同构（板名校验 + dd 写分区），
-          整包 ~579 MiB，可完整放入设备 /tmp（tmpfs）。下载后先对照 sha256sums.txt 校验：
+          整包可完整放入设备 /tmp（tmpfs）。下载后先对照 sha256sums.txt 校验：
 
               sysupgrade -n -v /tmp/H5000M-debian13-${VERSION}-sysupgrade.bin
 
-          自动流程：板名校验 → kernel FIT dd → p4 → rootfs ext4 dd → p5 → 重启进 Debian。
+          自动流程：板名校验 → kernel FIT dd → p4 → 引导层 ext4 dd → p5 → 重启进 Debian。
 
-          ## 方式二：分区级 dd（大文件经 USB/网络存储中转时）
+          ## 方式二：运行中在线升级（保留全部配置，从已刷 SquashFS + OverlayFS 版本起可用）
+
+              sudo bash scripts/install-emmc.sh \
+                --kernel-fit H5000M-debian13-${VERSION}-kernel.bin \
+                --rootfs-squashfs H5000M-debian13-${VERSION}-rootfs.squashfs
+
+          仅替换 p5 上的只读 SquashFS + 刷新 p4，/etc /var /opt 等持久化数据不动；
+          旧版自动备份为 rootfs.squashfs.bak，重启前 mv 回去即可回退。
+
+          ## 方式三：分区级 dd（initramfs / live 环境全新刷写）
 
               sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
                 --kernel-fit H5000M-debian13-${VERSION}-kernel.bin \
                 --rootfs-img H5000M-debian13-${VERSION}-rootfs.bin
 
-          ## 说明
+          ## 架构说明
 
-          - rootfs 镜像为瘦身版 540 MiB（apt 索引/文档/非中英文翻译已清理，功能零损失）；
-            **首次启动 h5000m-grow-rootfs.service 自动 resize2fs 扩满 p5（~7.2 GiB）**，GPT 不动
+          - 只读基础系统：SquashFS（zstd 压缩，~120 MiB）挂在 /sq，由引导层 /sbin/init 组装
+          - 可写层：OverlayFS upper/work 位于 p5 引导层 ext4，首启自动扩满 p5（~7.2 GiB），
+            /etc /var /opt /服务数据全部持久化，重启保留
+          - sysupgrade 整包重写 p5 = 恢复出厂（overlay 旧配置不保留）；保留配置走方式二
           - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1，
             凭据见 initial-credentials.txt（登录后立即改密）
           - p1 u-boot-env / p2 factory / p3 fip 全程不触碰，factory 校准数据安全
-          - 回退 OpenWrt：直接再刷回 OpenWrt sysupgrade.bin 即可
 
           更多说明：https://github.com/LianXia233/test 仓库 docs/first-boot.md
           EOF

@@ -1,0 +1,12 @@
+[Unit]
+Description=Grow p5 data layer (boot rootfs ext4) to fill partition (first boot)
+ConditionPathExists=!/var/lib/h5000m-rootfs-grown
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/h5000m-grow-rootfs
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

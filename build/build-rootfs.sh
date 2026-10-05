@@ -65,6 +65,7 @@ LINUX_ROUTER_DATA="/var/lib/linux-router"
 #   由 build/build-mt5700.sh 交叉编译产出（at-webserver + webui/ + debian/ 配置），
 #   来源仓库与固定 commit 见该脚本头注释与 staging 内 PROVENANCE.txt
 MT5700_DIR="$OUT_DIR/mt5700"
+SKIP_TAR=0                      # 1 = 跳过 tar.zst 打包（SquashFS 方案直接消费树；CI 传 --skip-tar）
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --admin-password) ADMIN_PASSWORD="$2"; shift 2 ;;
     --root-password)  ROOT_PASSWORD="$2"; shift 2 ;;
     --mt5700-dir)     MT5700_DIR="$2"; shift 2 ;;
+    --skip-tar)       SKIP_TAR=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
@@ -158,6 +160,7 @@ log "第 6 步：应用 rootfs-overlay 覆盖层"
 rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r "$OVERLAY_DIR/" "$ROOTFS_DIR/"
 chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-router-init.sh"
 chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-fancontrol"
+chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-grow-rootfs"
 chmod 0755 "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d/90-h5000m-wan-dns"
 
 # ---------------------------------------------------------------- 7. luci-app-mt5700（Debian 分支）预装
@@ -324,7 +327,7 @@ rm -f "$ROOTFS_DIR/packages.list"
 rm -f "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
 
 # ---------------------------------------------------------------- 11. 打包
-log "第 11 步：打包 rootfs"
+log "第 11 步：打包"
 # 预生成凭据清单副本（供构建机/交付查看，不含密钥文件本身）
 cat > "$OUT_DIR/rootfs/initial-credentials.txt" <<CRED
 root(SSH/串口): $ROOT_PASSWORD
@@ -332,9 +335,12 @@ WebUI admin:    $ADMIN_PASSWORD
 CRED
 chmod 0600 "$OUT_DIR/rootfs/initial-credentials.txt"
 
-log "压缩中（zstd）..."
-tar --numeric-owner --xattrs --acls -C "$ROOTFS_DIR" -c . | zstd -q -T0 -o "$ROOTFS_TAR"
-
-log "完成。RootFS: $ROOTFS_TAR"
-ls -lh "$ROOTFS_TAR"
+if [[ "$SKIP_TAR" -eq 1 ]]; then
+  log "跳过 tar.zst 打包（--skip-tar）：SquashFS 方案由 build/make-squashfs.sh 直接消费树 $ROOTFS_DIR"
+else
+  log "压缩中（zstd）..."
+  tar --numeric-owner --xattrs --acls -C "$ROOTFS_DIR" -c . | zstd -q -T0 -o "$ROOTFS_TAR"
+  log "完成。RootFS: $ROOTFS_TAR"
+  ls -lh "$ROOTFS_TAR"
+fi
 log "初始凭据已写入 $OUT_DIR/rootfs/initial-credentials.txt"

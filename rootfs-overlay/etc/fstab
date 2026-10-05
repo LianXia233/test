@@ -1,2 +1,11 @@
-# Hiveton H5000M rootfs 挂载（由 U-Boot 通过 root=PARTLABEL=rootfs 指定）
-PARTLABEL=rootfs	/	ext4	errors=remount-ro	0	1
+# Hiveton H5000M — SquashFS + OverlayFS 布局
+#
+# 根文件系统 = OverlayFS：
+#   lower = /sq        （只读 SquashFS：/squashfs/rootfs.squashfs 挂载）
+#   upper = /overlay/upper、work = /overlay/work（位于 p5 引导层 ext4，持久化）
+#
+# 由引导层 /sbin/init 在内核按 root=PARTLABEL=rootfs 挂载 p5 后组装，
+# 经 pivot_root 切换；p5 剩余空间（首启扩容至 ~7.2 GiB）全部可供
+# /etc /var /opt 等持久化写入使用。
+#
+# 本文件仅作布局说明，无运行时挂载项（root 由内核 + 引导层 init 处理）。

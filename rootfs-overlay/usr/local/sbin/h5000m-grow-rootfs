@@ -1,0 +1,18 @@
+#!/bin/sh
+# Hiveton H5000M — 首启把 p5（PARTLABEL=rootfs）引导层 ext4 在线扩容到分区实际大小
+#
+# 布局：p5 = 引导层 ext4（引导 init + SquashFS 文件 + /overlay upper/work）。
+# 固件内置的引导层镜像远小于 p5 分区（~7.2 GiB），首启在线扩容一次，
+# 之后 upper（/etc /var /opt 等持久化数据）即拥有 p5 全部剩余空间。
+# resize2fs 对正被 OverlayFS 用作 upper/work 的 ext4 在线扩容是安全的。
+set -u
+DEV="$(findfs PARTLABEL=rootfs 2>/dev/null || true)"
+[ -b "$DEV" ] || DEV=/dev/mmcblk0p5
+MARKER=/var/lib/h5000m-rootfs-grown
+[ -e "$MARKER" ] && exit 0
+if command -v resize2fs >/dev/null 2>&1 && [ -b "$DEV" ]; then
+    resize2fs "$DEV" && touch "$MARKER" && echo "h5000m: data layer grown: $DEV"
+else
+    echo "h5000m: grow skipped (resize2fs or $DEV unavailable)"
+fi
+exit 0
