@@ -45,12 +45,16 @@ sudo bash build/make-sd-image.sh --out /path/to/out   # 生成刷写包：H5000M
 ## 云编译（GitHub Actions）
 
 仓库已配置 `.github/workflows/build.yml`，推送到 `main`/`master` 或手动触发 `workflow_dispatch`
-即自动完成：内核编译（6.18 + MT7987A 补丁）→ boot.scr 生成 → Debian 13 RootFS → 刷写包
-（`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5）。产物双通道交付：
+即自动完成：内核编译（6.18 + MT7987A 补丁，`--strict` 严格核验）→ boot.scr 生成 → Debian 13
+RootFS → 刷写包（`H5000M-debian13-kernel.bin` → p4、`H5000M-debian13-rootfs.bin` → p5）。
+产物双通道交付：
 
-- **GitHub Releases**：编译完成后自动创建/更新 `H5000M-debian13-<日期>` Release，按 OpenWrt 惯例发布
-  `H5000M-debian13-<日期>-kernel.bin` / `-rootfs.bin` / `-rootfs.tar.zst` 与 `sha256sums.txt`；
+- **GitHub Releases**：编译完成后自动创建/更新 `H5000M-debian13-<日期>-r<Run序号>` Release，
+  按 OpenWrt 惯例发布 `H5000M-debian13-<日期>-r<Run序号>-kernel.bin` / `-rootfs.bin` /
+  `-rootfs.tar.zst` 与 `sha256sums.txt`（版本号含 GitHub Run 序号，同日重跑不会覆盖旧 Release）；
 - **Actions Artifact**：每次运行保留 14 天（含 `initial-credentials.txt` 首次登录凭据）。
+- **构建健壮性**：内核构建默认 `--strict`，补丁应用失败 / 关键配置符号缺失直接终止构建；
+  CI 缓存仅保留原始源码包 `linux-<版本>.tar.xz`，源码树每次干净解压，补丁幂等。
 
 ## 分区与启动（复用现有 OpenWrt 布局，不改 U-Boot）
 

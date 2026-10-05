@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — 编译流程健壮性修复（12 项）
+
+依据 H5000M-build-flow-review 所列问题逐项修复（默认密码兜底逻辑保持不变）：
+
+- **补丁核验升级（strict）**：CI 内核编译改传 `--strict`（移除 `--skip-failed-patches`）；
+  补丁应用失败或关键配置符号缺失时直接终止构建，不再静默吞错 / 仅告警
+- **补丁应用判定重构**：`apply_patch_series` 目录缺失显式 SKIP；git 失败但 patch 回退成功
+  记为 OK（标注回退），仅 git / patch 均失败才置 FAIL 并终止
+- **CI 缓存策略修正**：`actions/cache` 仅缓存原始源码压缩包
+  `out/kernel/linux-${{ env.KERNEL_VERSION }}.tar.xz`（key 按内核版本固定、无 restore-keys）；
+  源码树每次干净解压，补丁幂等，同时减小缓存体积、提高命中率
+- **模块包压缩名实相符**：`modules.tar.zst` 改 `tar --zstd -cf`（真 zstd），
+  RootFS 解压同步 `tar -I zstd -xf`
+- **apt 注释过滤**：RootFS 软件包安装命令 `grep -vE '^\s*#'` 剔除 `packages.list` 注释行
+- **extlinux 补 earlycon**：extlinux.conf 的 APPEND 补充
+  `earlycon=uart8250,mmio32,0x11000000`（与 FIT 刷写包一致）
+- **RootFS 容量自动估算**：未传 `--rootfs-size` 时解压探测内容大小 +512 MiB 余量、
+  8 MiB 对齐，上限 7372 MiB（eMMC p5 约 7.2 GiB）；CI 移除硬编码 `--rootfs-size 4096`
+- **FIT 可选签名**：`make-sd-image.sh` 新增 `--sign-key <dir>`，提供密钥目录时在 ITS config
+  注入 `signature-1`（sha256,rsa2048）并以 `mkimage -k` 签名；未提供则维持无签名行为
+- **Release 版本号防覆盖**：命名追加 GitHub Run 序号（`%y.%m.%d-r${GITHUB_RUN_NUMBER}`），
+  同日 / 同时重跑不再覆盖旧 Release
+- **移除调试开关**：删除常开的 `ACTIONS_STEP_DEBUG` / `ACTIONS_RUNNER_DEBUG`
+- **cpufreq 补丁兼容修复**：`kernel/patches/844-cpufreq-mediatek-Add-support-for-MT7987.patch`
+  修复 6.18.54 下 `proc_fixed_volt` 兼容问题
+- 同步更新：`build/build-kernel.sh`、`build/build-rootfs.sh`、`build/make-sd-image.sh`、
+  `scripts/build.sh`、`.github/workflows/build.yml`
+
 ### 2026-10-04 — LED 控制：复刻官方 OpenWrt 固件方案
 
 - 实测官方固件 `H5000M-.-sysupgrade.bin`（diag.sh / leds.sh / 内核 FIT DTB）：
