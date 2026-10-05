@@ -6,3 +6,6 @@
 # 二进制文件：禁止行尾转换 / 文本 diff
 *.png binary
 *.ico binary
+
+# luci-app-mt5700 预装产物（Debian 13 rootfs）
+build/rootfs/vendor/mt5700/bin/mt5700-web binary

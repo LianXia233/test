@@ -77,7 +77,7 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（ext4）
 2. 进入设备（OpenWrt initramfs / Debian live），**先完整备份**（整盘 dd 或逐分区备份）；
 3. 执行 `scripts/install-emmc.sh`，脚本**仅写 p4（FIT）+ p5（ext4）**，其余区域零写入；
 4. 重启后由现有 U-Boot 直接引导 Debian 13；WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、
-   Wi-Fi 默认开启、风扇自动温控、WebUI 就绪；
+   Wi-Fi 默认开启、风扇自动温控、WebUI 就绪、MT5700M 模组面板（http://192.168.88.1:8181，仅局域网）就绪；
 5. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）。
 
 ```bash
@@ -120,7 +120,7 @@ sudo bash scripts/install-emmc.sh \
 │   │   ├── dnsmasq.d/           # 唯一 DHCP+DNS(:53)
 │   │   ├── nftables.conf        # 唯一防火墙/NAT
 │   │   ├── default/             # h5000m-router / h5000m-fancontrol 配置
-│   │   └── systemd/system/      # h5000m-router-init / h5000m-fancontrol / router-panel / agent
+│   │   └── systemd/system/      # h5000m-router-init / h5000m-fancontrol / router-panel / agent / at-webserver / mt5700-web
 │   └── usr/local/sbin/          # h5000m-router-init.sh、h5000m-fancontrol（风扇温控）
 ├── kernel/
 │   ├── patches/                 # MT7987A 内核补丁（ImmortalWrt 4 层）

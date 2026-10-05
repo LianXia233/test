@@ -8,9 +8,10 @@
 #   2. debootstrap --arch=arm64 --foreign trixie + qemu-user-static 第二阶段
 #   3. 安装 build/rootfs/packages.list 全部软件包（Debian 13 稳定版，不使用 Testing/Unstable）
 #   4. 应用 rootfs-overlay/ 覆盖层（网络、systemd 服务、Linux-Router 集成）
-#   5. 预初始化 Linux-Router（用户、数据目录、初始密码、WebUI 凭据）
-#   6. 安装内核产物（Image / DTB / modules）到 /boot 与 /lib/modules
-#   7. 输出 debian13-arm64-rootfs.tar.zst
+#   5. 预装 luci-app-mt5700（at-webserver-rust AT 后端 + MT5700M 管理面板，局域网可访问）
+#   6. 预初始化 Linux-Router（用户、数据目录、初始密码、WebUI 凭据）
+#   7. 安装内核产物（Image / DTB / modules）到 /boot 与 /lib/modules
+#   8. 输出 debian13-arm64-rootfs.tar.zst
 #
 # 用法：
 #   sudo bash build/build-rootfs.sh \
@@ -60,6 +61,9 @@ FIRMWARE_DIR="$PROJECT_ROOT/build/rootfs/firmware"
 LINUX_ROUTER_SRC="$PROJECT_ROOT/linux-router/vendor"
 LINUX_ROUTER_DIR="/opt/linux-router"
 LINUX_ROUTER_DATA="/var/lib/linux-router"
+# luci-app-mt5700 预装（AT 后端经 Release ipk 下发；面板二进制/资源 vendor 入库，见 PROVENANCE.md）
+MT5700_VENDOR_DIR="$PROJECT_ROOT/build/rootfs/vendor/mt5700"
+MT5700_IPK_URL="https://github.com/LianXia233/luci-app-mt5700/releases/download/v1.14.2/aarch64_generic-luci-app-mt5700_1.14.2-r1_aarch64_generic.ipk"
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -154,8 +158,53 @@ chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-router-init.sh"
 chmod 0755 "$ROOTFS_DIR/usr/local/sbin/h5000m-fancontrol"
 chmod 0755 "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d/90-h5000m-wan-dns"
 
-# ---------------------------------------------------------------- 7. Linux-Router 集成
-log "第 7 步：集成 Linux-Router 到 $LINUX_ROUTER_DIR"
+# ---------------------------------------------------------------- 7. luci-app-mt5700 预装
+log "第 7 步：预装 luci-app-mt5700（at-webserver-rust + MT5700M 管理面板）"
+command -v curl >/dev/null 2>&1 || die "缺少 curl（下载 luci-app-mt5700 Release）"
+[[ -x "$MT5700_VENDOR_DIR/bin/mt5700-web" ]] || die "缺少 vendor 面板二进制 $MT5700_VENDOR_DIR/bin/mt5700-web（见 PROVENANCE.md）"
+
+MT5700_TMP="$(mktemp -d)"
+trap 'rm -rf "$MT5700_TMP"' EXIT
+
+# 7.1 AT 后端：luci-app-mt5700 Release ipk 内的 at-webserver-rust 为静态链接 musl，
+#     可直接运行于 Debian glibc；配置与 systemd 单元来自 rootfs-overlay（不在 ipk 内覆盖）。
+log "  下载 luci-app-mt5700 Release ipk：$MT5700_IPK_URL"
+curl -fL --retry 3 --retry-delay 2 -o "$MT5700_TMP/mt5700.ipk" "$MT5700_IPK_URL" \
+  || die "luci-app-mt5700 ipk 下载失败：$MT5700_IPK_URL"
+tar -xzf "$MT5700_TMP/mt5700.ipk" -C "$MT5700_TMP" \
+  || die "ipk 解包失败（非标准 ipk 结构）"
+tar -xzf "$MT5700_TMP/data.tar.gz" -C "$MT5700_TMP" \
+  || die "data.tar.gz 解包失败"
+[[ -f "$MT5700_TMP/usr/bin/at-webserver-rust" ]] || die "ipk 内未找到 usr/bin/at-webserver-rust（Release 资产结构变更？）"
+
+install -d -m 0755 "$ROOTFS_DIR/usr/bin" "$ROOTFS_DIR/usr/libexec/at-webserver"
+install -m 0755 "$MT5700_TMP/usr/bin/at-webserver-rust" "$ROOTFS_DIR/usr/bin/at-webserver-rust"
+install -m 0755 "$MT5700_TMP/usr/libexec/at-webserver/on-uplink.sh" \
+  "$ROOTFS_DIR/usr/libexec/at-webserver/on-uplink.sh"
+
+# 7.2 MT5700M 管理面板（vendor 二进制 + 静态资源；面板绑定 0.0.0.0:8181，LAN 可访问，
+#     WAN/5G 上行由 nftables input 策略 drop 拦截）
+install -m 0755 "$MT5700_VENDOR_DIR/bin/mt5700-web" "$ROOTFS_DIR/usr/bin/mt5700-web"
+mkdir -p "$ROOTFS_DIR/usr/share/mt5700-panel"
+rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r \
+  "$MT5700_VENDOR_DIR/www/" "$ROOTFS_DIR/usr/share/mt5700-panel/www/"
+
+# 7.3 产物自检：ELF 魔数 + aarch64 架构（构建机无需运行二进制）
+python3 - "$ROOTFS_DIR/usr/bin/at-webserver-rust" "$ROOTFS_DIR/usr/bin/mt5700-web" <<'PYEOF'
+import struct, sys
+for path in sys.argv[1:]:
+    with open(path, "rb") as f:
+        hdr = f.read(20)
+    if hdr[:4] != b"\x7fELF":
+        raise SystemExit(f"[build-rootfs] ERROR: {path} 不是 ELF 文件")
+    if struct.unpack_from("<H", hdr, 18)[0] != 183:  # EM_AARCH64
+        raise SystemExit(f"[build-rootfs] ERROR: {path} 非 aarch64 架构")
+print("[build-rootfs]   [OK] 预装二进制 ELF/aarch64 校验通过")
+PYEOF
+log "  [OK] at-webserver-rust + mt5700-web + 面板静态资源已预装"
+
+# ---------------------------------------------------------------- 8. Linux-Router 集成
+log "第 8 步：集成 Linux-Router 到 $LINUX_ROUTER_DIR"
 install -d -m 0755 "$ROOTFS_DIR$LINUX_ROUTER_DIR"
 rsync -a \
   --exclude tests --exclude data --exclude ".git*" --exclude "*.pyc" --exclude __pycache__ \
@@ -163,9 +212,9 @@ rsync -a \
 chmod 0644 "$ROOTFS_DIR$LINUX_ROUTER_DIR"/router-panel.service \
            "$ROOTFS_DIR$LINUX_ROUTER_DIR"/router-panel-agent.service
 
-# ---------------------------------------------------------------- 8. 内核产物
+# ---------------------------------------------------------------- 9. 内核产物
 if [[ -n "$KERNEL_DIR" ]]; then
-  log "第 8 步：安装内核产物"
+  log "第 9 步：安装内核产物"
   [[ -f "$KERNEL_DIR/Image" ]] && install -m 0644 "$KERNEL_DIR/Image" "$ROOTFS_DIR/boot/Image"
   [[ -f "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" ]] && \
     install -m 0644 "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" "$ROOTFS_DIR/boot/mt7987a-hiveton-h5000m.dtb"
@@ -184,8 +233,8 @@ LABEL h5000m
 EOF
 fi
 
-# ---------------------------------------------------------------- 9. chroot 内最终配置
-log "第 9 步：chroot 内最终配置（hostname / locale / 服务 / Linux-Router 预初始化）"
+# ---------------------------------------------------------------- 10. chroot 内最终配置
+log "第 10 步：chroot 内最终配置（hostname / locale / 服务 / Linux-Router 预初始化）"
 # 主机会改变 /etc/hosts 中 hostname 行
 sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$HOSTNAME/" "$ROOTFS_DIR/etc/hosts" 2>/dev/null || true
 
@@ -247,6 +296,7 @@ CRED
   cat > /etc/motd <<MOTD
 Welcome to Hiveton H5000M Debian 13 Router
 LAN: 192.168.88.1  |  WebUI: http://192.168.88.1
+模组面板: http://192.168.88.1:8181（MT5700M 5G 管理，仅局域网可访问）
 Wi-Fi: OWRT（2.4G / 5G 同名，与 LAN 同一二层网络）
 初始凭据：cat /etc/h5000m-initial-credentials
 MOTD
@@ -259,6 +309,8 @@ MOTD
   systemctl enable h5000m-fancontrol.service >/dev/null 2>&1 || true
   systemctl enable router-panel-agent.service >/dev/null 2>&1 || true
   systemctl enable router-panel.service >/dev/null 2>&1 || true
+  systemctl enable at-webserver.service >/dev/null 2>&1 || true
+  systemctl enable mt5700-web.service >/dev/null 2>&1 || true
   systemctl enable ssh.service >/dev/null 2>&1 || true
   systemctl enable systemd-timesyncd.service >/dev/null 2>&1 || true
 
@@ -271,8 +323,8 @@ MOTD
 rm -f "$ROOTFS_DIR/packages.list"
 rm -f "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
 
-# ---------------------------------------------------------------- 10. 打包
-log "第 10 步：打包 rootfs"
+# ---------------------------------------------------------------- 11. 打包
+log "第 11 步：打包 rootfs"
 # 预生成凭据清单副本（供构建机/交付查看，不含密钥文件本身）
 cat > "$OUT_DIR/rootfs/initial-credentials.txt" <<CRED
 root(SSH/串口): $ROOT_PASSWORD

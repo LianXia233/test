@@ -45,7 +45,7 @@ jobs:
             --config build/kernel-conf/h5000m-6.18.config \
             --out out/kernel \
             --jobs 4 \
-            --skip-failed-patches
+            --strict
 
       - name: 生成 U-Boot 启动脚本 boot.scr
         run: bash build/make-boot.sh --out out/boot

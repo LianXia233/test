@@ -4,6 +4,49 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — 内核产物收集修复 + RootFS 预装 luci-app-mt5700（局域网可访问）
+
+**编译失败修复（CI run 37258658236：`tar: lib: Cannot stat`）：**
+
+- **modules_install 路径修复**：`build-kernel.sh` 的 `INSTALL_MOD_PATH` 原为相对路径，
+  经 `make -C "$KERNEL_SRC"` 切换工作目录后被解析进内核源码树内部
+  （`$KERNEL_SRC/out/...`），导致 `$MODULES_ROOT/lib` 不存在、收集产物阶段
+  `tar: lib: Cannot stat: No such file or directory`。现统一将 `OUT_DIR` 规范化为绝对路径
+  （`mkdir -p` + `cd && pwd`），`make -C` 与 `tar -C` 落点一致
+- **modules_install 健壮化**：输出落盘 `work/modinst.log`（不再 `>/dev/null` 静默），
+  失败打印日志尾部并终止；新增 `lib/modules` 产出校验
+- **modules.tar.zst 名实相符**：打包由 `tar -cJf`（实为 xz）改为 `tar --zstd -cf`（真 zstd），
+  与 RootFS 侧 `tar -I zstd -xf` 解压方式匹配（原组合会在 RootFS 步骤解压失败）
+
+**CHANGELOG 已声明但未落地的 12 项修复补齐：**
+
+- **CONFIG_PWM_FAN → CONFIG_SENSORS_PWM_FAN**：6.18 起符号改名
+  （drivers/hwmon/Kconfig:1887），配置片段与 `REQUIRED_SYMBOLS` 核验同步更新；
+  已在 6.18.54 上本地复现 defconfig+片段+olddefconfig 验证解析为 `=y`
+- **补丁应用判定重构**：目录缺失显式 `[SKIP]`；git apply 失败但 patch 回退成功记
+  `[OK]（回退）`；仅两者均失败才 `[FAIL]`
+- **CI 改传 `--strict`**：补丁失败或关键配置缺失时终止构建（PWM_FAN 符号修复后可安全启用）
+- **RootFS 容量自动估算**：`make-sd-image.sh` 未传 `--rootfs-size` 时按 tar 包内容求和
+  （+512 MiB 余量、8 MiB 对齐、上限 7372 MiB ≈ eMMC p5 7.2 GiB），移除硬编码 4096 默认值
+
+**RootFS 预装 luci-app-mt5700（对齐 H5000M udev 参考包）：**
+
+- **at-webserver-rust（AT 后端）**：CI 从 Release
+  [`v1.14.2`](https://github.com/LianXia233/luci-app-mt5700/releases/tag/v1.14.2) 的
+  aarch64 ipk 提取（静态链接 musl，可直接运行于 Debian glibc），URL 锁定于
+  `build-rootfs.sh` 的 `MT5700_IPK_URL`
+- **mt5700-web（模组管理面板）**：二进制 + `/usr/share/mt5700-panel/www` 静态资源
+  vendor 入库 `build/rootfs/vendor/mt5700/`（来源与更新指引见其 `PROVENANCE.md`；
+  该二进制暂无公开发布渠道，暂取自 udev 参考包镜像，glibc 动态链接适配 Debian 13）
+- **systemd 单元**：`at-webserver.service`（AT 后端）、`mt5700-web.service`
+  （面板，`--bind 0.0.0.0 --port 8181 --rpc 127.0.0.1:8765`），chroot 阶段 enable
+- **配置**：`/etc/config/at-webserver` 取 ipk 原版（`network_restrict_access '0'` 允许局域网）
+- **局域网访问**：面板绑定 0.0.0.0:8181，`nftables.conf` input 策略 drop 下仅 br-lan 放行
+  → LAN 可直达，WAN / 5G 上行（enx*/wwan*/usb*）不可达；RPC(8765) 保持本机回环，
+  面板服务端代理转发
+- **自检**：预装二进制 ELF 魔数 + aarch64 (e_machine=183) 校验（构建机无需运行二进制）
+- 分区布局维持 CI 现状（p4 30 MiB FIT + p5 ~7.2 GiB ext4），**不做首启扩容**
+
 ### 2026-10-05 — 编译流程健壮性修复（12 项）
 
 依据 H5000M-build-flow-review 所列问题逐项修复（默认密码兜底逻辑保持不变）：

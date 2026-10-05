@@ -117,27 +117,30 @@ log "应用 ImmortalWrt 补丁（backport -> pending -> hack -> mediatek）"
 PATCH_FAILED=0
 apply_patch_series() {
   local series="$1"
-  local files=()
+  local dir patch name
   for dir in $2; do
-    # shellcheck disable=SC2206
-    files+=("$dir"/*.patch)
-  done
-  for patch in "${files[@]}"; do
-    [[ -f "$patch" ]] || continue
-    name="$(basename "$patch")"
-    if git -C "$KERNEL_SRC" apply --check "$patch" 2>/dev/null; then
-      git -C "$KERNEL_SRC" apply "$patch"
-      log "  [OK] $series/$name"
-    else
-      log "  [FAIL] $series/$name（与内核 $KERNEL_VERSION 上下文不匹配）"
-      if command -v patch >/dev/null 2>&1 && patch -d "$KERNEL_SRC" -p1 --forward --dry-run < "$patch" >/dev/null 2>&1; then
-        log "        使用 patch 回退应用成功"
+    if [[ ! -d "$dir" ]]; then
+      log "  [SKIP] $series（目录缺失：$dir）"
+      continue
+    fi
+    for patch in "$dir"/*.patch; do
+      if [[ ! -f "$patch" ]]; then
+        log "  [SKIP] $series（无补丁文件：$dir）"
+        continue
+      fi
+      name="$(basename "$patch")"
+      if git -C "$KERNEL_SRC" apply --check "$patch" 2>/dev/null; then
+        git -C "$KERNEL_SRC" apply "$patch"
+        log "  [OK] $series/$name"
+      elif command -v patch >/dev/null 2>&1 \
+        && patch -d "$KERNEL_SRC" -p1 --forward --dry-run < "$patch" >/dev/null 2>&1; then
         patch -d "$KERNEL_SRC" -p1 --forward < "$patch" >/dev/null
+        log "  [OK] $series/$name（git apply 失败，patch 回退应用成功）"
       else
-        log "        无法应用"
+        log "  [FAIL] $series/$name（与内核 $KERNEL_VERSION 上下文不匹配，且 patch 回退无法应用）"
         PATCH_FAILED=1
       fi
-    fi
+    done
   done
 }
 apply_patch_series backport "$GENERIC_PATCH_DIR/backport"
@@ -179,7 +182,7 @@ REQUIRED_SYMBOLS=(
   CONFIG_ARCH_MEDIATEK CONFIG_PINCTRL_MT7987 CONFIG_COMMON_CLK_MT7987
   CONFIG_COMMON_CLK_MT7987_ETHSYS CONFIG_NET_MEDIATEK_SOC CONFIG_MEDIATEK_GE_PHY
   CONFIG_REALTEK_PHY CONFIG_PCS_MTK_LYNXI CONFIG_MT76_CORE CONFIG_MT7996E
-  CONFIG_MMC_MTK CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_PWM_MEDIATEK CONFIG_PWM_FAN
+  CONFIG_MMC_MTK CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_PWM_MEDIATEK CONFIG_SENSORS_PWM_FAN
   CONFIG_MTK_LVTS_THERMAL CONFIG_USB_XHCI_MTK CONFIG_BRIDGE CONFIG_NF_TABLES
   CONFIG_NFT_MASQ CONFIG_IPV6 CONFIG_EXT4_FS
 )
@@ -227,7 +230,8 @@ DTB="$KERNEL_SRC/arch/arm64/boot/dts/mediatek/mt7987a-hiveton-h5000m.dtb"
 
 install -Dm644 "$IMAGE" "$OUT_DIR/Image"
 install -Dm644 "$DTB"   "$OUT_DIR/mt7987a-hiveton-h5000m.dtb"
-tar -C "$MODULES_ROOT" -cJf "$OUT_DIR/modules.tar.zst" lib
+# 真 zstd 压缩（扩展名 .zst 名实相符；RootFS 侧以 tar -I zstd -xf 解压）
+tar -C "$MODULES_ROOT" --zstd -cf "$OUT_DIR/modules.tar.zst" lib
 
 cp "$CONFIG_FILE" "$OUT_DIR/kernel-config-exported.config"
 grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL_SRC/.config" \

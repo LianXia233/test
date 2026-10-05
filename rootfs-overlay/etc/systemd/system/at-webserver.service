@@ -1,0 +1,15 @@
+[Unit]
+Description=MT5700M AT webserver (serial AT + RPC 127.0.0.1:8765)
+Documentation=https://github.com/LianXia233/luci-app-mt5700
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/at-webserver-rust
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

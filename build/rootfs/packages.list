@@ -16,6 +16,7 @@ kmod
 tzdata
 ca-certificates
 locales
+libgcc-s1
 
 # ---------- 命令行 / 诊断工具 ----------
 curl

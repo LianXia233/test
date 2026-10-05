@@ -51,7 +51,7 @@ OUT_DIR="$PROJECT_ROOT/out"
 KERNEL_DIR="$OUT_DIR/kernel"
 ROOTFS_TAR="$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst"
 BOOT_DIR="$OUT_DIR/boot"
-ROOTFS_SIZE_MB="4096"            # ext4 镜像大小（默认 4 GiB，可写入 8G eMMC 的 p5）
+ROOTFS_SIZE_MB=""                # ext4 镜像大小；留空 = 按 RootFS 内容自动估算（上限 7372 MiB ≈ eMMC p5 7.2 GiB）
 FIT_LOAD_ADDR="0x40000000"       # 与官方 OpenWrt FIT 一致（实测 H5000M sysupgrade.bin：Load/Entry = 0x40000000）
 
 usage() {
@@ -175,6 +175,16 @@ dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd
   || die "生成的 FIT 魔数错误，mkimage 可能不兼容，请检查 u-boot-tools 版本"
 
 # ---------------------------------------------------------------- 2. 生成 ext4 RootFS 镜像（p5 内容）
+if [[ -z "$ROOTFS_SIZE_MB" ]]; then
+  log "未指定 --rootfs-size，按 RootFS 压缩包内容自动估算"
+  CONTENT_BYTES="$(tar --use-compress-program=zstd -tvf "$ROOTFS_TAR" | awk '{s+=$3} END {print s+0}')"
+  ROOTFS_SIZE_MB="$(( ( CONTENT_BYTES / 1048576 + 512 + 7 ) / 8 * 8 ))"   # 内容 + 512 MiB 余量，8 MiB 对齐
+  if (( ROOTFS_SIZE_MB > 7372 )); then
+    log "  估算 ${ROOTFS_SIZE_MB} MiB 超过 eMMC p5 上限（7.2 GiB），按 7372 MiB 处理"
+    ROOTFS_SIZE_MB=7372
+  fi
+  log "  内容 ${CONTENT_BYTES} 字节 → RootFS 镜像 ${ROOTFS_SIZE_MB} MiB（含 512 MiB 余量，8 MiB 对齐）"
+fi
 log "生成 ext4 RootFS 镜像：$ROOTFS_IMG（${ROOTFS_SIZE_MB} MiB，可写入 8G eMMC 的 p5）"
 truncate -s "${ROOTFS_SIZE_MB}Mi" "$ROOTFS_IMG"
 mkfs.ext4 -q -F -L rootfs "$ROOTFS_IMG"
