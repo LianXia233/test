@@ -199,18 +199,25 @@ jobs:
           mkdir -p "$RELEASE_DIR"
           # 固件以 .bin 容器格式发布（内核=FIT、rootfs=ext4），文件名带版本号
           cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
-          cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
+          # rootfs.bin 为裸 ext4 镜像，受 GitHub Releases 单文件 2 GB 上限约束；
+          # 镜像空闲区均为 0，zstd 压缩率极高，故以 .zst 发布，下载后 zstd -d 解压再刷
+          zstd -q -T0 -12 -f \
+            -o "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin.zst" \
+            out/H5000M-debian13-rootfs.bin
+          ls -lh "$RELEASE_DIR"/H5000M-debian13-${VERSION}-rootfs.bin* | awk '{print "  " $5, $9}'
           cp -f out/rootfs/debian13-arm64-rootfs.tar.zst "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.tar.zst"
           (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
           cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<'EOF'
           Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包
           
           完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）：
-          - p4 kernel ← H5000M-debian13-VERSION-kernel.bin（FIT 镜像，现有 U-Boot bootm 直接启动）
-          - p5 rootfs ← H5000M-debian13-VERSION-rootfs.bin（ext4 RootFS，PARTLABEL=rootfs）
-          - debian13-arm64-rootfs-VERSION.tar.zst 为 RootFS 压缩包（可选，install-emmc.sh 支持）
+          - p4 kernel ← H5000M-debian13-VERSION-kernel.bin（FIT 镜像，内核 LZMA 压缩内嵌，现有 U-Boot bootm 直接启动）
+          - p5 rootfs ← H5000M-debian13-VERSION-rootfs.bin.zst（ext4 RootFS 镜像的 zstd 压缩包，PARTLABEL=rootfs；
+            规避 GitHub Releases 单文件 2 GB 上限，下载后先解压：zstd -d H5000M-debian13-VERSION-rootfs.bin.zst）
+          - debian13-arm64-rootfs-VERSION.tar.zst 为 RootFS tar 压缩包（可选，install-emmc.sh 支持）
           
-          刷写（在目标设备上，先备份）：
+          刷写（在目标设备上，先备份；rootfs.bin 为解压后的 ext4 镜像）：
+            zstd -d H5000M-debian13-VERSION-rootfs.bin.zst
             sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
               --kernel-fit H5000M-debian13-VERSION-kernel.bin \
               --rootfs H5000M-debian13-VERSION-rootfs.bin

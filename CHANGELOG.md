@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — Release 的 rootfs 镜像改为 .zst 压缩发布（规避 GitHub 单文件 2 GB 上限）
+
+- **产物变更**：Release 中 `H5000M-debian13-<版本>-rootfs.bin`（裸 ext4）替换为
+  `H5000M-debian13-<版本>-rootfs.bin.zst`（zstd -12 压缩）。裸 ext4 镜像受 GitHub
+  Releases 单文件 2 GB 硬限制约束，本库 rootfs 按"内容 + 512 MiB 余量"自适应估算，
+  逼近或超过 2 GB 时 Release 上传会直接失败；ext4 空闲区均为 0，zstd 压缩率极高。
+- **刷写流程**：下载后先 `zstd -d H5000M-debian13-<版本>-rootfs.bin.zst` 解压，
+  再按原流程 `install-emmc.sh --rootfs <解压出的 .bin>` 刷写；RELEASE-NOTES 已同步。
+- **不变项**：kernel.bin 仍为 FIT（内核 LZMA 压缩内嵌，U-Boot bootm 直接启动）；
+  Actions Artifact 保留原始 `.bin`（artifact 无 2 GB 单文件限制），本地构建仍产出 `.bin`。
+- README 的 Release 产物说明同步更新。
+
 ### 2026-10-05 — usrmerge /lib 符号链接被 tar 破坏导致 chroot 崩溃（CI run 37271056282）
 
 **进展**：内核 job 全绿（31 项配置核验 + 全量编译 + 16 项新增配置编译通过）；
