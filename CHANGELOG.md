@@ -76,6 +76,45 @@ p4 写 FIT 内核（魔数 `d00dfeed` 校验通过）、p5 写引导层 ext4（�
 > 同理，评审所用 Debian 通用内核把 `ext4`/`squashfs`/`overlay`/`loop`/`virtio_blk` 编为模块（`=m`）
 > 因此需要 initramfs；**真机 MT7987A 内核这些均为内置（`=y`，vmlinux 内含 `T crc32c` 符号）**，无需 initramfs。
 
+### 2026-10-06 — CI 构建失败修复：sshd_config 兜底搬出 chroot（多层引号陷阱）
+
+- **现象**（CI run 37386212969，第 10 步「chroot 内最终配置」，2 秒内退出码 **2**）：
+  ```
+  /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config \
+        || sed -i 1i: -c: line 36: syntax error: unexpected end of file
+  ```
+- **根因：多层引号陷阱**。第 10 步本体是
+  `chroot "$ROOTFS_DIR" /bin/bash -e -c ' ... '` 的**单引号整串**，内部靠 `'"$VAR"'`
+  注入变量。上一轮 SSH 修复在该串内写入了含**字面单引号**的语句：
+  ```bash
+  grep -q '^Include ...' /etc/ssh/sshd_config \
+    || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+  ```
+  这组单引号**提前闭合了外层 `-c` 的字符串**，后续内容泄漏到外层 shell，参数被撕碎 ——
+  `sed` 收到分裂的 `1i` 与文件名，正好对应 CI 日志里的 `sed -i 1i`。
+- **最小复现佐证**：构造裸单引号版本，报
+  `sed: -e expression #1, char 2: expected \ after 'a', 'c' or 'i'`，
+  与 CI 现象的参数分裂形态一致。
+- **修复**：把 `sshd_config` 兜底**整体移到宿主机侧第 6 步**（直接操作 `$ROOTFS_DIR`
+  前缀路径），不再进入 `chroot -c` 单引号串；chroot 内仅保留 `mkdir -p sshd_config.d`
+  与写入 `90-h5000m.conf`，并在注释里明示该禁区，避免后人重蹈。
+- **为何沙箱当初没发现**：上一轮为省 debootstrap 时间，直接 `rsync` 覆盖了既有的
+  `out/rootfs/rootfs` 树，**从未执行 `build-rootfs.sh` 本体** —— 该代码路径只在 CI 首次运行。
+  > 教训：绕过构建脚本改产物树，等于绕过了唯一的回归网。
+
+#### 验证方式（沙箱无 binfmt_misc 的替代方案）
+
+沙箱 `/proc/sys/fs/binfmt_misc` 未挂载，**无法真实 chroot 到 arm64**
+（实测 `chroot: failed to run command '/bin/bash': Exec format error`）。
+改用 **mock chroot 拦截 `-c` 参数**，取得真实投递给 bash 的脚本文本：
+
+| 验证项 | 结果 |
+| --- | --- |
+| 三处 `chroot -c` 脚本（`bash -n`） | ✅ 全部通过 |
+| `build-rootfs.sh` 全流程实跑 | ✅ `exit=0`，走到第 11 步打包完成 |
+| 第 10 步脚本语义完整性 | ✅ hostname / localtime / chpasswd / sshd_config.d / 90-h5000m / Linux-Router 均在 |
+| 第 6 步兜底实际生效 | ✅ 日志 `sshd_config 主配置就位` |
+
 ### 2026-10-06 — QEMU 虚拟机「服务级」验收：再挖 4 项缺陷（SSH 完全不可用为最致命）
 
 背景：上一轮已让系统**能启动**（`Welcome to Debian GNU/Linux 13`），但仅是「活着」。
