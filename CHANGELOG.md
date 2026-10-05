@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 产出优化：sysupgrade 单文件 + 瘦身（≤600 MiB 内存约束）+ 触发改纯手动
+
+- **背景**：沙箱实测验证（对照参考镜像 `H5000M-.-sysupgrade.bin` 解剖）：
+  ① 官方 sysupgrade.bin 为 sysupgrade-tar 格式（CONTROL + kernel FIT + root），sysupgrade 解包后 dd 写 p4/p5；
+  ② sysupgrade 会把整包上传到设备 /tmp（tmpfs 占 RAM），此前 1.15 GiB 产出超出设备内存无法刷入，
+     约束定为 ≤600 MiB（实测 579 MiB 交付验证通过）。
+- **make-sd-image.sh**（默认行为变更）：
+  - 新增瘦身模式（默认开启）：清理 apt lists / doc / man / info / 非中英文 locale 翻译；
+    `--no-slim` 恢复全量（自动估算尺寸），`--auto-size` 恢复旧估算行为
+  - 默认跳过 /boot/Image 冗余副本（p4 FIT 已含同一内核，省 60+ MiB）；`--keep-boot-image` 恢复
+  - rootfs 镜像默认 540 MiB（slim 后内容 ~423 MiB，使用率 ~80%）；解压后加 92% 水位防护，
+    超限立即失败并给出处置提示（避免解压中途 No space left 难排查）
+  - 注入 `h5000m-grow-rootfs.service`（oneshot + marker 防重跑）：首启 resize2fs 在线扩满 p5
+    （~7.2 GiB；p5 本为 GPT 全部剩余空间，不触碰分区表）
+- **build/make-sysupgrade-tar.sh**（新增）：sysupgrade-tar 单文件封装（`--sort=name` 成员序
+  CONTROL→kernel→root 与官方一致；uid/gid 归零、mtime 固定可复现；FIT 魔数预检 + 600 MiB
+  内存约束门槛 + CONTROL/成员大小自检）；无 root 依赖，纯 tar。
+- **.github/workflows/build.yml**：
+  - **触发改纯手动 `workflow_dispatch`**（删除 push / pull_request / schedule）——内核编译 1~2 小时，
+    每次推送自动重编几乎不变的内核纯属浪费 runner 时长；出包时 Actions 页面手动 Run 或
+    `gh workflow run build.yml`
+  - build-image job 新增 "封装 sysupgrade-tar 单文件固件" step；artifact 与 Release 均新增
+    sysupgrade.bin（主交付，命名 `H5000M-debian13-<VERSION>-sysupgrade.bin`）
+  - Release 发布简化：rootfs 540 MiB < 2 GB 单文件上限，**不再 zstd 压缩**，直接发 rootfs.bin；
+    RELEASE-NOTES 重写（sysupgrade -n 推荐刷法 + 首启自动扩容 + 回退说明），
+    附 initial-credentials.txt
+- **验证**：make-sysupgrade-tar.sh 以沙箱 FIT + slim ext4 实跑，产物与已交付
+  `H5000M-debian13-sysupgrade.bin`（579,194,880 B，SHA256 243df178…）同构；脚本全部 LF。
+
 ### 2026-10-05 — FIT 打包缺 dtc 导致 mkimage 失败（CI run 37325207380）
 
 - **进展**：mt5700 交叉编译 step 通过（上轮 glibc 头修复生效）；RootFS 构建完成；

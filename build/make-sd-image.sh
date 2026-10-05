@@ -14,18 +14,29 @@
 #   out/H5000M-debian13-kernel.bin  → dd 到 p4（U-Boot 直接 bootm 加载）
 #   out/H5000M-debian13-rootfs.bin  → dd 到 p5（或由 scripts/install-emmc.sh 刷写）
 #
+# 【瘦身模式（默认开启）】刷写包需经 sysupgrade 上传到设备 /tmp（tmpfs 占 RAM），
+# 整包必须控制在设备内存可容纳范围（≤600 MiB）。默认执行：
+#   1. 清理 apt lists / doc / man / info / 非中英文 locale 翻译（零功能损失）
+#   2. 跳过 /boot/Image 冗余副本（p4 FIT 已含同一内核；extlinux 兜底路径保留 DTB）
+#   3. 注入 h5000m-grow-rootfs.service：首启 resize2fs 在线扩满 p5（GPT 不动）
+#   → rootfs 镜像默认 540 MiB（内容约 423 MiB，使用率 ~80%）
+# --no-slim 恢复全量产出（自动估算尺寸），--keep-boot-image 保留 /boot/Image，
+# --auto-size 按压缩包内容自动估算（约 +512 MiB 余量，历史行为）。
+#
 # FIT 镜像说明：与 OpenWrt 一致，内核以 LZMA 压缩打包进 FIT（p4 仅 30 MiB，
 # 未压缩 Image 无法容纳）；U-Boot 的 bootm 自动解压并跳转。
 #
-# RootFS 内 /boot 同时放入备用引导文件（boot.scr / extlinux.conf / Image / DTB），
+# RootFS 内 /boot 保留备用引导文件（boot.scr / extlinux.conf / DTB），
 # 兼容支持 distro boot（bootflow scan）的 U-Boot 作为兜底路径；主路径仍是 p4 FIT。
+# 产出后用 build/make-sysupgrade-tar.sh 封装为 sysupgrade-tar 单文件固件。
 #
 # 用法：
 #   sudo bash build/make-sd-image.sh \
 #     --out out \
 #     --kernel-dir out/kernel \
 #     --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
-#     [--rootfs-size 4096] [--boot-dir out/boot]
+#     [--rootfs-size 540] [--no-slim] [--keep-boot-image] [--auto-size] \
+#     [--boot-dir out/boot]
 #
 # 平台：仅 Linux（losetup / mount / mkfs.ext4 需要 root）。
 # 行尾：本文件为 LF。
@@ -51,27 +62,89 @@ OUT_DIR="$PROJECT_ROOT/out"
 KERNEL_DIR="$OUT_DIR/kernel"
 ROOTFS_TAR="$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst"
 BOOT_DIR="$OUT_DIR/boot"
-ROOTFS_SIZE_MB=""                # ext4 镜像大小；留空 = 按 RootFS 内容自动估算（上限 7372 MiB ≈ eMMC p5 7.2 GiB）
+SLIM=1                            # 瘦身模式（默认开）：sysupgrade 需整包进 /tmp tmpfs（RAM）
+ROOTFS_SIZE_MB="540"              # slim 模式默认 540 MiB（内容 ~423 MiB，使用率 ~80%）；留空 = 自动估算
+ROOTFS_SIZE_EXPLICIT=""           # 用户显式传过 --rootfs-size 时置 1
+KEEP_BOOT_IMAGE=0                 # /boot/Image 冗余副本（p4 FIT 已含同一内核），默认跳过
 FIT_LOAD_ADDR="0x40000000"       # 与官方 OpenWrt FIT 一致（实测 H5000M sysupgrade.bin：Load/Entry = 0x40000000）
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --out)          OUT_DIR="$2"; shift 2 ;;
-    --kernel-dir)   KERNEL_DIR="$2"; shift 2 ;;
-    --rootfs)       ROOTFS_TAR="$2"; shift 2 ;;
-    --boot-dir)     BOOT_DIR="$2"; shift 2 ;;
-    --rootfs-size)  ROOTFS_SIZE_MB="$2"; shift 2 ;;
-    -h|--help)      usage; exit 0 ;;
+    --out)            OUT_DIR="$2"; shift 2 ;;
+    --kernel-dir)     KERNEL_DIR="$2"; shift 2 ;;
+    --rootfs)         ROOTFS_TAR="$2"; shift 2 ;;
+    --boot-dir)       BOOT_DIR="$2"; shift 2 ;;
+    --rootfs-size)    ROOTFS_SIZE_MB="$2"; ROOTFS_SIZE_EXPLICIT=1; shift 2 ;;
+    --no-slim)        SLIM=0; shift ;;
+    --keep-boot-image) KEEP_BOOT_IMAGE=1; shift ;;
+    --auto-size)      ROOTFS_SIZE_MB=""; shift ;;
+    -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
 done
 
 log() { printf '[make-sd-image] %s\n' "$*"; }
 die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ------------------------------------------------------------ 瘦身 + 首启扩容注入
+# 瘦身：清理对运行零影响的缓存与文档（sysupgrade 整包需进设备 /tmp tmpfs）。
+slim_rootfs() {
+  local R="$1"
+  log "瘦身模式：清理 apt lists / 文档 / 非中英文 locale 翻译"
+  rm -rf "$R/var/lib/apt/lists"/* 2>/dev/null || true
+  rm -rf "$R/usr/share/doc"/* 2>/dev/null || true
+  rm -rf "$R/usr/share/man"/* 2>/dev/null || true
+  rm -rf "$R/usr/share/info"/* 2>/dev/null || true
+  if [[ -d "$R/usr/share/locale" ]]; then
+    find "$R/usr/share/locale" -mindepth 1 -maxdepth 1 -type d \
+      ! -name 'en*' ! -name 'zh*' ! -name 'C.*' ! -name 'locale.alias' -exec rm -rf {} + 2>/dev/null || true
+  fi
+}
+
+# 首启自动扩容：镜像小于 p5 分区（~7.2 GiB）时，由 systemd oneshot 单元在首次
+# 启动 resize2fs 在线扩满分区（p5 本就是 GPT 全部剩余空间，不触碰分区表）。
+inject_grow_service() {
+  local R="$1"
+  log "注入首启自动扩容服务 h5000m-grow-rootfs"
+  install -d -m 0755 "$R/usr/local/sbin" "$R/etc/systemd/system" \
+                     "$R/etc/systemd/system/multi-user.target.wants"
+  cat > "$R/usr/local/sbin/h5000m-grow-rootfs" <<'GROWEOF'
+#!/bin/sh
+# 首启将 root 文件系统在线扩容到分区实际大小（PARTLABEL=rootfs / p5）
+set -u
+DEV="$(findmnt -n -o SOURCE / 2>/dev/null)"
+[ -n "$DEV" ] || DEV=/dev/mmcblk0p5
+MARKER=/var/lib/h5000m-rootfs-grown
+[ -e "$MARKER" ] && exit 0
+if command -v resize2fs >/dev/null 2>&1 && [ -b "$DEV" ]; then
+    resize2fs "$DEV" && touch "$MARKER" && echo "rootfs grown: $DEV"
+else
+    echo "grow skipped: resize2fs/$DEV unavailable"
+fi
+exit 0
+GROWEOF
+  chmod 0755 "$R/usr/local/sbin/h5000m-grow-rootfs"
+  cat > "$R/etc/systemd/system/h5000m-grow-rootfs.service" <<'SVCEOF'
+[Unit]
+Description=Grow root filesystem to fill partition (first boot)
+ConditionPathExists=!/var/lib/h5000m-rootfs-grown
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/h5000m-grow-rootfs
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+  ln -sf /etc/systemd/system/h5000m-grow-rootfs.service \
+         "$R/etc/systemd/system/multi-user.target.wants/h5000m-grow-rootfs.service"
+}
 
 # 规范化输入/输出路径为绝对路径：
 # - mkimage 在 (cd "$WORK") 子 shell 中展开 "$FIT_OUT"；OUT_DIR 为相对路径时
@@ -191,6 +264,10 @@ dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd
   || die "生成的 FIT 魔数错误，mkimage 可能不兼容，请检查 u-boot-tools 版本"
 
 # ---------------------------------------------------------------- 2. 生成 ext4 RootFS 镜像（p5 内容）
+# 尺寸决策：slim 模式默认 540 MiB；--no-slim 且未显式指定尺寸时按压缩包内容自动估算
+if [[ "$SLIM" -eq 0 && -z "$ROOTFS_SIZE_EXPLICIT" ]]; then
+  ROOTFS_SIZE_MB=""
+fi
 if [[ -z "$ROOTFS_SIZE_MB" ]]; then
   log "未指定 --rootfs-size，按 RootFS 压缩包内容自动估算"
   CONTENT_BYTES="$(tar --use-compress-program=zstd -tvf "$ROOTFS_TAR" | awk '{s+=$3} END {print s+0}')"
@@ -213,12 +290,32 @@ mount "$LOOP_DEV" "$MNT_ROOT"
 log "解压 RootFS（tar.zst）→ 镜像"
 tar --numeric-owner --xattrs --acls -I zstd -xf "$ROOTFS_TAR" -C "$MNT_ROOT"
 
+# ---------------------------------------------------------------- 2.5 瘦身 + 首启扩容（默认启用）
+if [[ "$SLIM" -eq 1 ]]; then
+  slim_rootfs "$MNT_ROOT"
+fi
+inject_grow_service "$MNT_ROOT"
+
+# 容量水位防护：解压+瘦身后的实际内容超过镜像 92% 时立即失败（避免解压中途 No space left）
+USED_MB="$(du -sm --apparent-size "$MNT_ROOT" 2>/dev/null | cut -f1)"
+LIMIT_MB=$(( ROOTFS_SIZE_MB * 92 / 100 ))
+if (( USED_MB > LIMIT_MB )); then
+  die "RootFS 实际内容 ${USED_MB} MiB 超过镜像 ${ROOTFS_SIZE_MB} MiB 的 92% 安全水位（${LIMIT_MB} MiB）。" \
+      "请勿在 --no-slim 下使用默认尺寸，或调大 --rootfs-size。"
+fi
+log "RootFS 内容 ${USED_MB} MiB / 镜像 ${ROOTFS_SIZE_MB} MiB（水位 $(( USED_MB * 100 / ROOTFS_SIZE_MB ))%）"
+
 # ---------------------------------------------------------------- 3. 写入备用引导文件（/boot）
-# 主引导路径 = p4 FIT（现有 U-Boot bootm 流程）。
-# 以下备用文件供支持 distro boot（bootflow scan / extlinux）的 U-Boot 兜底使用。
+# 主引导路径 = p4 FIT（现有 U-Boot bootm 流程，FIT 内已含同一内核 Image 的 LZMA 压缩包）。
+# /boot/Image 冗余副本默认跳过（省 60+ MiB，sysupgrade 内存约束）；--keep-boot-image 恢复。
 log "写入 /boot 备用引导文件（distro boot 兜底路径）"
 mkdir -p "$MNT_ROOT/boot/extlinux"
-cp -f "$IMAGE" "$MNT_ROOT/boot/Image"
+if [[ "$KEEP_BOOT_IMAGE" -eq 1 ]]; then
+  cp -f "$IMAGE" "$MNT_ROOT/boot/Image"
+  log "  /boot/Image 已写入（--keep-boot-image）"
+else
+  log "  跳过 /boot/Image 冗余副本（p4 FIT 已含同一内核；--keep-boot-image 可恢复）"
+fi
 cp -f "$DTB"   "$MNT_ROOT/boot/mt7987a-hiveton-h5000m.dtb"
 
 cat > "$MNT_ROOT/boot/extlinux/extlinux.conf" <<EOF
@@ -247,7 +344,9 @@ log "=========================================="
 log "刷写包生成完成："
 log "  p4 ← $FIT_OUT"
 log "  p5 ← $ROOTFS_IMG"
-log "刷写方法（在目标设备上执行，保持分区布局不变）："
+log "封装 sysupgrade-tar 单文件（推荐，sysupgrade -n 一条命令刷写）："
+log "  bash build/make-sysupgrade-tar.sh --kernel $FIT_OUT --root $ROOTFS_IMG"
+log "分区级刷写方法（在目标设备上执行，保持分区布局不变）："
 log "  sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \\"
 log "    --kernel-fit $FIT_OUT --rootfs-img $ROOTFS_IMG"
 ls -lh "$FIT_OUT" "$ROOTFS_IMG"

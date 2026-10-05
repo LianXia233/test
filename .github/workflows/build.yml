@@ -1,19 +1,15 @@
 name: H5000M Debian 13 CI 云编译
 
+# 仅手动触发：内核编译耗时 1~2 小时，push 自动触发会 burned 大量 runner 时长
+# （每次提交都重编一遍几乎不变的内核）。需要出包时到 Actions 页面
+# Run workflow 手动启动，或命令行：gh workflow run build.yml
 on:
-  push:
-    branches: [main, master]
-  pull_request:
   workflow_dispatch:
-  schedule:
-    # 每周五 20:00 UTC 自动重建（内核/固件/依赖更新）
-    - cron: '0 20 * * 5'
 
 concurrency:
   group: h5000m-build-${{ github.ref }}
-  # 内核编译耗时 1~2 小时；cancel-in-progress: true 会让新的 push 杀掉正在跑的
-  # 长构建（此前已因此丢失过一次完整编译）。改为排队，配合下方 timeout-minutes
-  # 防止无限占用 runner。
+  # 手动触发也可能重复点击启动；排队（cancel-in-progress: false）保护正在跑的
+  # 长构建不被新 run 杀掉，配合下方 timeout-minutes 防止无限占用 runner。
   cancel-in-progress: false
 
 env:
@@ -181,6 +177,9 @@ jobs:
             --mt5700-dir out/mt5700
 
       - name: 生成刷写包（p4 kernel .bin + p5 RootFS .bin，复用现有分区布局）
+        # make-sd-image.sh 默认开启瘦身模式（apt lists/文档/locale 清理 +
+        # 跳过 /boot/Image 冗余副本）+ 注入首启自动扩容服务，rootfs 镜像 540 MiB
+        # ——保证 sysupgrade 单文件 ≤600 MiB（整包需进设备 /tmp tmpfs）。
         run: |
           sudo bash build/make-sd-image.sh \
             --out out \
@@ -188,11 +187,23 @@ jobs:
             --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst \
             --boot-dir out/boot
 
+      - name: 封装 sysupgrade-tar 单文件固件（≤600 MiB 内存约束）
+        # OpenWrt 标准 sysupgrade-tar 格式（CONTROL + kernel FIT + root ext4），
+        # 与官方 sysupgrade.bin 同构：目标设备 sysupgrade -n 一条命令完成 p4/p5 写入。
+        run: |
+          bash build/make-sysupgrade-tar.sh \
+            --kernel out/H5000M-debian13-kernel.bin \
+            --root out/H5000M-debian13-rootfs.bin \
+            --board hiveton_h5000m \
+            --out out/H5000M-debian13-sysupgrade.bin
+          ls -lh out/H5000M-debian13-sysupgrade.bin
+
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
           name: h5000m-debian13-release
           path: |
+            out/H5000M-debian13-sysupgrade.bin
             out/rootfs/debian13-arm64-rootfs.tar.zst
             out/rootfs/initial-credentials.txt
             out/H5000M-debian13-kernel.bin
@@ -216,36 +227,45 @@ jobs:
           TAG="H5000M-debian13-${VERSION}"   # 命名带机型（H5000M）+ 版本
           RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
           mkdir -p "$RELEASE_DIR"
-          # 固件以 .bin 容器格式发布（内核=FIT、rootfs=ext4），文件名带版本号
+          # 主交付：sysupgrade-tar 单文件（~579 MiB，sysupgrade -n 一条命令刷写）
+          cp -f out/H5000M-debian13-sysupgrade.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-sysupgrade.bin"
+          # 分区级刷写产物（rootfs 540 MiB < 2 GB 上限，无需 zst 压缩规避）
           cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
-          # rootfs.bin 为裸 ext4 镜像，受 GitHub Releases 单文件 2 GB 上限约束；
-          # 镜像空闲区均为 0，zstd 压缩率极高，故以 .zst 发布，下载后 zstd -d 解压再刷
-          zstd -q -T0 -12 -f \
-            -o "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin.zst" \
-            out/H5000M-debian13-rootfs.bin
-          ls -lh "$RELEASE_DIR"/H5000M-debian13-${VERSION}-rootfs.bin* | awk '{print "  " $5, $9}'
+          cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
           cp -f out/rootfs/debian13-arm64-rootfs.tar.zst "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.tar.zst"
+          cp -f out/rootfs/initial-credentials.txt "$RELEASE_DIR/initial-credentials.txt"
           (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
-          cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<'EOF'
-          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包
-          
-          完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）：
-          - p4 kernel ← H5000M-debian13-VERSION-kernel.bin（FIT 镜像，内核 LZMA 压缩内嵌，现有 U-Boot bootm 直接启动）
-          - p5 rootfs ← H5000M-debian13-VERSION-rootfs.bin.zst（ext4 RootFS 镜像的 zstd 压缩包，PARTLABEL=rootfs；
-            规避 GitHub Releases 单文件 2 GB 上限，下载后先解压：zstd -d H5000M-debian13-VERSION-rootfs.bin.zst）
-          - debian13-arm64-rootfs-VERSION.tar.zst 为 RootFS tar 压缩包（可选，install-emmc.sh 支持）
-          
-          刷写（在目标设备上，先备份；rootfs.bin 为解压后的 ext4 镜像）：
-            zstd -d H5000M-debian13-VERSION-rootfs.bin.zst
-            sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
-              --kernel-fit H5000M-debian13-VERSION-kernel.bin \
-              --rootfs H5000M-debian13-VERSION-rootfs.bin
-          
-          首次启动 WebUI：http://192.168.88.1 （初始凭据见构建 Artifact 中 initial-credentials.txt）
+          cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<EOF
+          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}
+
+          完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）。
+
+          ## 方式一（推荐）：sysupgrade 单文件刷写
+
+          sysupgrade-tar 格式与官方 OpenWrt sysupgrade.bin 同构（板名校验 + dd 写分区），
+          整包 ~579 MiB，可完整放入设备 /tmp（tmpfs）。下载后先对照 sha256sums.txt 校验：
+
+              sysupgrade -n -v /tmp/H5000M-debian13-${VERSION}-sysupgrade.bin
+
+          自动流程：板名校验 → kernel FIT dd → p4 → rootfs ext4 dd → p5 → 重启进 Debian。
+
+          ## 方式二：分区级 dd（大文件经 USB/网络存储中转时）
+
+              sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
+                --kernel-fit H5000M-debian13-${VERSION}-kernel.bin \
+                --rootfs-img H5000M-debian13-${VERSION}-rootfs.bin
+
+          ## 说明
+
+          - rootfs 镜像为瘦身版 540 MiB（apt 索引/文档/非中英文翻译已清理，功能零损失）；
+            **首次启动 h5000m-grow-rootfs.service 自动 resize2fs 扩满 p5（~7.2 GiB）**，GPT 不动
+          - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1，
+            凭据见 initial-credentials.txt（登录后立即改密）
+          - p1 u-boot-env / p2 factory / p3 fip 全程不触碰，factory 校准数据安全
+          - 回退 OpenWrt：直接再刷回 OpenWrt sysupgrade.bin 即可
+
           更多说明：https://github.com/LianXia233/test 仓库 docs/first-boot.md
           EOF
-          # 将占位 VERSION 替换为实际版本（避免 heredoc 中直接展开造成歧义）
-          sed -i "s/VERSION/${VERSION}/g" "$RELEASE_DIR/RELEASE-NOTES.md"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
           fi
