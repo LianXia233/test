@@ -25,15 +25,19 @@ import hashlib
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 # linux-firmware 仓库镜像源（按顺序回退）
-# 注意：git.kernel.org 的 plain 接口不加 ?h= 参数（默认 HEAD），
-#       raw.githubusercontent 的默认分支为 master，按需通过 --branch 覆盖。
+# 注意：
+#   - GitLab 镜像 kernel-firmware/linux-firmware 的默认分支是 main（不是 master），
+#     走 API 通道（/repository/files/<quoted>/raw），路径需 URL 编码（/ -> %2F）。
+#   - git.kernel.org 的 plain 接口不加 ?h= 参数（默认 HEAD）。
+#   - 不使用 raw.githubusercontent.com/torvalds/linux-firmware：该仓库不存在。
 MIRRORS = (
+    "https://gitlab.com/api/v4/projects/48890189/repository/files/{quoted_path}/raw?ref=main",
     "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/{path}",
-    "https://raw.githubusercontent.com/torvalds/linux-firmware/{branch}/{path}",
 )
 
 # 固件清单: 仓库相对路径 -> {"dest": 目标子目录, "required": 是否必需}
@@ -81,7 +85,8 @@ def fetch_one(rel_path: str, dest_subdir: str, out_dir: Path, branch: str,
 
     last_err = None
     for mirror in MIRRORS:
-        url = mirror.format(branch=branch, path=rel_path)
+        url = mirror.format(branch=branch, path=rel_path,
+                            quoted_path=urllib.parse.quote(rel_path, safe=""))
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".part")
