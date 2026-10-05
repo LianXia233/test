@@ -220,7 +220,12 @@ if [[ -n "$KERNEL_DIR" ]]; then
     install -m 0644 "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" "$ROOTFS_DIR/boot/mt7987a-hiveton-h5000m.dtb"
   if [[ -f "$KERNEL_DIR/modules.tar.zst" ]]; then
     mkdir -p "$ROOTFS_DIR/lib/modules"
-    tar -I zstd -xf "$KERNEL_DIR/modules.tar.zst" -C "$ROOTFS_DIR"
+    # Debian 13 为 usrmerge 布局（/lib 是指向 /usr/lib 的符号链接）。
+    # tar 解压存档中的 lib/ 目录条目时，会默认删除目标上的符号链接并重建真实
+    # 目录，导致 /lib 不再指向 /usr/lib、/lib/ld-linux-aarch64.so.1 消失，后续
+    # chroot 报 "Could not open '/lib/ld-linux-aarch64.so.1'"。
+    # --keep-directory-symlink 让 tar 跟随符号链接写入（模块落到 /usr/lib/modules）。
+    tar --keep-directory-symlink -I zstd -xf "$KERNEL_DIR/modules.tar.zst" -C "$ROOTFS_DIR"
   fi
   # distro boot（U-Boot 支持 extlinux 时的备用入口）
   mkdir -p "$ROOTFS_DIR/boot/extlinux"
