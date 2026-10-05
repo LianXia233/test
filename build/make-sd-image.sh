@@ -73,6 +73,18 @@ done
 log() { printf '[make-sd-image] %s\n' "$*"; }
 die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# 规范化输入/输出路径为绝对路径：
+# - mkimage 在 (cd "$WORK") 子 shell 中展开 "$FIT_OUT"；OUT_DIR 为相对路径时
+#   FIT 输出会解析到 $WORK/out/...（父目录不存在）→ mkimage 失败并打印 usage；
+# - 其余路径一并绝对化，消除任何 cd 上下文差异。
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+if [[ -d "$KERNEL_DIR" ]]; then KERNEL_DIR="$(cd "$KERNEL_DIR" && pwd)"; fi
+if [[ -d "$(dirname "$ROOTFS_TAR")" ]]; then
+  ROOTFS_TAR="$(cd "$(dirname "$ROOTFS_TAR")" && pwd)/$(basename "$ROOTFS_TAR")"
+fi
+if [[ -d "$BOOT_DIR" ]]; then BOOT_DIR="$(cd "$BOOT_DIR" && pwd)"; fi
+
 IMAGE="$KERNEL_DIR/Image"
 DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
 FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
@@ -190,7 +202,7 @@ if [[ -z "$ROOTFS_SIZE_MB" ]]; then
   log "  内容 ${CONTENT_BYTES} 字节 → RootFS 镜像 ${ROOTFS_SIZE_MB} MiB（含 512 MiB 余量，8 MiB 对齐）"
 fi
 log "生成 ext4 RootFS 镜像：$ROOTFS_IMG（${ROOTFS_SIZE_MB} MiB，可写入 8G eMMC 的 p5）"
-truncate -s "${ROOTFS_SIZE_MB}Mi" "$ROOTFS_IMG"
+truncate -s "${ROOTFS_SIZE_MB}M" "$ROOTFS_IMG"
 mkfs.ext4 -q -F -L rootfs "$ROOTFS_IMG"
 
 LOOP_DEV="$(losetup --find --show "$ROOTFS_IMG")"
