@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — MT7987 以太网修复：内核 IRQ 三缺陷 + DTS 八中断/板级 MAC（参考 ctr54188/h5000m-debian 真机逆向）
+
+- **来源**：参考仓库 `ctr54188/h5000m-debian`（同型号设备，作者对厂商出货内核 6.6.94 做了
+  真机逆向，见其 `docs/ETHERNET-TX-NOTES.md`——kallsyms + 反汇编 + live.dtb 交叉验证）。
+- **内核修复（新增 `kernel/patches/997-net-ethernet-mtk_eth_soc-mt7987-eth-irq-fixes.patch`，
+  在 750/751 mt7987 支持补丁之上叠加，已适配 6.18.54 枚举与函数名）**：
+  1. `mt7987_data.rx.irq_done_mask` 补 `MTK_RX_DONE_INT0`（BIT(16)）——仅清 BIT(14) 会残留
+     RX done 位 → **RX IRQ 风暴 + RCU stall**（厂商寄存器行为逆向结论）；
+  2. FE 中断分组：MT7987（netsys v3、PPE1 类）必须写 `FE_INT_GRP = 0x210ffff2` 且
+     **不触碰 `pdma.int_grp` 分组寄存器**——主线写 `0x21021000`（旧路径）与厂商不一致；
+     此项参考仓库 997 补丁未包含，依据其 NOTES 反汇编证据补齐；
+  3. 厂商在全部 8 条 eth IRQ 线上注册合并 handler：新增 `mtk_handle_irq_fe`
+     （TX+RX 合并处理，非本设备中断源返回 `IRQ_NONE` 防 IRQ 风暴），`mtk_probe` 对
+     MT7987 挂满 8 线；`mtk_get_irqs` 按厂商布局填 TX=资源1 / RX=资源2。
+- **DTS 修复（`dts/mt7987.dtsi` + `dts/mt7987a-hiveton-h5000m.dts`）**：
+  1. eth 节点中断 4 → **8 条**（189/190/191/192 + 196/197/198/199，与厂商 DTB 一致；
+     不加 interrupt-names，同厂商 DTB 行为，8 条 IRQ 由 997 补丁按资源序注册）；
+  2. gmac2 补 `phy-mode = "internal"` + `fixed-link`（1G 全双工，与已验证厂商 DTB 一致；
+     属性顺序已按 dtc 规范置于子节点之前——参考仓库原补丁顺序会被新版 dtc 拒绝）；
+  3. 板级 gmac0/gmac1 补 `mac-address`（`0e:c7:2f:5b:6a:84/85`，本地管理地址，来源为
+     参考作者真机厂商 DTB；同型号出厂同值，如有独占地址需求可自行修改）；
+  4. pcie1 `disabled → okay`（与已验证厂商 DTB 一致，空槽无副作用）。
+- **验证**：① 补丁经 `patch -p1 --dry-run` 与 `git apply --check` 双重回放通过；
+  ② 沙箱 6.18.54 构建树增量编译 `mtk_eth_soc.o` 通过（gcc 无警告错误）；
+  ③ DTS 经 cpp+dtc 编译为 DTB 成功，反解确认 8 条中断值、双 MAC、fixed-link 均已生效。
+- **遗留提醒**：本仓库 Wi-Fi（MT7992 hostapd AP）与有线 HNAT flowtable 卸载为参考仓库已
+  实现、本仓库未覆盖的功能面，后续按需引入。
+
 ### 2026-10-06 — 产出优化：sysupgrade 单文件 + 瘦身（≤600 MiB 内存约束）+ 触发改纯手动
 
 - **背景**：沙箱实测验证（对照参考镜像 `H5000M-.-sysupgrade.bin` 解剖）：

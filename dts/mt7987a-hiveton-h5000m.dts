@@ -111,12 +111,16 @@
 };
 
 &gmac0 {
+	/* 厂商已验证 DTB 的板级 MAC（本地管理地址）；如需独占地址可自行修改 */
+	mac-address = [0e c7 2f 5b 6a 84];
 	phy-mode = "2500base-x";
 	phy-handle = <&phy0>;
 	status = "okay";
 };
 
 &gmac1 {
+	/* 厂商已验证 DTB 的板级 MAC（本地管理地址）；如需独占地址可自行修改 */
+	mac-address = [0e c7 2f 5b 6a 85];
 	phy-mode = "internal";
 	phy-handle = <&phy1>;
 	status = "okay";
@@ -221,7 +225,8 @@
 };
 
 &pcie1 {
-	status = "disabled";
+	/* 与已验证镜像的 DTB 保持一致（该槽位未挂设备，启用无副作用） */
+	status = "okay";
 };
 
 &pio {

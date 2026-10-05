@@ -1,0 +1,150 @@
+From: H5000M Debian 13 project
+Subject: [PATCH] net: ethernet: mtk_eth_soc: MT7987 eth IRQ fixes (vendor-reverse-engineered)
+
+Fixes reverse-engineered from the shipping vendor 6.6.94 kernel
+(see ctr54188/h5000m-debian docs/ETHERNET-TX-NOTES.md):
+1. mt7987 rx.irq_done_mask must include MTK_RX_DONE_INT0 (BIT(16));
+   clearing only BIT(14) leaves RX done bits pending -> IRQ storm + RCU stall
+2. FE IRQ grouping: MT7987 (netsys v3, PPE1-class) must program
+   FE_INT_GRP = 0x210ffff2 and NOT touch pdma.int_grp grouping registers
+3. Vendor registers a combined TX+RX handler on all eight IRQ lines;
+   add mtk_handle_irq_fe (returns IRQ_NONE when unhandled) and hook it on
+   every line in mtk_probe; mtk_get_irqs fills TX=resource 1, RX=resource 2
+   per the vendor layout
+---
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3635,6 +3635,19 @@
+ {
+ 	int i;
+ 
++	/* MT7987: the DTS provides eight interrupts.  Resource 1 is the real
++	 * TX completion line and resource 2 the RX line (vendor layout);
++	 * resource 0 is the combined line hooked separately in mtk_probe.
++	 * Fill the classic TX/RX slots for napi wiring and display.
++	 */
++	if (eth->soc->caps == MT7987_CAPS) {
++		eth->irq[MTK_FE_IRQ_TX] = platform_get_irq(pdev, 1);
++		eth->irq[MTK_FE_IRQ_RX] = platform_get_irq(pdev, 2);
++		if (eth->irq[MTK_FE_IRQ_TX] < 0 || eth->irq[MTK_FE_IRQ_RX] < 0)
++			return -ENXIO;
++		return 0;
++	}
++
+ 	/* future SoCs beginning with MT7988 should use named IRQs in dts */
+ 	eth->irq[MTK_FE_IRQ_TX] = platform_get_irq_byname_optional(pdev, "fe1");
+ 	eth->irq[MTK_FE_IRQ_RX] = platform_get_irq_byname_optional(pdev, "fe2");
+@@ -3704,6 +3717,42 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++/* Combined handler used on every MT7987 ethernet interrupt line.  It only
++ * acts when the QDMA/PDMA status really carries a source we own; otherwise
++ * it returns IRQ_NONE so the kernel masks a misbehaving line instead of
++ * spinning on it forever.
++ */
++static irqreturn_t mtk_handle_irq_fe(int irq, void *_eth)
++{
++	struct mtk_eth *eth = _eth;
++	const struct mtk_reg_map *reg_map = eth->soc->reg_map;
++	irqreturn_t ret = IRQ_NONE;
++
++	if ((mtk_r32(eth, reg_map->pdma.irq_mask) &
++	     eth->soc->rx.irq_done_mask) &&
++	    (mtk_r32(eth, reg_map->pdma.irq_status) &
++	     eth->soc->rx.irq_done_mask)) {
++		mtk_handle_irq_rx(irq, _eth);
++		ret = IRQ_HANDLED;
++	}
++
++	if ((mtk_r32(eth, reg_map->tx_irq_mask) & MTK_TX_DONE_INT) &&
++	    (mtk_r32(eth, reg_map->tx_irq_status) & MTK_TX_DONE_INT)) {
++		mtk_handle_irq_tx(irq, _eth);
++		ret = IRQ_HANDLED;
++	}
++
++	if (ret == IRQ_NONE && net_ratelimit())
++		dev_info(eth->dev,
++			 "MT7987 fe irq=%d UNHANDLED pdma_st=0x%08x pdma_msk=0x%08x qtx_st=0x%08x qtx_msk=0x%08x\n",
++			 irq, mtk_r32(eth, reg_map->pdma.irq_status),
++			 mtk_r32(eth, reg_map->pdma.irq_mask),
++			 mtk_r32(eth, reg_map->tx_irq_status),
++			 mtk_r32(eth, reg_map->tx_irq_mask));
++
++	return ret;
++}
++
+ static irqreturn_t mtk_handle_irq(int irq, void *_eth)
+ {
+ 	struct mtk_eth *eth = _eth;
+@@ -4597,10 +4646,23 @@
+ 
+ 	/* FE int grouping */
+ 	mtk_w32(eth, MTK_TX_DONE_INT, reg_map->pdma.int_grp);
+-	mtk_w32(eth, eth->soc->rx.irq_done_mask, reg_map->pdma.int_grp + 4);
+-	mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
+-	mtk_w32(eth, eth->soc->rx.irq_done_mask, reg_map->qdma.int_grp + 4);
+-	mtk_w32(eth, 0x21021000, MTK_FE_INT_GRP);
++	if (eth->soc->caps == MT7987_CAPS) {
++		/* MT7987 (netsys v3, PPE1-class) uses the vendor IRQ
++		 * grouping: FE_INT_GRP = 0x210ffff2, and the pdma.int_grp
++		 * grouping registers must NOT be touched (reverse-engineered
++		 * from the shipping 6.6.94 kernel). */
++		mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
++		mtk_w32(eth, eth->soc->rx.irq_done_mask,
++			reg_map->qdma.int_grp + 4);
++		mtk_w32(eth, 0x210ffff2, MTK_FE_INT_GRP);
++	} else {
++		mtk_w32(eth, eth->soc->rx.irq_done_mask,
++			reg_map->pdma.int_grp + 4);
++		mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
++		mtk_w32(eth, eth->soc->rx.irq_done_mask,
++			reg_map->qdma.int_grp + 4);
++		mtk_w32(eth, 0x21021000, MTK_FE_INT_GRP);
++	}
+ 
+ 	if (mtk_is_netsys_v3_or_greater(eth)) {
+ 		/* PSE dummy page mechanism */
+@@ -5818,7 +5880,29 @@
+ 			goto err_deinit_hw;
+ 	}
+ 
+-	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SHARED_INT)) {
++	if (eth->soc->caps == MT7987_CAPS) {
++		/* vendor layout: all eight lines can carry the combined
++		 * TX+RX completion; hook the shared handler on every one of
++		 * them so per-queue lines are not lost */
++		int n = platform_irq_count(pdev), k;
++
++		if (n > 8)
++			n = 8;
++		for (k = 0; k < n; k++) {
++			int irq = platform_get_irq(pdev, k);
++
++			if (irq < 0)
++				continue;
++			err = devm_request_irq(eth->dev, irq, mtk_handle_irq_fe,
++					       0, dev_name(eth->dev), eth);
++			if (err) {
++				dev_err(&pdev->dev,
++					"MT7987: request irq %d failed %d\n",
++					irq, err);
++				err = 0;
++			}
++		}
++	} else if (MTK_HAS_CAPS(eth->soc->caps, MTK_SHARED_INT)) {
+ 		err = devm_request_irq(eth->dev, eth->irq[MTK_FE_IRQ_SHARED],
+ 				       mtk_handle_irq, 0,
+ 				       dev_name(eth->dev), eth);
+@@ -6170,7 +6254,10 @@
+ 	},
+ 	.rx = {
+ 		DESC_SIZE(struct mtk_rx_dma_v2),
+-		.irq_done_mask = MTK_RX_DONE_INT_V2,
++		/* vendor also enables BIT(16): without it clearing only
++		 * BIT(14) leaves RX done bits pending -> IRQ storm + RCU
++		 * stall (reverse-engineered vendor 6.6.94 behaviour) */
++		.irq_done_mask = MTK_RX_DONE_INT0 | MTK_RX_DONE_INT_V2,
+ 		.dma_l4_valid = RX_DMA_L4_VALID_V2,
+ 		.dma_max_len = MTK_TX_DMA_BUF_LEN_V2,
+ 		.dma_len_offset = 8,
