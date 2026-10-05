@@ -96,7 +96,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             debootstrap qemu-user-static binfmt-support rsync zstd \
-            xz-utils e2fsprogs u-boot-tools gcc-aarch64-linux-gnu
+            xz-utils e2fsprogs u-boot-tools crossbuild-essential-arm64
           # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
           sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
 

@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — 交叉编译环境补全：aarch64 glibc 头文件缺失（CI run 37317806045）
+
+- **失败现象**：新 step "交叉编译 luci-app-mt5700" 中 ring 0.17.14 的 C 代码编译报
+  `/usr/include/stdint.h:26:10: fatal error: bits/libc-header-start.h: No such file
+  or directory`（aarch64-linux-gnu-gcc 编 curve25519.c）。
+- **根因**：runner 只装了 `gcc-aarch64-linux-gnu`（编译器本体），未装 aarch64 的
+  glibc 头文件包；gcc-cross 的 `stdint.h` 经 `include_next` 落到宿主 x86_64 的
+  `/usr/include/stdint.h`，其 `bits/` 头不在 aarch64 搜索路径。沙箱验证时装的是
+  `crossbuild-essential-arm64` 元包（含 `libc6-dev-arm64-cross`，提供
+  `/usr/aarch64-linux-gnu/include`），故未复现——环境差异型失败。
+- **修复**：workflow apt 依赖 `gcc-aarch64-linux-gnu` → `crossbuild-essential-arm64`
+  （与 build-kernel job 一致）；build-mt5700.sh 增加前置检查——缺
+  `/usr/aarch64-linux-gnu/include/bits/libc-header-start.h` 时 die 并提示安装命令，
+  失败信息从 cc-rs 深处提前到脚本入口。
+- 内核 job 全绿（未改动）；其余链路不变。
+
 ### 2026-10-05 — MT5700M 插件切换为 luci-app-mt5700 Debian 分支（单服务架构）+ 修复 make-sd-image.sh 自拷贝（CI run 37295444686）
 
 **变更 A：mt5700 预装方案重写（"Release ipk + vendor 面板"双服务 → Debian 分支单服务）**

@@ -65,7 +65,11 @@ case "$TARGET_KIND" in
   gnu)
     RUST_TARGET="aarch64-unknown-linux-gnu"
     command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || \
-      die "gnu 目标需要交叉链接器：sudo apt-get install gcc-aarch64-linux-gnu"
+      die "gnu 目标需要交叉编译器：sudo apt-get install crossbuild-essential-arm64"
+    # ring 的 C 代码需要目标平台 glibc 头文件；只装 gcc 时 stdint.h 会落到
+    # 宿主（x86_64）路径，报 bits/libc-header-start.h: No such file or directory
+    [[ -f /usr/aarch64-linux-gnu/include/bits/libc-header-start.h ]] || \
+      die "缺少 aarch64 glibc 头文件。安装：sudo apt-get install libc6-dev-arm64-cross（或 crossbuild-essential-arm64 元包）"
     ;;
   musl)
     # rustls → ring 的 C/asm 代码需要 musl 交叉 C 编译器（apt 无此包，需自备）
