@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — CI 修复：busybox 下载解析 SIGPIPE 崩溃（exit 23）+ 手动重触发验证
+
+- **问题**（run 37373110882 / job 111987564467 第 13 步）：`build/make-sd-image.sh` 获取
+  busybox-static 时用 `curl -sfL | xz -d | awk` 管道解析 `Packages.xz`；awk 命中目标后
+  `exit` 提前关闭下游管道，xz/curl 收到 SIGPIPE（curl 退出码 23），在脚本
+  `set -Eeuo pipefail` 下直接终止，日志只见 `Process completed with exit code 23` 无任何
+  错误提示。busybox 缓存未命中时必现。
+- **修复**：改为三段式落盘——`curl` 完整下载 `Packages.xz` → `xz` 解压到文件 →
+  `awk` 读文件解析，彻底规避管道 SIGPIPE；curl / xz / 解析各阶段失败均有明确 `die` 提示
+  （下载失败 / 解压失败 / 解析失败），不再静默崩溃。
+- **验证**：下载链路本地实测通过（解析到 `busybox-static_1.37.0-6+b9_arm64.deb` 并成功下载）；
+  脚本 `bash -n` 通过；修复已推送 main（commit `b008d97`）并**手动触发** CI 重跑验证
+  （workflow 为手动触发模式，Actions 页面查看新 run）。
+
 ### 2026-10-06 — CI 编译提速：ARM64 原生 runner + ccache + 下载层缓存（实测基线 117 min → 目标 ~20 min）
 
 - **基线实测**（run 37353387707，x86_64 全链路成功跑到底）：总 117 min，其中
