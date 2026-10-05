@@ -65,6 +65,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# 规范化 OUT_DIR 为绝对路径：
+# 下文 modules_install 使用 make -C "$KERNEL_SRC"，make 的工作目录会切换到内核
+# 源码树；若 OUT_DIR 为相对路径，INSTALL_MOD_PATH 会被解析进源码树内部
+# （$KERNEL_SRC/out/...），导致 $MODULES_ROOT/lib 不存在，
+# 收集产物阶段 tar 报错 "tar: lib: Cannot stat: No such file or directory"。
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+
 KERNEL_MAJOR_MINOR="${KERNEL_VERSION%.*}"          # 6.18
 KERNEL_TAR="linux-$KERNEL_VERSION.tar.xz"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/$KERNEL_TAR"
@@ -201,7 +209,14 @@ make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Imag
 
 log "安装内核模块到 $MODULES_ROOT"
 make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-  modules_install INSTALL_MOD_PATH="$MODULES_ROOT" INSTALL_MOD_STRIP=1 >/dev/null
+  modules_install INSTALL_MOD_PATH="$MODULES_ROOT" INSTALL_MOD_STRIP=1 \
+  >"$WORK/modinst.log" 2>&1 || {
+  tail -n 60 "$WORK/modinst.log" >&2
+  die "内核模块安装失败，日志：$WORK/modinst.log"
+}
+if [[ ! -d "$MODULES_ROOT/lib/modules" ]]; then
+  die "modules_install 未产出 $MODULES_ROOT/lib/modules（请检查 CONFIG_MODULES 是否启用、安装路径是否正确）"
+fi
 
 # ---------------------------------------------------------------- 6. 收集产物
 log "收集产物"
