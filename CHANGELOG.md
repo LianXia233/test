@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 2026-10-05 — usrmerge /lib 符号链接被 tar 破坏导致 chroot 崩溃（CI run 37271056282）
+
+**进展**：内核 job 全绿（31 项配置核验 + 全量编译 + 16 项新增配置编译通过）；
+build-image 中跨 job 路径、模块校验、**mt5700 预装（首次 CI 验证通过）**均过关。
+
+**失败点**：第 10 步 chroot 报
+`aarch64-binfmt-P: Could not open '/lib/ld-linux-aarch64.so.1': No such file or directory`。
+
+**根因**：Debian 13 为 usrmerge 布局（`/lib` 是指向 `/usr/lib` 的符号链接）。
+第 9 步 `tar -xf modules.tar.zst -C "$ROOTFS_DIR"` 解压时，存档中的 `lib/` 目录条目
+会让 GNU tar **删除目标上的符号链接并重建真实目录** → `/lib` 不再指向 `/usr/lib`，
+aarch64 动态链接器消失，chroot 崩溃（第 3/5 步 chroot 正常、第 9 步之后立即崩溃，
+佐证破坏点就在 modules 解压）。
+
+**修复**：`build-rootfs.sh` 第 9 步改用
+`tar --keep-directory-symlink -I zstd -xf ...`，跟随符号链接写入（模块落到
+`/usr/lib/modules`）。本地 usrmerge 复现验证：修复前 `lib` 由符号链接变成真实目录，
+修复后符号链接保留、ld.so 可用、模块落点正确。已确认脚本内解压到 `ROOTFS_DIR`
+的 tar 仅此一处（其余为 rsync overlay 与最终打包，均不破坏符号链接）。
+
 ### 2026-10-05 — 844 cpufreq 补丁适配 6.18.54 + 跨 job 产物路径修复 + 参考 ctr54188/h5000m-debian 补齐配置
 
 **内核补丁（CI run 37264647296：35 秒失败）：**
