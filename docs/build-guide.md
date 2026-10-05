@@ -100,7 +100,9 @@ sudo bash build/build-rootfs.sh \
 脚本流程：
 
 1. 先执行 `scripts/fetch-firmware.py` 拉取 MT7992 / MT7987 PHY 固件到 `build/rootfs/firmware/`；
-2. `debootstrap --arch=arm64 --foreign trixie <rootfs>`；
+2. debootstrap：宿主为 arm64/aarch64 时走 **native** 模式一次完成（免 qemu 翻译）；
+   否则 `--arch=arm64 --foreign trixie <rootfs>` + qemu 第二阶段（x86 宿主兼容路径）；
+   传 `--apt-cache-dir` 可复用已下载的 `.deb`（见 §3.7.1）；
 3. 拷贝 `qemu-aarch64-static`，`chroot` 内完成第二阶段；
 4. 配置 Debian 13 软件源（`deb.debian.org` stable），`apt-get update`；
 5. 安装 `build/rootfs/packages.list` 中全部软件包；
@@ -220,17 +222,53 @@ sudo bash scripts/install-emmc.sh \
 
 ## 3.7 GitHub Actions 云编译
 
-推送 `main`/`master`、发起 PR、手动 `workflow_dispatch` 或每周定时触发
-`.github/workflows/build.yml`：
+推送后不会自动触发（`workflow_dispatch` 手动触发），到 Actions 页面 Run workflow 或
+`gh workflow run build.yml`。两个 job：
 
-1. **build-kernel**：ubuntu-24.04 上编译 6.18 内核（含源码缓存）+ 生成 boot.scr，上传 artifact；
-2. **build-image**：下载内核产物，debootstrap 构建 Debian 13 RootFS 树（`--skip-tar`），
+1. **build-kernel**：编译 6.18 内核（含源码缓存）+ 生成 boot.scr，上传 artifact；
+2. **build-image**：下载内核产物，`debootstrap` 构建 Debian 13 RootFS 树（`--skip-tar`），
    `make-squashfs.sh` 生成只读基础系统（zstd），`make-sd-image.sh` 生成引导层镜像与 FIT，
-   组装 `H5000M-debian13-sysupgrade.bin`（≈164 MiB），chown 修正产物属主后上传 artifact。
+   组装 `H5000M-debian13-sysupgrade.bin`（≈164 MiB），chown 修正产物属主后上传 artifact
+   并发布 Release。
 
 产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`
-（kernel.bin、rootfs.bin、rootfs.squashfs、sysupgrade.bin、boot.scr、初始凭据）；
-编译完成自动发布 Release（产物名带日期与 Run 序号 + sha256sums.txt）。
+（kernel.bin、rootfs.bin、rootfs.squashfs、sysupgrade.bin、boot.scr、初始凭据）。
+
+### 3.7.1 编译提速设计（实测基线 → 优化）
+
+基线实测（run 37353387707，x86_64 runner 全链路）：
+
+| 步骤 | 实测 | 优化手段 | 预期 |
+| --- | --- | --- | --- |
+| 构建 Debian 13 RootFS | **67.7 min** | ARM64 原生 runner：debootstrap native 模式，免去 qemu-user 二进制翻译 | ~8-15 min |
+| 编译 Linux 内核 | **46.7 min** | ccache 跨运行复用（首次 miss、后续分钟级）；`--jobs` 取 nproc 动态并发 | 命中时 ~3-8 min |
+| mt5700 cargo 编译 | 0.9 min | ARM64 上为宿主原生目标，免 rustup target add 与交叉 linker；缓存 cargo registry | ~0.5 min |
+| 其余（检出/依赖/下载/打包/上传） | < 3 min 合计 | deb 下载层缓存 + debootstrap `--cache-dir` + modules.tar.zst 走 zstd -T0 多线程 | 基本不变 |
+
+关键实现：
+
+- **Runner 选择**：`runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}`。
+  手动触发可勾选 `force_x86_runner` 回退 x86_64（ARM64 runner 不可用/排队时）。
+- **native / foreign 自动判定**（`build/build-rootfs.sh`）：宿主为 aarch64/arm64 且目标 arm64
+  → `debootstrap` 一次完成；否则 `--foreign` + `qemu-aarch64-static` 第二阶段（旧路径）。
+  原生模式下宿主就是目标架构，无需 qemu 也不需要交叉工具链。
+- **内核编译模式**（`build/build-kernel.sh`）：宿主 arm64 → native（`CROSS_COMPILE` 置空），
+  否则交叉；支持 `--native` / `--cross` 强制覆盖、`--no-ccache` 关闭缓存。
+- **ccache 缓存**：`CCACHE_DIR` 指向 workspace，key =
+  `ccache-<arch>-<内核版本>-hash(patches/dts/kernel-conf/build-kernel.sh)`；
+  输入任一变化即重建缓存，**不会出现配置变了还复用旧目标的脏命中**。
+- **下载层缓存**（不缓存构建产物）：`--apt-cache-dir` 复用 Debian `.deb`（debootstrap 侧用
+  `--cache-dir`），另缓存 cargo registry。安装动作每次真实执行，结果等同无缓存构建。
+- **SquashFS 瘦身副本**：`cp -al` 硬链接代替 `cp -a`（零数据拷贝、省数百 MiB 读写与空间）；
+  瘦身操作全为 `rm -rf`（仅解链接），不影响原 RootFS 树。
+
+### 3.7.2 首次运行与缓存观察
+
+- 首次（冷缓存）：内核需完整编译；第二次起 ccache 命中后耗时大幅下降，
+  日志末尾会打印 `ccache 统计`（关注 Cacheable calls / Hits 比例）。
+- `.deb` 缓存命中时日志出现「预置 N 个缓存 .deb → chroot archives（免重复下载）」。
+- RootFS 步骤首行会打印 `构建模式：native/foreign（宿主 Arch=...）`，据此确认走了原生路径。
+- 若 ARM64 runner 排队过久或不可用，勾选 `force_x86_runner` 重跑（耗时回到基线水平）。
 
 ## 4. 内核版本说明
 

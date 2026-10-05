@@ -11,6 +11,13 @@
 #   bash build-kernel.sh [--kernel-version 6.18.54] [--config 文件]
 #                        [--out 目录] [--jobs N]
 #                        [--skip-failed-patches] [--strict]
+#                        [--native | --cross] [--no-ccache]
+#
+# 编译模式（自动判定，可显式覆盖）：
+#   native：宿主本身就是 arm64/aarch64（如 ubuntu-24.04-arm runner）→ 直接本地编译，
+#           无需交叉工具链，也不需要 qemu 参与（配合 ARM64 runner 可大幅缩短 CI 时长）。
+#   cross ：宿主为 x86_64 等 → 使用 aarch64-linux-gnu- 交叉工具链。
+# ccache：检测到 ccache 且未传 --no-ccache 时自动启用（CI 配 Cache action 后可跨运行复用）。
 #
 # 平台：Linux（Windows 请使用 WSL / Git-Bash；脚本内含平台检测与提示）
 
@@ -42,6 +49,8 @@ OUT_DIR="$PROJECT_ROOT/out/kernel"
 JOBS="$(nproc 2>/dev/null || echo 2)"
 SKIP_FAILED=0
 STRICT=0
+FORCE_MODE=""      # 空=自动；native=强制本地编译；cross=强制交叉编译
+USE_CCACHE=1       # 检测到 ccache 时自动启用（--no-ccache 关闭）
 
 # 补丁层级（OpenWrt/ImmortalWrt 标准顺序）：
 #   generic/backport -> generic/pending -> generic/hack -> mediatek
@@ -49,7 +58,7 @@ GENERIC_PATCH_DIR="$PROJECT_ROOT/kernel/patches/generic"
 PATCH_DIR="$PROJECT_ROOT/kernel/patches"
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +69,9 @@ while [[ $# -gt 0 ]]; do
     --jobs)           JOBS="$2"; shift 2 ;;
     --skip-failed-patches) SKIP_FAILED=1; shift ;;
     --strict)             STRICT=1; shift ;;
+    --native)             FORCE_MODE="native"; shift ;;
+    --cross)              FORCE_MODE="cross"; shift ;;
+    --no-ccache)          USE_CCACHE=0; shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
@@ -91,11 +103,47 @@ command -v wget >/dev/null 2>&1 && DOWNLOADER="${DOWNLOADER:-wget}" || true
 command -v xz >/dev/null 2>&1 || die "缺少 xz 工具"
 command -v bc >/dev/null 2>&1 || die "缺少 bc（内核编译依赖）"
 
-# ---------------------------------------------------------------- 工具链检测
-if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-  die "未找到 aarch64-linux-gnu-gcc。请安装交叉编译工具链，例如：sudo apt-get install crossbuild-essential-arm64"
+# ---------------------------------------------------------------- 编译模式判定（native / cross）
+# native（宿主即 arm64）在 CI 上收益显著：免去交叉工具链的全部调用开销，
+# 也便于与 ARM64 runner 上的 RootFS 构建共享同一台机器。
+HOST_ARCH="$(uname -m)"
+if [[ -n "$FORCE_MODE" ]]; then
+  BUILD_MODE="$FORCE_MODE"
+elif [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ]]; then
+  BUILD_MODE="native"
+else
+  BUILD_MODE="cross"
+fi
+
+if [[ "$BUILD_MODE" == "native" ]]; then
+  CROSS_COMPILE=""
+  command -v gcc >/dev/null 2>&1 || die "native 模式缺少 gcc。请安装 build-essential。"
+else
+  command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || \
+    die "未找到 aarch64-linux-gnu-gcc。请安装交叉编译工具链，例如：sudo apt-get install crossbuild-essential-arm64"
+  CROSS_COMPILE="aarch64-linux-gnu-"
 fi
 command -v make >/dev/null 2>&1 || die "缺少 make"
+
+# ccache：命中时把内核编译从数十分钟降到分钟级（CI 通过 Cache action 跨运行复用 CCACHE_DIR）。
+# key 由 CI 侧按 内核版本 + 补丁集 + 配置文件 + 本脚本 hash 组成，避免脏命中。
+CCACHE_BIN=""
+if [[ "$USE_CCACHE" -eq 1 ]] && command -v ccache >/dev/null 2>&1; then
+  CCACHE_BIN="ccache"
+  export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
+  mkdir -p "$CCACHE_DIR"
+fi
+
+# 统一传给 make 的变量：ARCH / CROSS_COMPILE / CC / HOSTCC
+MAKE_VARS=(ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE")
+if [[ -n "$CCACHE_BIN" ]]; then
+  MAKE_VARS+=(CC="$CCACHE_BIN ${CROSS_COMPILE}gcc" HOSTCC="$CCACHE_BIN gcc")
+fi
+
+log "编译模式：$BUILD_MODE（宿主 Arch=$HOST_ARCH，并行 -j$JOBS，ccache=${CCACHE_BIN:-关闭}）"
+if [[ -n "$CCACHE_BIN" ]]; then
+  log "ccache 缓存目录：$CCACHE_DIR"
+fi
 
 # ---------------------------------------------------------------- 1. 下载与解压
 if [[ -d "$KERNEL_SRC" ]]; then
@@ -173,9 +221,9 @@ fi
 
 # ---------------------------------------------------------------- 4. 内核配置
 log "生成 .config（arm64 defconfig + 增量片段）"
-make -C "$KERNEL_SRC" ARCH=arm64 defconfig >/dev/null
+make -C "$KERNEL_SRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" defconfig >/dev/null
 cat "$CONFIG_FILE" >> "$KERNEL_SRC/.config"
-make -C "$KERNEL_SRC" ARCH=arm64 olddefconfig >/dev/null
+make -C "$KERNEL_SRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig >/dev/null
 
 log "核验关键配置项："
 REQUIRED_SYMBOLS=(
@@ -208,14 +256,14 @@ if [[ "$CONFIG_MISSING" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------- 5. 编译
-log "编译内核（Image + dtbs + modules，-j$JOBS）"
-make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs modules >"$WORK/build.log" 2>&1 || {
+log "内核 + DTB + 模块并行编译（-j$JOBS）"
+make -C "$KERNEL_SRC" -j"$JOBS" "${MAKE_VARS[@]}" Image dtbs modules >"$WORK/build.log" 2>&1 || {
   tail -n 60 "$WORK/build.log" >&2
   die "内核编译失败，日志：$WORK/build.log"
 }
 
 log "安装内核模块到 $MODULES_ROOT"
-make -C "$KERNEL_SRC" -j"$JOBS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+make -C "$KERNEL_SRC" -j"$JOBS" "${MAKE_VARS[@]}" \
   modules_install INSTALL_MOD_PATH="$MODULES_ROOT" INSTALL_MOD_STRIP=1 \
   >"$WORK/modinst.log" 2>&1 || {
   tail -n 60 "$WORK/modinst.log" >&2
@@ -234,8 +282,11 @@ DTB="$KERNEL_SRC/arch/arm64/boot/dts/mediatek/mt7987a-hiveton-h5000m.dtb"
 
 install -Dm644 "$IMAGE" "$OUT_DIR/Image"
 install -Dm644 "$DTB"   "$OUT_DIR/mt7987a-hiveton-h5000m.dtb"
-# 真 zstd 压缩（扩展名 .zst 名实相符；RootFS 侧以 tar -I zstd -xf 解压）
-tar -C "$MODULES_ROOT" --zstd -cf "$OUT_DIR/modules.tar.zst" lib
+# 真 zstd 压缩（扩展名 .zst 名实相符；RootFS 侧以 tar -I zstd -xf 解压）。
+# 走管道 + zstd -T0 多线程：-c -f - 输出到 stdout 由 zstd 并行压缩，
+# 相比 tar --zstd（单线程）在百 MB 级 lib/ 上明显更快。
+tar -C "$MODULES_ROOT" -cf - lib | zstd -q -T0 -o "$OUT_DIR/modules.tar.zst"
+[[ -s "$OUT_DIR/modules.tar.zst" ]] || die "modules.tar.zst 生成失败（空文件）"
 
 cp "$CONFIG_FILE" "$OUT_DIR/kernel-config-exported.config"
 grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL_SRC/.config" \
@@ -243,3 +294,9 @@ grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL
 
 log "完成。产物："
 ls -lh "$OUT_DIR/Image" "$OUT_DIR/mt7987a-hiveton-h5000m.dtb" "$OUT_DIR/modules.tar.zst"
+
+# ccache 统计（便于在 CI 日志里确认命中率，判断缓存是否生效）
+if [[ -n "$CCACHE_BIN" ]]; then
+  log "ccache 统计："
+  "$CCACHE_BIN" -s | sed -n '1,12p' | sed 's/^/  /' || true
+fi

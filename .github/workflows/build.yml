@@ -1,10 +1,25 @@
 name: H5000M Debian 13 CI 云编译
 
-# 仅手动触发：内核编译耗时 1~2 小时，push 自动触发会 burned 大量 runner 时长
-# （每次提交都重编一遍几乎不变的内核）。需要出包时到 Actions 页面
-# Run workflow 手动启动，或命令行：gh workflow run build.yml
+# 仅手动触发：避免每次提交都占用 runner 时长（每次都是完整固件产出）。
+# 需要出包时到 Actions 页面 Run workflow 手动启动，或命令行：gh workflow run build.yml
+#
+# 【编译提速要点】（详见 docs/build-guide.md §3.7）
+#   1. runner 默认 ubuntu-24.04-arm：宿主就是 arm64/aarch64，
+#      - RootFS：debootstrap 走 native 模式，免除 qemu-user 二进制翻译（原 67.7 min 大头）；
+#      - 内核：本地编译免交叉工具链；
+#      - mt5700：cargo 直接宿主目标，免 rustup target add 与交叉 linker。
+#   2. ccache 跨运行复用内核编译结果（key 含补丁集/配置/脚本 hash，避免脏命中）；
+#   3. 下载层缓存：Debian .deb 归档（--apt-cache-dir）+ debootstrap --cache-dir + cargo registry；
+#      （只缓存下载，不缓存构建产物——每次仍真实 dpkg 安装，结果等同无缓存构建）
+#   4. --jobs 取 nproc 动态并发；modules 打包走 zstd -T0 多线程。
 on:
   workflow_dispatch:
+    inputs:
+      force_x86_runner:
+        description: '回退选项：ARM64 runner 不可用/排队时勾选，改用 x86_64 runner（交叉编译 + qemu 第二阶段，构建显著变慢）'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: h5000m-build-${{ github.ref }}
@@ -15,13 +30,18 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   KERNEL_VERSION: 6.18.54
+  # ccache 由 build/build-kernel.sh 读取：命中时内核编译从数十分钟降到分钟级
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  # Debian .deb 下载层缓存目录（仅下载层，由 build-rootfs.sh --apt-cache-dir 消费）
+  APT_CACHE_DIR: ${{ github.workspace }}/.cache/apt-debs
 
 jobs:
   # ============================================================ 1. 内核编译
   build-kernel:
     name: 内核 6.18 (MT7987A)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 330
+    # 原生 arm64 runner（仓库为 public，GitHub 免费额度内）
+    runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 240
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -29,8 +49,16 @@ jobs:
       - name: 安装构建依赖
         run: |
           sudo apt-get update
+          # native(arm64 runner) 只需 gcc + 内核构建工具；x86_64 回退时补交叉工具链
           sudo apt-get install -y --no-install-recommends \
-            crossbuild-essential-arm64 bc xz-utils u-boot-tools zstd curl
+            build-essential bc flex bison libssl-dev xz-utils zstd ccache \
+            u-boot-tools device-tree-compiler curl
+          if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
+            echo "宿主非 arm64 → 安装交叉工具链（x86 回退路径）"
+            sudo apt-get install -y --no-install-recommends crossbuild-essential-arm64
+          fi
+          echo "宿主架构：$(uname -m)，逻辑核数：$(nproc)"
+          ccache --version | head -1
 
       - name: 缓存内核源码压缩包（只缓存 tar，源码树每次干净解压保证补丁幂等）
         uses: actions/cache@v4
@@ -38,14 +66,39 @@ jobs:
           path: out/kernel/linux-${{ env.KERNEL_VERSION }}.tar.xz
           key: kernel-tar-${{ env.KERNEL_VERSION }}
 
-      - name: 编译 Linux 内核（Image / DTB / modules）
+      - name: 恢复 ccache（内核编译结果跨运行复用）
+        # key 组成：内核版本 + 补丁集/dts/配置/脚本 hash + runner 架构。
+        # 任一输入变化即重建缓存，保证不会出现"配置变了但复用旧目标文件"的脏命中。
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'dts/**', 'build/kernel-conf/**', 'build/build-kernel.sh') }}
+          restore-keys: |
+            ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-
+
+      - name: 初始化 ccache
         run: |
+          ccache -M 2G
+          ccache -z
+          ccache -p 2>/dev/null | head -12 || true
+
+      - name: 编译 Linux 内核（Image / DTB / modules）
+        # 不传 --jobs：build-kernel.sh 默认取 nproc 动态并发（原固定 4 在 4 vCPU 上
+        # 尚可，留满本机核数更稳）。ccache 命中时本步骤耗时大幅下降。
+        run: |
+          # 首次失败时打印日志尾部，便于定位是补丁/配置/编译哪一类问题
+          set -o pipefail
           bash build/build-kernel.sh \
             --kernel-version "$KERNEL_VERSION" \
             --config build/kernel-conf/h5000m-6.18.config \
             --out out/kernel \
-            --jobs 4 \
-            --strict
+            --strict 2>&1 | tail -n 200
+          # pipefail 下 tail 成功不代表 make 成功：显式确认关键产物存在
+          for f in Image mt7987a-hiveton-h5000m.dtb modules.tar.zst; do
+            [[ -s "out/kernel/$f" ]] || { echo "错误：内核产物缺失 $f"; exit 1; }
+          done
+          echo "内核产物校验通过："
+          ls -lh out/kernel/Image out/kernel/mt7987a-hiveton-h5000m.dtb out/kernel/modules.tar.zst
 
       - name: 生成 U-Boot 启动脚本 boot.scr
         run: bash build/make-boot.sh --out out/boot
@@ -79,8 +132,8 @@ jobs:
   build-image:
     name: RootFS + 刷写包（FIT / 引导层 ext4 = init + busybox + SquashFS + OverlayFS）
     needs: build-kernel
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 150
     permissions:
       contents: write   # 上传固件到 GitHub Releases 需要写权限
     steps:
@@ -94,11 +147,50 @@ jobs:
           #（--no-install-recommends 不会随 u-boot-tools 带入，缺它则 FIT 打包失败）
           # squashfs-tools：mksquashfs 生成只读基础系统（zstd/xz）
           sudo apt-get install -y --no-install-recommends \
-            debootstrap qemu-user-static binfmt-support rsync zstd \
-            xz-utils e2fsprogs u-boot-tools device-tree-compiler \
-            squashfs-tools curl crossbuild-essential-arm64
-          # 确保 qemu-aarch64 binfmt 注册（VM runner 上 binfmt_misc 可用）
-          sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
+            debootstrap rsync zstd xz-utils e2fsprogs u-boot-tools \
+            device-tree-compiler squashfs-tools curl patch
+          # 仅 x86 回退路径需要：qemu 用户态模拟（RootFS 第二阶段）+ 交叉工具链（mt5700）
+          if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
+            echo "宿主非 arm64 → 安装 qemu-user-static + binfmt + 交叉工具链（x86 回退路径）"
+            sudo apt-get install -y --no-install-recommends \
+              qemu-user-static binfmt-support crossbuild-essential-arm64
+            sudo update-binfmts --enable qemu-aarch64 2>/dev/null || true
+          fi
+          echo "宿主架构：$(uname -m)，逻辑核数：$(nproc)"
+
+      - name: 确保 debootstrap 支持 trixie
+        # runner 镜像自带的 debootstrap 若早于 trixie 发布，scripts/ 目录没有
+        # trixie 脚本会直接报 "Unknown suite"。此处按需安装 Debian 上游版本，
+        # 版本完全匹配时不重复下载（判断为真才执行）。
+        run: |
+          if ls /usr/share/debootstrap/scripts/trixie >/dev/null 2>&1; then
+            echo "debootstrap 已支持 trixie：$(debootstrap --version 2>&1 | head -1)"
+            exit 0
+          fi
+          echo "runner 自带 debootstrap 不含 trixie 脚本，安装 Debian 上游版"
+          FN="$(curl -fsSL http://deb.debian.org/debian/dists/trixie/main/binary-all/Packages.xz \
+                | xz -d \
+                | awk '/^Package: debootstrap$/{f=1} f && /^Filename:/{print $2; exit}')"
+          [[ -n "$FN" ]] || { echo "错误：未解析到 debootstrap 包路径"; exit 1; }
+          curl -fsSL -o /tmp/debootstrap.deb "http://deb.debian.org/debian/$FN"
+          sudo apt-get install -y --no-install-recommends /tmp/debootstrap.deb
+          ls /usr/share/debootstrap/scripts/trixie
+
+      - name: 恢复 Debian .deb 下载层缓存
+        # 只缓存下载层：命中时 apt/debootstrap 不再重复拉取网络包；安装动作始终
+        # 真实执行，产物与无缓存构建完全一致。key 随 packages.list 变化失效。
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.APT_CACHE_DIR }}
+          key: apt-debs-${{ runner.arch }}-trixie-${{ hashFiles('build/rootfs/packages.list') }}
+
+      - name: 恢复 cargo registry 缓存（mt5700 依赖下载层）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.arch }}-${{ hashFiles('build/build-mt5700.sh') }}
 
       - name: 下载内核产物
         uses: actions/download-artifact@v4
@@ -156,9 +248,8 @@ jobs:
 
       - name: 交叉编译 luci-app-mt5700 at-webserver（Debian 分支）
         # 单一 Rust 后端（HTTP API + WebSocket + WebUI 托管，:9000）。
-        # rustls → ring 含 C/asm 代码，默认 aarch64-gnu 交叉编译
-        # （gcc-aarch64-linux-gnu，glibc 2.39 ≤ Debian 13 的 2.41 向后兼容）；
         # 源码固定 commit 保证可复现（见 build/build-mt5700.sh 头注释）。
+        # arm64 runner 上为宿主原生目标，无需 --target 与交叉 linker。
         run: |
           # 兜底：GitHub 托管 runner 通常预装 rustup/cargo，缺失时经 rustup.rs 安装
           if ! command -v cargo >/dev/null 2>&1; then
@@ -170,16 +261,20 @@ jobs:
           cat out/mt5700/PROVENANCE.txt
 
       - name: 构建 Debian 13 RootFS
+        # arm64 runner 上 debootstrap 走 native 模式（无 qemu 翻译）；
+        # --apt-cache-dir 命中时跳过全部 .deb 下载，install 仍真实执行。
         run: |
+          sudo mkdir -p "$APT_CACHE_DIR"
           sudo bash build/build-rootfs.sh \
             --out out \
             --hostname h5000m-debian \
             --kernel-dir out/kernel \
             --mt5700-dir out/mt5700 \
-            --skip-tar
+            --skip-tar \
+            --apt-cache-dir "$APT_CACHE_DIR"
 
       - name: 生成只读基础系统 SquashFS（zstd）
-        # RootFS 树 → 瘦身副本 → mksquashfs zstd -19 -b 256K → out/rootfs/rootfs.squashfs。
+        # RootFS 树 → 硬链接副本瘦身（零数据拷贝）→ mksquashfs zstd -19 -b 256K（多核）。
         # 514 MiB 树 ≈ 120 MiB SquashFS（解压速度比 xz 快 5-10 倍，内核已启用 SQUASHFS_ZSTD）。
         run: |
           sudo bash build/make-squashfs.sh --out out --rootfs-dir out/rootfs/rootfs
@@ -291,6 +386,7 @@ jobs:
           - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1，
             凭据见 initial-credentials.txt（登录后立即改密）
           - p1 u-boot-env / p2 factory / p3 fip 全程不触碰，factory 校准数据安全
+          - 本包由 ${{ runner.arch }} runner 构建（native arm64 或 x86 回退路径）
 
           更多说明：https://github.com/LianXia233/test 仓库 docs/first-boot.md
           EOF

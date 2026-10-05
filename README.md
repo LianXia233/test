@@ -62,10 +62,22 @@ sudo bash build/make-sd-image.sh --out /path/to/out --squashfs /path/to/out/root
 
 ## 云编译（GitHub Actions）
 
-仓库已配置 `.github/workflows/build.yml`，推送到 `main`/`master` 或手动触发 `workflow_dispatch`
-即自动完成：内核编译（6.18 + MT7987A 补丁，`--strict` 严格核验）→ boot.scr 生成 → Debian 13
+仓库已配置 `.github/workflows/build.yml`，**仅手动触发**（`workflow_dispatch`）：内核编译
+耗时长，避免每次提交都空耗 runner 时长。到 Actions 页面 Run workflow，或命令行
+`gh workflow run build.yml`。
+
+流程：内核编译（6.18 + MT7987A 补丁，`--strict` 严格核验）→ boot.scr 生成 → Debian 13
 RootFS 树 → SquashFS 只读基础系统（zstd）→ 刷写包（`H5000M-debian13-kernel.bin` → p4、
 `H5000M-debian13-rootfs.bin` → p5 引导层）。
+
+**编译提速**（详见 [docs/build-guide.md](docs/build-guide.md) §3.7）：默认跑在
+**ARM64 原生 runner**（`ubuntu-24.04-arm`，仓库 public 故免费）——宿主即 arm64，RootFS 的
+debootstrap 走 native 模式**免去 qemu 二进制翻译**（原 67.7 min 环节的大头）、内核本地编译、
+mt5700 免交叉；叠加 **ccache 跨运行复用内核编译结果**（命中时 46.7 min → 分钟级）、
+**下载层缓存**（Debian .deb 归档 / debootstrap --cache-dir / cargo registry，只缓存下载不缓存
+产物，结果等同无缓存构建）。ARM64 runner 不可用时，勾选 `force_x86_runner` 回退到
+x86_64 runner（交叉编译 + qemu 第二阶段）。
+
 产物双通道交付：
 
 - **GitHub Releases**：编译完成后自动创建/更新 `H5000M-debian13-<日期>-r<Run序号>` Release，

@@ -121,3 +121,15 @@ sudo bash scripts/install-emmc.sh \
 - overlay 是否正常组装：`findmnt /` 应显示 overlay（否则见 §4 只读救援模式）
 - `/var/lib/linux-router/network.json` 是否存在
 - NetworkManager `nmcli connection show` 中 `DebianRouterHotspot` 与 WAN/LAN 连接是否 autoconnect
+
+## 12. 云编译（GitHub Actions）
+
+| 症状 | 检查 | 处理 |
+| --- | --- | --- |
+| Actions 页面没有可触发的运行 | workflow 仅 `workflow_dispatch` | 手动 Run workflow，或 `gh workflow run build.yml`（推送不会自动编译） |
+| ARM64 runner 一直排队 / 拉不起来 | job 长时间 queued | 勾选 `force_x86_runner` 重跑（回退 x86_64：交叉编译 + qemu 第二阶段，耗时回到 2 小时量级） |
+| RootFS 步骤日志 `构建模式：foreign` | 期望 native 却走了 qemu 路径 | job 实际跑在 x86 runner 上（`uname -m` 非 arm64）；确认未勾选回退且 runner 标签为 `ubuntu-24.04-arm` |
+| `Unknown suite trixie` / debootstrap 报套件不存在 | runner 镜像自带 debootstrap 过旧 | workflow 内置预检会自动装 Debian 上游 debootstrap；若仍失败检查能否访问 `deb.debian.org` |
+| 内核编译耗时没有下降 | 日志末尾 `ccache 统计` | 看 Hits/Cacheable 比例：首次必然 miss；若二次仍为 0 命中，检查 cache key（补丁/dts/配置/脚本任一改动都会换 key） |
+| `.deb` 下载仍然很慢 | 日志是否有「预置 N 个缓存 .deb」 | 无则说明 apt 缓存未命中（`packages.list` 变更会换 key）；属首次或清单变更后的正常行为 |
+| artifact 上传报 EACCES | 产物属主 | workflow 已有 chown 步骤；本地复现时 `sudo chown -R $(id -u):$(id -g) out` |

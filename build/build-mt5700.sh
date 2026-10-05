@@ -61,15 +61,26 @@ done
 command -v cargo >/dev/null 2>&1 || die "缺少 cargo（Rust 工具链）。安装：curl https://sh.rustup.rs -sSf | sh -s -- -y"
 command -v git    >/dev/null 2>&1 || die "缺少 git"
 
+HOST_ARCH="$(uname -m)"
+IS_HOST_TARGET=0
 case "$TARGET_KIND" in
   gnu)
-    RUST_TARGET="aarch64-unknown-linux-gnu"
-    command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || \
-      die "gnu 目标需要交叉编译器：sudo apt-get install crossbuild-essential-arm64"
-    # ring 的 C 代码需要目标平台 glibc 头文件；只装 gcc 时 stdint.h 会落到
-    # 宿主（x86_64）路径，报 bits/libc-header-start.h: No such file or directory
-    [[ -f /usr/aarch64-linux-gnu/include/bits/libc-header-start.h ]] || \
-      die "缺少 aarch64 glibc 头文件。安装：sudo apt-get install libc6-dev-arm64-cross（或 crossbuild-essential-arm64 元包）"
+    if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ]]; then
+      # native：宿主（如 ubuntu-24.04-arm runner）本身就是目标架构，
+      # 无需交叉工具链、无需 glibc 头文件包、无需 rustup target add。
+      IS_HOST_TARGET=1
+      RUST_TARGET=""
+      command -v cc >/dev/null 2>&1 || die "缺少 C 编译器（native gnu 目标需 cc/gcc 供 ring 的 C 代码使用）"
+      log "目标模式：native（宿主 $HOST_ARCH 即目标架构，跳过交叉工具链）"
+    else
+      RUST_TARGET="aarch64-unknown-linux-gnu"
+      command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || \
+        die "gnu 目标需要交叉编译器：sudo apt-get install crossbuild-essential-arm64"
+      # ring 的 C 代码需要目标平台 glibc 头文件；只装 gcc 时 stdint.h 会落到
+      # 宿主（x86_64）路径，报 bits/libc-header-start.h: No such file or directory
+      [[ -f /usr/aarch64-linux-gnu/include/bits/libc-header-start.h ]] || \
+        die "缺少 aarch64 glibc 头文件。安装：sudo apt-get install libc6-dev-arm64-cross（或 crossbuild-essential-arm64 元包）"
+    fi
     ;;
   musl)
     # rustls → ring 的 C/asm 代码需要 musl 交叉 C 编译器（apt 无此包，需自备）
@@ -106,32 +117,44 @@ ACTUAL_COMMIT="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 log "  源码 commit：$ACTUAL_COMMIT"
 
 # ---------------------------------------------------------------- 2. 交叉编译
-# rustup 管理的工具链需显式安装目标平台 std；非 rustup（如发行版 apt）则要求
-# 系统已带该 target，编译失败会自然报错。
-if command -v rustup >/dev/null 2>&1; then
-  log "安装 Rust 目标平台 std：$RUST_TARGET"
-  rustup target add "$RUST_TARGET"
+# rustup 管理的工具链需显式安装目标平台 std；native（宿主即目标）则无需。
+CARGO_TARGET_ARGS=()
+if [[ -z "$RUST_TARGET" ]]; then
+  log "cargo 编译（--release，宿主原生目标 opt-level=s + LTO + strip）"
+else
+  if command -v rustup >/dev/null 2>&1; then
+    log "安装 Rust 目标平台 std：$RUST_TARGET"
+    rustup target add "$RUST_TARGET"
+  fi
+  CARGO_TARGET_ARGS=(--target "$RUST_TARGET")
+  log "cargo 编译（--release --target $RUST_TARGET，opt-level=s + LTO + strip）"
 fi
 
-log "cargo 编译（--release --target $RUST_TARGET，opt-level=s + LTO + strip）"
 BUILD_LOG="$OUT_DIR/mt5700-build.log"
 mkdir -p "$OUT_DIR"
+
+# 交叉时显式指定 linker；native 时留空，用系统默认 cc（避免依赖 bash 空数组展开行为）
+CARGO_LINKER=""
 case "$TARGET_KIND" in
-  gnu)
-    RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc" \
-      cargo build --release --target "$RUST_TARGET" \
-      --manifest-path "$SRC_DIR/src/rust/Cargo.toml" >"$BUILD_LOG" 2>&1 \
-      || { tail -40 "$BUILD_LOG" >&2; die "cargo 编译失败（详见 $BUILD_LOG）"; }
-    ;;
-  musl)
-    RUSTFLAGS="-C linker=aarch64-linux-musl-gcc" \
-      cargo build --release --target "$RUST_TARGET" \
-      --manifest-path "$SRC_DIR/src/rust/Cargo.toml" >"$BUILD_LOG" 2>&1 \
-      || { tail -40 "$BUILD_LOG" >&2; die "cargo 编译失败（详见 $BUILD_LOG）"; }
-    ;;
+  gnu)  [[ -n "$RUST_TARGET" ]] && CARGO_LINKER="aarch64-linux-gnu-gcc" ;;
+  musl) CARGO_LINKER="aarch64-linux-musl-gcc" ;;
 esac
 
-BIN="$SRC_DIR/src/rust/target/$RUST_TARGET/release/at-webserver"
+CARGO_CMD=(cargo build --release "${CARGO_TARGET_ARGS[@]}" \
+  --manifest-path "$SRC_DIR/src/rust/Cargo.toml")
+if [[ -n "$CARGO_LINKER" ]]; then
+  env RUSTFLAGS="-C linker=$CARGO_LINKER" "${CARGO_CMD[@]}" >"$BUILD_LOG" 2>&1 \
+    || { tail -40 "$BUILD_LOG" >&2; die "cargo 编译失败（详见 $BUILD_LOG）"; }
+else
+  "${CARGO_CMD[@]}" >"$BUILD_LOG" 2>&1 \
+    || { tail -40 "$BUILD_LOG" >&2; die "cargo 编译失败（详见 $BUILD_LOG）"; }
+fi
+
+if [[ -n "$RUST_TARGET" ]]; then
+  BIN="$SRC_DIR/src/rust/target/$RUST_TARGET/release/at-webserver"
+else
+  BIN="$SRC_DIR/src/rust/target/release/at-webserver"
+fi
 [[ -f "$BIN" ]] || die "编译产物未找到：$BIN"
 
 # ---------------------------------------------------------------- 3. staging
@@ -154,7 +177,7 @@ at-webserver（luci-app-mt5700 Debian 分支）
 repo:    $MT5700_REPO
 branch:  Debian
 commit:  $ACTUAL_COMMIT
-target:  $RUST_TARGET
+target:  ${RUST_TARGET:-host-native}（$TARGET_KIND）
 build:   cargo build --release（opt-level=s / LTO / strip）
 license: GPL-3.0（上游仓库 LICENSE）
 EOF

@@ -4,6 +4,44 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — CI 编译提速：ARM64 原生 runner + ccache + 下载层缓存（实测基线 117 min → 目标 ~20 min）
+
+- **基线实测**（run 37353387707，x86_64 全链路成功跑到底）：总 117 min，其中
+  **构建 Debian 13 RootFS 67.68 min（58%）**、**编译 Linux 内核 46.72 min（40%）**，
+  其余所有步骤合计 < 3 min —— 结论：传统手段（拆 job / 并行上传 / 优化依赖安装）收益为零，
+  必须打这两处。
+- **Runner 改为 ARM64 原生**：`runs-on: ubuntu-24.04-arm`（仓库 public，GitHub 免费额度内）；
+  宿主即 arm64 → RootFS debootstrap 免 qemu 二进制翻译、内核免交叉、mt5700 免交叉 linker。
+  新增 `workflow_dispatch` 输入 `force_x86_runner`（布尔，默认 false）作为回退开关，
+  ARM64 runner 不可用/排队时可手动切回 x86_64（交叉 + qemu 旧路径）。
+- **native / foreign 自动判定（`build/build-rootfs.sh`）**：宿主 aarch64/arm64 且目标 arm64 →
+  `debootstrap` 一次完成；否则保持 `--foreign` + `qemu-aarch64-static` 第二阶段。
+  依赖检查随之调整（qemu 仅 foreign 模式必需）；新增 `--apt-cache-dir`（下载层缓存）；
+  `apt-get clean` 从 chroot 内移到汇款 .deb 之后执行，保证新下载的包能回存缓存。
+- **内核编译提速（`build/build-kernel.sh`）**：新增编译模式判定（native / cross，
+  支持 `--native`/`--cross` 强制覆盖）；检测到 ccache 自动启用（支持 `--no-ccache`），
+  make 传 `CC="ccache <prefix>gcc" HOSTCC="ccache gcc"`，构建结束打印 ccache 统计；
+  `--jobs` 不再被 workflow 固定为 4（默认 `nproc`）；`modules.tar.zst` 由单线程
+  `tar --zstd` 改为 `tar -cf - lib | zstd -T0` 多线程。
+- **mt5700（`build/build-mt5700.sh`）**：宿主即 arm64 时不设 rustup target、不指定交叉 linker
+  （native 目标）；引入 `CARGO_TARGET_ARGS` / `CARGO_LINKER` 并改为显式分支，
+  避免依赖 bash 空数组展开；PROVENANCE.txt 的 target 字段在 native 时显示 `host-native`。
+- **SquashFS 瘦身副本 `cp -a` → `cp -al`（硬链接）**：零数据拷贝、秒级完成，同时省去数百 MiB
+  读写与临时空间；跨文件系统时自动回退 `cp -a`。已核实 `slim_tree` 的清理动作全为 `rm -rf`
+  （仅解除本副本链接），不会穿透修改原 RootFS 树。
+- **CI 缓存**（全部为**下载层**，不缓存构建产物，结果等同无缓存构建）：
+  ccache（key = 内核版本 + hash(patches/dts/kernel-conf/build-kernel.sh) + runner.arch）、
+  Debian `.deb` 归档（key = packages.list hash）、cargo registry；
+  `debootstrap --cache-dir` 复用下载包；新增 `debootstrap` 支持 trixie 预检（runner 自带
+  版本不含 trixie 脚本时自动装 Debian 上游 debootstrap）；两个 job 的 timeout 相应下调
+  （内核 330→240 min、镜像 180→150 min）。
+- **验证**：四个脚本 `bash -n` 通过；内核源码树实测 ccache 冷/热编译正常（二次出现命中）；
+  硬链接语义实测通过（副本删除不穿透原树、符号链接保留、副本近零占用）；
+  workflow 经 YAML 解析与 **actionlint 静态检查均无告警**。
+- **文档**：README「云编译」段落修正（workflow 实为纯手动触发，并补充提速说明）；
+  `docs/build-guide.md` 新增 §3.7.1 提速设计（实测基线表 + 关键实现）与 §3.7.2 缓存观察；
+  `docs/troubleshooting.md` 新增 §12 云编译排查表（runner 排队/回退/foreign 误判/ccache 0 命中等）。
+
 ### 2026-10-06 — 文档同步至 SquashFS+OverlayFS 架构 + 一键构建链路修复
 
 - **scripts/build.sh 链路修复**（全链改造时遗漏的一键入口）：第 2 步 `build-rootfs.sh`

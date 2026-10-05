@@ -68,7 +68,12 @@ SQUASH_OUT="$(mkdir -p "$(dirname "$SQUASH_OUT")" && cd "$(dirname "$SQUASH_OUT"
 
 # ---------------------------------------------------------------- 输入准备
 TMPDIR_RUN="$(mktemp -d "${TMPDIR:-/tmp}/h5000m-sq.XXXXXX")"
-cleanup() { rm -rf "$TMPDIR_RUN"; }
+SLIM_DIR=""   # 硬链接副本目录（仅瘦身且非 --in-place 时创建）
+cleanup() {
+  rm -rf "$TMPDIR_RUN"
+  # 只清理副本目录本身；就地模式(--in-place)与纯流式(--no-slim)均无此目录
+  [[ -n "${SLIM_DIR:-}" ]] && rm -rf "$SLIM_DIR" || true
+}
 trap cleanup EXIT
 
 if [[ -n "$ROOTFS_TAR" ]]; then
@@ -102,11 +107,22 @@ slim_tree() {
 WORK_TREE="$SRC"
 if [[ "$SLIM" -eq 1 ]]; then
   if [[ "$IN_PLACE" -eq 1 ]]; then
+    log "就地瘦身（--in-place：原树将被直接修改）"
     slim_tree "$WORK_TREE"
   else
-    WORK_TREE="$TMPDIR_RUN/tree-slim"
-    log "复制树到临时目录后瘦身（原树保持不动；--in-place 可省去拷贝）"
-    cp -a "$SRC" "$WORK_TREE"
+    # 硬链接副本：只建目录项与 inode 链接，不复制数据。
+    # 相比 cp -a 省掉数百 MiB 的全量读写（分钟级 → 秒级），也省同等磁盘空间。
+    # 安全性：slim_tree 全部操作为 rm -rf（解除本副本的链接），不改写文件内容，
+    #         因此不会穿透影响原树；若将来引入"清空/截断文件"类清理，须改回 cp -a。
+    SLIM_DIR="${SRC%/}.slim.$$"
+    if cp -al "$SRC" "$SLIM_DIR" 2>/dev/null; then
+      log "硬链接副本（零数据拷贝，原树不受影响）：$SLIM_DIR"
+    else
+      log "硬链接不可用（跨文件系统？），回退完整复制 cp -a：$SLIM_DIR"
+      rm -rf "$SLIM_DIR"
+      cp -a "$SRC" "$SLIM_DIR"
+    fi
+    WORK_TREE="$SLIM_DIR"
     slim_tree "$WORK_TREE"
   fi
 fi

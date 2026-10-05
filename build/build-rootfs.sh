@@ -5,7 +5,7 @@
 #
 # 功能：
 #   1. 执行 scripts/fetch-firmware.py 拉取 MT7992 / MT7987 PHY 固件
-#   2. debootstrap --arch=arm64 --foreign trixie + qemu-user-static 第二阶段
+#   2. debootstrap trixie：arm64 宿主走 native 一次完成；x86 宿主走 --foreign + qemu 第二阶段
 #   3. 安装 build/rootfs/packages.list 全部软件包（Debian 13 稳定版，不使用 Testing/Unstable）
 #   4. 应用 rootfs-overlay/ 覆盖层（网络、systemd 服务、Linux-Router 集成）
 #   5. 预装 luci-app-mt5700（Debian 分支 at-webserver 单服务：WebUI + HTTP API :9000）
@@ -19,7 +19,16 @@
 #     --hostname h5000m-debian \
 #     [--kernel-dir /path/to/out/kernel] \
 #     [--admin-password 初始WebUI密码] [--root-password root密码] \
-#     [--mirror http://deb.debian.org/debian] [--timezone Asia/Shanghai]
+#     [--mirror http://deb.debian.org/debian] [--timezone Asia/Shanghai] \
+#     [--skip-tar] [--apt-cache-dir /path/to/deb-cache]
+#
+# 构建模式（自动判定）：
+#   native ：宿主本身就是 arm64/aarch64（如 ubuntu-24.04-arm runner）→ debootstrap 一次
+#            完成，不需要 qemu 二进制翻译，RootFS 构建耗时大幅下降。
+#   foreign：宿主为 x86_64 → debootstrap --foreign + qemu-aarch64-static 第二阶段。
+#
+# --apt-cache-dir：仅缓存"下载层"（.deb 归档），不缓存构建产物本身。命中时跳过所有
+#            包下载；产物仍每次真实 dpkg 安装，保证结果等同无缓存构建。
 #
 # 平台：仅 Linux（debootstrap / qemu-user-static 为 Linux 专用）。
 #       Windows 请使用 WSL2，macOS 建议使用 Docker/Linux VM。
@@ -66,9 +75,10 @@ LINUX_ROUTER_DATA="/var/lib/linux-router"
 #   来源仓库与固定 commit 见该脚本头注释与 staging 内 PROVENANCE.txt
 MT5700_DIR="$OUT_DIR/mt5700"
 SKIP_TAR=0                      # 1 = 跳过 tar.zst 打包（SquashFS 方案直接消费树；CI 传 --skip-tar）
+APT_CACHE_DIR=""                # .deb 下载层缓存目录（仅缓存下载，不缓存构建产物）
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -82,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --root-password)  ROOT_PASSWORD="$2"; shift 2 ;;
     --mt5700-dir)     MT5700_DIR="$2"; shift 2 ;;
     --skip-tar)       SKIP_TAR=1; shift ;;
+    --apt-cache-dir)  APT_CACHE_DIR="$2"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
@@ -100,12 +111,23 @@ log() { printf '[build-rootfs] %s\n' "$*"; }
 die() { printf '[build-rootfs] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- 构建机依赖检查
-for tool in debootstrap qemu-aarch64-static rsync zstd python3; do
+# qemu-aarch64-static 只在 foreign（宿主非 arm64）模式下必需。
+HOST_ARCH="$(uname -m)"
+IS_NATIVE=0
+if [[ "$ARCH" == "arm64" && ( "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ) ]]; then
+  IS_NATIVE=1
+fi
+
+for tool in debootstrap rsync zstd python3; do
   command -v "$tool" >/dev/null 2>&1 || \
-    die "缺少 $tool。请安装：sudo apt-get install debootstrap qemu-user-static rsync zstd python3"
+    die "缺少 $tool。请安装：sudo apt-get install debootstrap rsync zstd python3"
 done
-[[ -e /usr/bin/qemu-aarch64-static ]] || \
-  die "缺少 /usr/bin/qemu-aarch64-static。请安装 qemu-user-static 并确认 binfmt 支持。"
+if [[ "$IS_NATIVE" -eq 0 ]]; then
+  command -v qemu-aarch64-static >/dev/null 2>&1 || \
+    die "缺少 qemu-aarch64-static（foreign 模式需要）。请安装 qemu-user-static，或改用 arm64 宿主走 native 模式。"
+  [[ -e /usr/bin/qemu-aarch64-static ]] || \
+    die "缺少 /usr/bin/qemu-aarch64-static。请安装 qemu-user-static 并确认 binfmt 支持。"
+fi
 
 [[ -f "$PACKAGES_FILE" ]] || die "缺少软件包清单 $PACKAGES_FILE"
 [[ -d "$OVERLAY_DIR" ]]   || die "缺少覆盖层目录 $OVERLAY_DIR"
@@ -125,13 +147,30 @@ python3 "$PROJECT_ROOT/scripts/fetch-firmware.py" --out "$FIRMWARE_DIR"
 if [[ -x "$ROOTFS_DIR/bin/sh" ]]; then
   log "已存在 rootfs（$ROOTFS_DIR），跳过 debootstrap（如需重建请删除该目录）"
 else
-  log "第 2 步：debootstrap --arch=$ARCH --foreign $SUITE（$MIRROR）"
-  debootstrap --arch="$ARCH" --foreign "$SUITE" "$ROOTFS_DIR" "$MIRROR"
+  # debootstrap 下载层缓存：把 .deb 统一存到 --cache-dir，跨次构建复用（不缓存产物）
+  DEB_CACHE_ARGS=()
+  if [[ -n "$APT_CACHE_DIR" ]]; then
+    mkdir -p "$APT_CACHE_DIR"
+    DEB_CACHE_ARGS+=(--cache-dir "$APT_CACHE_DIR")
+    log "  deb 下载层缓存：$APT_CACHE_DIR（已有 $(ls -1 "$APT_CACHE_DIR"/*.deb 2>/dev/null | wc -l) 个包）"
+  fi
 
-  log "第 3 步：第二阶段（qemu-aarch64-static）"
-  install -m 0755 /usr/bin/qemu-aarch64-static "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
-  chroot "$ROOTFS_DIR" /debootstrap/debootstrap --second-stage
+  if [[ "$IS_NATIVE" -eq 1 ]]; then
+    # native：宿主即 arm64，debootstrap 一套流程直接完成，无需二期 qemu 翻译。
+    # 这是 CI 提速的关键路径（原 foreign 第二阶段在 qemu 下耗时占大头）。
+    log "第 2 步：debootstrap --arch=$ARCH $SUITE（native 模式，宿主 $HOST_ARCH 免 qemu）"
+    debootstrap "${DEB_CACHE_ARGS[@]}" --arch="$ARCH" "$SUITE" "$ROOTFS_DIR" "$MIRROR"
+  else
+    log "第 2 步：debootstrap --arch=$ARCH --foreign $SUITE（$MIRROR）"
+    debootstrap "${DEB_CACHE_ARGS[@]}" --arch="$ARCH" --foreign "$SUITE" "$ROOTFS_DIR" "$MIRROR"
+
+    log "第 3 步：第二阶段（qemu-aarch64-static）"
+    install -m 0755 /usr/bin/qemu-aarch64-static "$ROOTFS_DIR/usr/bin/qemu-aarch64-static"
+    chroot "$ROOTFS_DIR" /debootstrap/debootstrap --second-stage
+  fi
 fi
+
+log "构建模式：$([[ "$IS_NATIVE" -eq 1 ]] && echo native || echo foreign)（宿主 Arch=$HOST_ARCH）"
 
 # ---------------------------------------------------------------- 4. 软件源与软件包
 log "第 4 步：配置 Debian 13 软件源"
@@ -147,13 +186,29 @@ deb http://security.debian.org/debian-security $SUITE-security main contrib non-
 EOF
 
 log "第 5 步：apt-get update 并安装软件包"
+# 下载层缓存命中时可免去全部网络拉取；安装动作本身始终真实执行，
+# 产物与无缓存构建完全一致（不做产出层缓存）。
+if [[ -n "$APT_CACHE_DIR" ]]; then
+  mkdir -p "$APT_CACHE_DIR" "$ROOTFS_DIR/var/cache/apt/archives"
+  if compgen -G "$APT_CACHE_DIR"/*.deb >/dev/null 2>&1; then
+    CACHED_N="$(ls -1 "$APT_CACHE_DIR"/*.deb 2>/dev/null | wc -l)"
+    log "  预置 $CACHED_N 个缓存 .deb → chroot archives（免重复下载）"
+    cp -n "$APT_CACHE_DIR"/*.deb "$ROOTFS_DIR/var/cache/apt/archives/" 2>/dev/null || true
+  fi
+fi
 cp "$PACKAGES_FILE" "$ROOTFS_DIR/packages.list"
 chroot "$ROOTFS_DIR" /bin/bash -c '
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends $(grep -vE '^\s*#' /packages.list | tr "\n" " " | sed "s/  */ /g")
-  apt-get clean
 '
+# 先回存本轮下载的 .deb（含依赖），再 clean——顺序不可颠倒，
+# 否则 apt-get clean 清空 archives 后无包可存。
+if [[ -n "$APT_CACHE_DIR" ]]; then
+  cp -n "$ROOTFS_DIR"/var/cache/apt/archives/*.deb "$APT_CACHE_DIR"/ 2>/dev/null || true
+  log "  deb 缓存已回存，当前共 $(ls -1 "$APT_CACHE_DIR"/*.deb 2>/dev/null | wc -l) 个包"
+fi
+chroot "$ROOTFS_DIR" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get clean'
 
 # ---------------------------------------------------------------- 6. 覆盖层
 log "第 6 步：应用 rootfs-overlay 覆盖层"
