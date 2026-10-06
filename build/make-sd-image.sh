@@ -70,7 +70,15 @@ BOOT_DIR="$OUT_DIR/boot"
 EXTRA_MB="128"
 BUSYBOX_LOCAL=""                  # 本地 busybox（arm64 静态）路径；空则从 Debian 下载
 MIRROR="http://deb.debian.org/debian"
-FIT_LOAD_ADDR="0x40000000"       # 与官方 OpenWrt FIT 一致（实测 H5000M sysupgrade.bin：Load/Entry = 0x40000000）
+# FIT 内核 load/entry 必须用 0x46000000，不能照抄官方的 0x40000000：
+# 板上 U-Boot（bl-mt798x，mt7987_airpi_h5000m_defconfig）TEXT_BASE=0x41e00000 且
+# POSITION_INDEPENDENT，bootm_load_os 用 lmb_alloc_mem 要求
+# [0x40000000, 0x40000000+解压尺寸) 整段空闲，窗口仅 30MiB；
+# 本方案 LZMA 内核解压后 35~45MiB 必越界（报 Unable to allocate memory
+# 0x40000000 for loading OS）。官方内核解压后仅 14.5MiB 故可同值。
+# 0x46000000 与 U-Boot 自身区（0x41e00000+）、FIT 暂存区（0x60000000）均无冲突，
+# 且为 2MB 对齐，满足 arm64 Image 装载对齐要求。
+FIT_LOAD_ADDR="0x46000000"
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'

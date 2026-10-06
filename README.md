@@ -102,6 +102,11 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层
 ```
 
 - 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`（与 OpenWrt 同型）；
+- FIT load/entry = **0x46000000**（不能用官方的 0x40000000：板上 U-Boot 自身常驻
+  `0x41e00000`（`CONFIG_TEXT_BASE` + `POSITION_INDEPENDENT`），`bootm` 按
+  `[0x40000000, 0x40000000+解压尺寸)` 做 LMB 分配，窗口仅 30 MiB；官方内核解压后
+  14.5 MiB 可放入，本内核解压后 35~45 MiB 必越界（实机串口日志与 bl-mt798x 源码
+  `boot/bootm.c` 双重确认）。详见 [docs/debian13-partition-plan.md](docs/debian13-partition-plan.md)；
 - 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**（引导层 ext4，行为与旧方案一致——内核看到的仍是
   一个 ext4 根）；
 - 引导序列：p5 `/sbin/init`（busybox）→ 挂 `rootfs.squashfs`（ro）→ 组装 OverlayFS → `pivot_root`
@@ -121,7 +126,11 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层
    luci-app-mt5700 Debian 分支 at-webserver 单服务，仅局域网）就绪；
 5. 后续升级无需重刷：在运行中的 Debian 上执行 `install-emmc.sh --rootfs-squashfs`，在线原子替换
    SquashFS + 刷新 p4 FIT，配置/数据全保留，旧版自动备份 `rootfs.squashfs.bak`；
-6. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）。
+6. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）；
+7. 也可使用单文件包 `out/H5000M-debian13-sysupgrade.bin`（CONTROL+kernel+root，
+   与官方 sysupgrade tar 同构）：运行中的 OpenWrt/ImmortalWrt 上 `sysupgrade -n` 直刷，
+   或断网状态走 U-Boot 菜单 "Upgrade firmware" / Web failsafe 上传该 tar——
+   两条通道同样**只写 p4/p5**，BL2 / FIP / u-boot-env / factory / GPT 零改动。
 
 ```bash
 # 全新刷写：在 H5000M 上（OpenWrt initramfs / Debian live / 已启动的 Debian）执行

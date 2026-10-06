@@ -47,7 +47,7 @@ aarch64_cortex-a53）并实测分析，全部结论与上述分区方案一致�
 | --- | --- | --- |
 | 固件格式 | 新式 sysupgrade **tar 包**：`sysupgrade-hiveton_h5000m/{CONTROL,kernel,root}` | — |
 | CONTROL | `BOARD=hiveton_h5000m` | 确认板级标识 |
-| kernel 分区内容（p4） | **裸 FIT 镜像**，魔数 `d00dfeed`；`mkimage -l` 显示：`ARM64 OpenWrt FIT`，内核 **LZMA 压缩**，**Load/Entry = 0x40000000** | 确认主引导为 p4 FIT（bootm）；**load 地址实测为 0x40000000（修正原假设 0x46000000）** |
+| kernel 分区内容（p4） | **裸 FIT 镜像**，魔数 `d00dfeed`；`mkimage -l` 显示：`ARM64 OpenWrt FIT`，内核 **LZMA 压缩**，**Load/Entry = 0x46000000** | 确认主引导为 p4 FIT（bootm）；官方 FIT 为 0x40000000，本方案必须用 0x46000000：U-Boot 自身常驻 0x41e00000（TEXT_BASE+POSITION_INDEPENDENT），bootm 要求 [0x40000000, 0x40000000+解压尺寸) 整段空闲（窗口仅 30MiB），本内核解压后 35~45MiB 越界 |
 | FIT 内核版本 | `Linux-6.18.52`（本方案构建 6.18.x 同系列） | ✅ |
 | FIT 哈希 | 每镜像带 `hash-1(crc32)` + `hash-2(sha1)` | 方案 FIT 已补齐 sha1 |
 | rootfs 内容（p5） | SquashFS 4.0（xz），OpenWrt 根文件系统 | p5 将被改为 ext4 Debian RootFS |
@@ -59,8 +59,9 @@ aarch64_cortex-a53）并实测分析，全部结论与上述分区方案一致�
 | eMMC 节点 | DTB `mmc@11230000`，`mmc-card`，`non-removable` | 无 SD 卡槽，仅 eMMC，与方案一致 |
 
 > 实测结论：官方 U-Boot 使用 **GPT PARTLABEL 定位 p4（kernel）→ 读取裸 FIT → bootm**
-> （内核 LZMA 解压至 load 地址 0x40000000）。本方案生成的 FIT 与官方同构
-> （同 load/entry、同 LZMA、同 crc32+sha1），现有 U-Boot 可**零改动**直接启动。
+> （内核 LZMA 解压至 load 地址）。官方 FIT 的 load/entry 为 0x40000000（其内核解压后仅
+> 14.5MiB，在 U-Boot TEXT_BASE=0x41e00000 之前的 30MiB 窗口内）；本方案内核更大，FIT
+> load/entry 必须用 **0x46000000**（同 LZMA、同 crc32+sha1），现有 U-Boot **零改动**直接启动。
 > 官方 sysupgrade 也仅覆盖 `kernel`/`rootfs` 两个 GPT 分区，与本方案"只写 p4/p5"完全一致。
 
 ---
@@ -86,7 +87,9 @@ Kernel（FIT 内：LZMA 压缩 Image + H5000M DTB）
 **U-Boot 加载 Kernel 的方式（结论，已由官方固件实测确认）**：Filogic（MT7987）平台的
 OpenWrt/ImmortalWrt U-Boot 通过 **GPT 分区号 p4 / PARTLABEL `kernel`** 定位 kernel 分区，
 将该分区内**裸 FIT 镜像**加载到内存后执行 `bootm`（FIT 方式启动，`CONFIG_FIT` + LZMA）；
-FIT 内 kernel 的 `load/entry = 0x40000000`（实测官方 FIT 同值），bootm 按该地址解压跳转。
+FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U-Boot 自身
+常驻 0x41e00000，0x40000000 起的解压窗口仅 30MiB，本内核解压后 35~45MiB 越界，
+故本方案 FIT 必须用 0x46000000），bootm 按该地址解压跳转。
 不是 EFI/GRUB、不依赖传统 PC 启动路径。
 
 > 若个别固件版本的 U-Boot 使用 distro boot（`bootflow scan`），其会扫描文件系统分区
@@ -163,7 +166,8 @@ U-Boot bootcmd（现有，未修改）
   → 从 eMMC GPT 定位 p4（PARTLABEL=kernel）
   → load mmc 0:4 ${kernel_addr_r}（读取裸 FIT）
   → bootm ${kernel_addr_r}
-     ├─ 解压 LZMA 内核 → FIT 内 load/entry 地址 0x40000000（实测与官方一致）
+     ├─ 解压 LZMA 内核 → FIT 内 load/entry 地址 0x46000000（官方 FIT 为 0x40000000，
+     │  本方案因 30MiB 解压窗口限制改用 0x46000000，详见上文根因说明）
      ├─ 选择 FIT config `conf@h5000m` → fdt（compatible=hiveton,h5000m）
      └─ 传递 bootargs（root=PARTLABEL=rootfs …）
 ```

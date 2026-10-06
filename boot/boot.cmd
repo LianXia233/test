@@ -15,7 +15,11 @@
 # 编译：mkimage -A arm64 -O linux -T script -C none -n "H5000M Debian" -d boot.cmd boot.scr
 # 参考：build/make-boot.sh
 
-setenv kernel_addr_r 0x46000000
+# kernel_addr_r 是 FIT 的暂存地址，必须与 FIT 内部 load/entry（0x46000000，见
+# build/make-sd-image.sh）错开：bootm 解压目标 = FIT 内 load 地址，若暂存与 load
+# 重合会触发解压自重叠（BOOTM_ERR_OVERLAP / LZMA 解码损坏）。0x60000000 与
+# U-Boot 主引导路径实测一致，且远离解压窗口（0x46000000~0x4A000000）。
+setenv kernel_addr_r 0x60000000
 setenv fdt_addr_r 0x45000000
 setenv ramdisk_addr_r 0x44000000
 

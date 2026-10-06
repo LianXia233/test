@@ -4,6 +4,32 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 实机串口定位「Unable to allocate memory 0x40000000 for loading OS」：FIT load/entry 改 0x46000000
+
+**根因（串口日志 + bootloader 源码双重实锤）**：实机冷启动两次复现同一失败——FIT 哈希校验
+通过、`Uncompressing Kernel Image to 40000000` 后报
+`Unable to allocate memory 0x40000000 for loading OS`，随即回退 Web failsafe，内核从未执行。
+板上 U-Boot（bl-mt798x `uboot-mtk-20250711`，`mt7987_airpi_h5000m_defconfig`）：
+`CONFIG_TEXT_BASE=0x41e00000` 且 `CONFIG_POSITION_INDEPENDENT=y`，自身常驻 0x41e00000；
+`bootm_load_os()` 解压完成后按**解压后尺寸**调用 `lmb_alloc_mem(LMB_MEM_ALLOC_ADDR)`
+（`boot/bootm.c:714-725`），要求 `[0x40000000, 0x40000000+Size)` 整段空闲——窗口仅 **30 MiB**。
+官方 OpenWrt 内核解压后 15,194,120 B（14.5 MiB，p4 LZMA 头解析 + 实机 `/proc/iomem`
+`Kernel code 0x40000000-0x40c9ffff` 证实）可放入；本方案内核解压后 35~45 MiB 必越界。
+对照仓库 ctr54188/h5000m-debian 同用 0x40000000 能启动，正是靠未压缩小内核留在窗口内。
+`CONFIG_SYS_BOOTM_LEN=0x6000000`（96 MiB）为解压上限，未触发，排除。
+
+**修复**：
+- `build/make-sd-image.sh`：`FIT_LOAD_ADDR` 0x40000000 → **0x46000000**（2MB 对齐、
+  远离 U-Boot 自身区与 FIT 暂存区 0x60000000，空间充足），附根因注释；
+- `boot/boot.cmd`：`kernel_addr_r`（FIT 暂存地址）0x46000000 → **0x60000000**——暂存地址
+  不得与 FIT 内部 load 地址重合，否则 bootm 解压自重叠（BOOTM_ERR_OVERLAP）；
+- `docs/troubleshooting.md` / `docs/first-boot.md`：手动引导 FIT 暂存地址同步改 0x60000000；
+- `docs/debian13-partition-plan.md` / `README.md`：load 地址结论与根因说明同步修正。
+
+**刷写通道口径（保持不变并明确）**：保留原厂 BL2/FIP/GPT，仅替换 kernel（p4）、rootfs（p5）
+两分区内容——`sysupgrade tar`（CONTROL/kernel/root，与官方同构，U-Boot 网页/运行中
+sysupgrade 均可直刷）或 `scripts/install-emmc.sh`（全新刷写/在线升级）两条通道皆然。
+
 ### 2026-10-06 — 实机无法启动根因修复（QEMU 虚拟机全链路验收 + 4 项致命缺陷）
 
 背景：用户反馈「之前老产物刷入实机无法正常启动」。本轮在沙箱内搭建 **QEMU ARM64 虚拟机**

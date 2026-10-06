@@ -191,10 +191,11 @@ booti 0x46000000 - 0x44000000
 若自动引导失败，串口进入 U-Boot 手动引导：
 
 ```bash
-# 主路径：从 p4 加载 FIT 并 bootm（与 OpenWrt 相同）
+# 主路径：从 p4 加载 FIT 并 bootm（暂存 0x60000000，与 U-Boot 主引导路径一致；
+# FIT 内 load=0x46000000，暂存地址不得与 load 地址重合，否则解压自重叠）
 setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
-load mmc 0:4 0x46000000
-bootm 0x46000000
+load mmc 0:4 0x60000000
+bootm 0x60000000
 
 # 兜底路径：从 p5 的 /boot 加载备用镜像（ext4，distro boot 用）
 load mmc 0:5 0x47000000 /boot/boot.scr
