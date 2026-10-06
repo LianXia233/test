@@ -288,7 +288,9 @@ install -Dm644 "$DTB"   "$OUT_DIR/mt7987a-hiveton-h5000m.dtb"
 tar -C "$MODULES_ROOT" -cf - lib | zstd -q -T0 -o "$OUT_DIR/modules.tar.zst"
 [[ -s "$OUT_DIR/modules.tar.zst" ]] || die "modules.tar.zst 生成失败（空文件）"
 
-cp "$CONFIG_FILE" "$OUT_DIR/kernel-config-exported.config"
+# 导出内核真实生成的 .config（olddefconfig 展开后的完整配置）。
+# 此前错误地导出了输入片段本身，导致 artifact 中的 config 无法反映真实构建配置。
+cp "$KERNEL_SRC/.config" "$OUT_DIR/kernel-config-exported.config"
 grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL_SRC/.config" \
   > "$OUT_DIR/kernel-mt7987-options.txt" || true
 

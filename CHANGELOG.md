@@ -4,6 +4,43 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 实验 C：msdc 写挂死差异分析 + 内核 config 对齐对照组 + config 导出失真修复
+
+**分析结论（实验 C）**：对比三方（我方 6.18.54 真实展开 config / ImmortalWrt master filogic 6.18.52 / ctr54188 h5000m-debian 6.12.103 BSP 真实 config）：
+
+1. **config 导出失真（工具链 bug，本次修复）**：`build/build-kernel.sh` 导出的
+   `kernel-config-exported.config` 是输入片段（269 行）的 `cp` 拷贝而非内核真实生成的
+   `.config`（olddefconfig 展开后约 4784 符号），导致 artifact 中的 config 一直无法用于
+   排查。已改为导出 `$KERNEL_SRC/.config`。
+2. **HSQ/CQHCI 假说排除**：上游 Kconfig `MMC_MTK` 强制 `select MMC_CQHCI + MMC_HSQ`，
+   本地复现 `defconfig → cat 片段 → olddefconfig` 证实真实构建里 `CONFIG_MMC_HSQ=y`、
+   `CONFIG_MMC_CQHCI=y`，与 ImmortalWrt 完全一致（此前串口无 HSQ 打印属打印文案出处差异，
+   非功能缺失）。
+3. **驱动/补丁层排除**：mtk-sd.c 与 mmc_hsq.c 在 6.18.52→6.18.54 间零变更；ImmortalWrt
+   generic/mediatek 6.18 补丁集中无触碰 mtk-sd 写路径的补丁；6.18.53 的 mmc core 变更
+   （单块写恢复/日期解码/erase 怪癖）与 kernel/dma 变更均为无害修复；双方 DTB mmc 节点逐字节一致。
+4. **真实差异收敛到 defconfig 基座**：我方真实展开 config 与两个可运行对照组（原厂
+   OpenWrt、h5000m-debian）在写路径行为相关维度全面相左：
+   - 调度：我方 `PREEMPT=y + PREEMPT_RCU=y`，对照均为 `PREEMPT_NONE=y`；
+   - 时钟粒度：我方 `HZ=1000`，对照均为 `HZ=100`；
+   - IO 调度器：我方 `MQ_IOSCHED_DEADLINE=y + MQ_IOSCHED_KYBER=y`（实际 mq-deadline），对照均显式关闭（blk-mq none）；
+   - 内存：我方 `DMA_CMA=y`（被 defconfig 的 DRM_ETNAVIV select，MT7987 无此硬件）；
+   - 其余（NR_CPUS=512、MMC_BLOCK_MINORS=32、IOMMU/SUSPEND/CGROUP_WRITEBACK 开）为
+     defconfig 全家桶，无直接写路径影响（`BLK_DEV_INTEGRITY` 被 SCSI target/hisi_sas
+     强制 select，但 eMMC 不注册 integrity profile，无功能影响，接受）。
+
+**修复**（`build/kernel-conf/h5000m-6.18.config`，对齐对照组最小差异集）：
+- `CONFIG_PREEMPT=y` → `CONFIG_PREEMPT_NONE=y` + `# CONFIG_PREEMPT is not set`；
+- `CONFIG_HZ_1000=y` → `CONFIG_HZ_100=y` + `# CONFIG_HZ_1000 is not set`；
+- 新增 `# CONFIG_MQ_IOSCHED_DEADLINE is not set`、`# CONFIG_MQ_IOSCHED_KYBER is not set`；
+- 新增 `# CONFIG_DRM_ETNAVIV is not set`、`# CONFIG_DMA_CMA is not set`（去除无意义 CMA 预留）；
+- 修复已在云端沙盒 `make ARCH=arm64 olddefconfig` 复现验证：修改项全部生效，
+  `MMC_MTK/CQHCI/HSQ`、WWAN/T7XX/PPPOE/SQUASHFS/OVERLAY 等全部关键符号不受影响。
+
+**验证状态**：待 CI 构建新固件 → U-Boot Web failsafe 刷入 → 串口观察过 t=60s 无
+msdc 超时。若仍复现，下一步在实机开启 `CONFIG_MMC_DEBUG`/动态调试抓 cmd25 超时前的
+DMA 描述符状态，并评估把 config 基线整体切换为 ImmortalWrt filogic config。
+
 ### 2026-10-06 — FIT 打包时 fdtput 覆写内嵌 bootargs（补 rw + console，参考 ctr54188/h5000m-debian）
 
 **发现（r31 产物二进制实锤）**：OpenWrt 构建的 DTB 在 `/chosen` 内嵌了 bootargs——
