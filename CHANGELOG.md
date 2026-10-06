@@ -38,14 +38,30 @@ e2fsprogs（提供 resize2fs）。
 
 - **RFKILL tristate 陷阱**：上游 `CFG80211 depends on "RFKILL || !RFKILL"`，tristate 逻辑下
   `RFKILL=m` 时该条件求值为 m，把 CFG80211 上限锁死为 m——片段的 `CFG80211=y` 被静默降级，
-  连带 `MAC80211`/`MT76_CORE`/`MT7921E`/`MT7925E`/`MT7996E` 全链降级。CI（板级补丁树下
-  RFKILL 收敛为 y）不受影响，但云端复现展开曾与 CI 结果不一致（wireless 组 CI=y vs 本地=m）。
-  片段 Wi-Fi 段新增 `CONFIG_RFKILL=y` 解锁，任意环境展开均收敛到内建不动点；
-  CI 展开产物不变（本就为 y），无需重跑构建。
+  连带 `MAC80211`/`MT76_CORE`/`MT7921E`/`MT7925E`/`MT7996E` 全链降级。片段 Wi-Fi 段新增
+  `CONFIG_RFKILL=y` 解锁，使展开结果不再依赖「是否应用板级补丁」这一环境变量。
+- **根因定位（此前归因不完整，此处补正）**：最初观察到「CI=y / 本地=m」，一度归因为上游
+  Kconfig 的 tristate 逻辑。真实根因是**复现环境未按 CI 顺序打板级补丁**：纯净
+  `linux-6.18.54` 的 `arch/arm64/configs/defconfig` 显式写着 `CONFIG_RFKILL=m`，而 CI 在
+  `make defconfig` 之前会应用 459 个板级补丁（其中 Wi-Fi/MT 补丁把 RFKILL 收敛为 y）。
+  补齐「解 tar → 打补丁 → 拷 files → defconfig → 加片段 → olddefconfig」全流程后，
+  本地展开与 CI 产物**逐项一致**。
+- **CI 影响量化**：run 37447911367（修复前）与 run 37453691388（修复后）的导出 config
+  **零差异**（`diff` 除工具链能力符号外为空），`Image` 仅 40 字节差异且全部为构建时间戳
+  （`#1 SMP Tue Oct 6 11:03:56` vs `10:40:36`），DTB 与 `kernel-mt7987-options.txt` 哈希一致。
+  即该修复对 CI 真实产物为**零影响**，属防御性加固（保证换环境/换补丁集时不会静默降级），
+  不影响本次实验 C 结论。`modules.tar.zst` 实测 1411 个 `.ko` 中无任何 mt76/mac80211/
+  cfg80211 模块，证实 Wi-Fi 驱动确为内建（=y）而非模块。
 - **清理无效行**：上游 6.18 无 `CONFIG_MT76` 符号（核心为 `MT76_CORE`，由 MT7921E/MT7996E
   的 select 链置 y），删除该无效行并留注释。
-- 复现方法升级：CI 导出 config（12079 行真实展开，535c7d4）与本地展开全量 diff 定位此问题；
-  除 RFKILL 组、两轮提交差量（NR_CPUS/MINORS）、工具链能力探测符号外无其他隐藏差量。
+- 复现方法升级：CI 导出 config（12078 行真实展开，12079 含注释行）与本地展开全量 diff
+  定位此问题；除 RFKILL 组、两轮提交差量（NR_CPUS/MINORS）、工具链能力探测符号
+  （`ARCH_HAS_*`/`CC_HAS_*`/`ARM64_*`/GCC 版本，由宿主编译器决定）外无其他隐藏差量。
+- **下载工具教训**：GitHub Actions artifact 的 Azure Blob 签名 URL 有效期仅 10 分钟
+  （`se=` 参数），而实测单连接下载仅 ~112 KB/s（38.8 MB 需约 6 分钟）。多线程下载器
+  若因分段重试跨越过期点会收到 `HTTP 403 Server failed to authenticate`。可靠做法：
+  现取签名 + 立即并发 Range 分段（26 段 × 1.5 MB / 并发 16，约 4 分钟完成），
+  并在拼接前逐段校验长度、总长校验通过后再 rename。
 
 ### 2026-10-06 — 实验 C 优化轮：config 基座二次对齐（NR_CPUS/MINORS）+ frank-w Debian/Ubuntu 对照补强
 
