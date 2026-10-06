@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .core import (
     HOTSPOT_CONNECTION_NAME,
+    HOTSPOT_BRIDGED_AP_PROFILES,
     SYSTEM_STATIC_CACHE_TTL,
     format_bytes,
     format_uptime,
@@ -31,12 +32,12 @@ def summarize_network_status(active_connections: list[dict[str, str]]) -> dict[s
         ),
         "wireless": any(
             connection.get("type") == "802-11-wireless"
-            and connection.get("name") != HOTSPOT_CONNECTION_NAME
+            and connection.get("name") not in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
             for connection in active_connections
         ),
         "hotspot": any(
             connection.get("type") == "802-11-wireless"
-            and connection.get("name") == HOTSPOT_CONNECTION_NAME
+            and connection.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
             for connection in active_connections
         ),
     }

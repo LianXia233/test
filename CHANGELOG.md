@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — Linux-Router H5000M 桥接 AP 适配
+
+- **识别系统预设热点**：Linux-Router 面板与网络摘要识别 `H5000M-AP-2G/5G`，展示实际 SSID/无线状态并提供停止操作，不再把系统 AP 误判成 Wi-Fi 客户端。
+- **热点共用 LAN 服务**：面板创建的 `DebianRouterHotspot` 改为 `br-lan` 从属连接、关闭连接自身 IPv4/IPv6 服务，避免 NetworkManager `shared` 与系统 dnsmasq/NAT 冲突；停止自定义热点时恢复对应预设 AP。
+- **客户端与状态检测**：客户端租约从系统 dnsmasq lease 文件读取，邻居/IP 与 LAN bridge 对齐；热点在线和依赖检查按桥接连接检测。
+- **启动保持默认 AP**：router-init 每次启动都恢复两个预设 AP profile 的 autoconnect，避免面板停止热点后该设置跨重启残留。
+- 同步架构与排障文档；不改默认密码与 LAN 地址。
+
 ### 2026-10-07 — 修复 Debian 首启固件与服务编排遗漏
 
 - **固件进入 rootfs**：将已下载的 MT7992 Wi-Fi 与 MT7987 2.5G PHY 固件安装到 `/usr/lib/firmware/mediatek`，并在构建阶段逐项检查文件存在且非空。

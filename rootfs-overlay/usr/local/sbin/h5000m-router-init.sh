@@ -133,6 +133,7 @@ nmcli --wait 10 connection up "$LAN_BRIDGE" >/dev/null 2>&1 || warn "启动 $LAN
 nmcli --wait 10 connection up "WAN" >/dev/null 2>&1 || warn "启动 WAN 失败（LAN 不受影响）"
 # WAN-5G 与 AP 均设为 autoconnect：接口可以晚于本 oneshot 服务出现。
 for con in "H5000M-AP-2G" "H5000M-AP-5G"; do
+  nmcli connection modify "$con" connection.autoconnect yes >/dev/null 2>&1 || warn "启用 $con 自动连接失败"
   nmcli --wait 10 connection up "$con" >/dev/null 2>&1 || log "$con 当前不可用（有线 LAN 不受影响）"
 done
 

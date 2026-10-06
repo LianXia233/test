@@ -9,6 +9,8 @@ from typing import Callable
 from .core import (
     CommandResult,
     HOTSPOT_CONNECTION_NAME,
+    HOTSPOT_BRIDGE_INTERFACE,
+    HOTSPOT_BRIDGED_AP_PROFILES,
     NETWORKMANAGER_CONFIG_PATH,
     NETWORKMANAGER_CONF_DIR,
     atomic_write_text,
@@ -28,6 +30,7 @@ from .network import (
     get_device_status_item,
     get_device_details,
     get_hotspot_active_connection_for_parent,
+    get_hotspot_connection_master,
     get_hotspot_profile,
     get_wifi_connection_profiles,
     get_wireless_interface_phy_map,
@@ -151,7 +154,9 @@ def hotspot_keepalive_is_online(config: dict[str, object]) -> bool:
     hotspot_ifname = active.get("device", "")
     if not hotspot_ifname:
         return False
-    return bool(get_device_details(hotspot_ifname).get("ipv4"))
+    bridge = get_hotspot_connection_master(active.get("name", ""))
+    status_ifname = bridge or hotspot_ifname
+    return bool(get_device_details(status_ifname).get("ipv4"))
 
 
 def recover_hotspot_keepalive(config: dict[str, object]) -> CommandResult:
@@ -257,14 +262,29 @@ def activate_hotspot_profile(
     if not added.ok:
         return added
 
+    if HOTSPOT_BRIDGE_INTERFACE and Path(f"/sys/class/net/{HOTSPOT_BRIDGE_INTERFACE}").exists():
+        ip_settings = [
+            "connection.master", HOTSPOT_BRIDGE_INTERFACE,
+            "connection.slave-type", "bridge",
+            "ipv4.method", "disabled",
+            "ipv4.addresses", "",
+            "ipv4.gateway", "",
+            "ipv4.dns", "",
+            "ipv6.method", "disabled",
+        ]
+    else:
+        ip_settings = [
+            "ipv4.method", "shared", "ipv4.addresses", lan_address,
+            "ipv4.link-local", "disabled", "ipv4.gateway", "", "ipv4.dns", "",
+        ]
+
     modify_command = [
         "nmcli", "connection", "modify", HOTSPOT_CONNECTION_NAME,
         "connection.interface-name", "" if mode == "exclusive" else hotspot_ifname,
         "connection.autoconnect", "yes",
         "connection.autoconnect-priority", "100", "802-11-wireless.mode", "ap",
         "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password,
-        "ipv4.method", "shared", "ipv4.addresses", lan_address,
-        "ipv4.link-local", "disabled", "ipv4.gateway", "", "ipv4.dns", "",
+        *ip_settings,
     ]
     if permanent_mac:
         modify_command.extend(
@@ -507,6 +527,20 @@ def _start_hotspot_profile(
 
 
 def _stop_hotspot_profile(ifname: str) -> CommandResult:
+    active = get_hotspot_active_connection_for_parent(ifname) if ifname else {}
+    active_name = active.get("name", "")
+    if active_name in HOTSPOT_BRIDGED_AP_PROFILES:
+        disabled = run_command(
+            ["nmcli", "connection", "modify", "id", active_name, "connection.autoconnect", "no"],
+            timeout=15,
+        )
+        if not disabled.ok:
+            return disabled
+        stopped = run_command(["nmcli", "connection", "down", "id", active_name], timeout=20)
+        if ifname:
+            delete_hotspot_virtual_interface(ifname)
+        return stopped
+
     disable_autoconnect = run_command(
         ["nmcli", "connection", "modify", "id", HOTSPOT_CONNECTION_NAME, "connection.autoconnect", "no"],
         timeout=15,
@@ -520,6 +554,21 @@ def _stop_hotspot_profile(ifname: str) -> CommandResult:
         delete_hotspot_virtual_interface(ifname)
     else:
         cleanup_hotspot_virtual_interfaces()
+    if result.ok and active_name == HOTSPOT_CONNECTION_NAME and HOTSPOT_BRIDGED_AP_PROFILES:
+        for profile_name in HOTSPOT_BRIDGED_AP_PROFILES:
+            profile_ifname = run_command(
+                ["nmcli", "-g", "connection.interface-name", "connection", "show", "id", profile_name],
+                timeout=5,
+            )
+            if not profile_ifname.ok or profile_ifname.output.strip() != ifname:
+                continue
+            enabled = run_command(
+                ["nmcli", "connection", "modify", "id", profile_name, "connection.autoconnect", "yes"],
+                timeout=15,
+            )
+            if enabled.ok:
+                run_command(["nmcli", "connection", "up", "id", profile_name, "ifname", ifname], timeout=30)
+            break
     return result
 
 

@@ -70,6 +70,8 @@
 | 无 wlan 接口 | `lspci -nnk`；`dmesg -T \| grep -Ei 'mt799|firmware|eeprom|pcie'` | 检查 PCIe/mt76 驱动绑定及固件加载；再检查 `rfkill list`。OpenWrt 上的硬件观测不代表 Debian 已验收 |
 | 固件加载失败 | `find /usr/lib/firmware/mediatek -type f -size 0`；`dmesg -T \| grep -i firmware` | 确认 MT7992 6 个文件及 MT7987 PHY 2 个文件均随 rootfs 打包；重新构建 RootFS，不是在设备上运行仓库的下载脚本 |
 | AP 未启动 | `nmcli connection show H5000M-AP-2G`；`nmcli connection show H5000M-AP-5G`；`journalctl -u NetworkManager` | 默认 AP 由 NetworkManager/wpa_supplicant 提供，不是 hostapd；检查 `wlan0`/`wlan1` 是否出现、profile 是否 autoconnect、`iw reg get` 及内核日志 |
+| 面板误报无热点 / 自定义热点和默认 AP 切换异常 | `nmcli connection show --active`；`journalctl -u router-panel-agent` | 面板通过 `LINUX_ROUTER_BRIDGED_AP_PROFILES` 识别系统 AP；`DebianRouterHotspot` 桥接到 `br-lan`，停止后恢复对应 `H5000M-AP-*` profile。确认 agent unit 环境变量与 NetworkManager profile 名称一致 |
+| Wi-Fi 客户端没有地址或重复 DHCP | `systemctl status dnsmasq`；`cat /var/lib/misc/dnsmasq.leases`；`nmcli -f connection.master,ipv4.method connection show H5000M-AP-2G` | AP 应从属 `br-lan` 且 IPv4 disabled；LAN DHCP 唯一由 dnsmasq 提供。桥接热点不要使用 `ipv4.method=shared` |
 | 客户端连不上 | `iw dev`；`iw dev <iface> station dump`；`rfkill list` | 对照 `/etc/default/h5000m-router` 的 SSID/密码与 AP profile；确认射频未软/硬阻断，并查看 NetworkManager 日志 |
 | Wi-Fi EEPROM/校准告警 | `dmesg -T \| grep -Ei 'eeprom|calibration|mt799'` | 实机 OpenWrt 曾出现 `eeprom load fail, use default bin`；需在目标 Debian 上核查 factory NVMEM 与校准，不要把默认 bin 工作模式当成校准验收通过 |
 

@@ -9,6 +9,9 @@ from typing import Any
 from .core import (
     HOTSPOT_CONNECTION_NAME,
     HOTSPOT_DEFAULT_SSID,
+    HOTSPOT_BRIDGE_INTERFACE,
+    HOTSPOT_BRIDGED_AP_PROFILES,
+    HOTSPOT_DHCP_LEASE_FILE,
     WIRELESS_PHY_CACHE_TTL,
     get_network_interface_hardware,
     get_timed_cache,
@@ -406,6 +409,10 @@ def get_hotspot_device_settings(ifname: str) -> dict[str, Any]:
 
 
 def get_hotspot_profile() -> dict[str, str]:
+    return get_hotspot_connection_profile(HOTSPOT_CONNECTION_NAME)
+
+
+def get_hotspot_connection_profile(connection_name: str) -> dict[str, str]:
     details = run_command(
         [
             "nmcli",
@@ -414,7 +421,7 @@ def get_hotspot_profile() -> dict[str, str]:
             "802-11-wireless.ssid,802-11-wireless-security.psk,802-11-wireless.band,802-11-wireless.channel,connection.interface-name",
             "connection",
             "show",
-            HOTSPOT_CONNECTION_NAME,
+            connection_name,
         ]
     )
     if not details.ok or not details.output:
@@ -443,6 +450,14 @@ def get_hotspot_profile() -> dict[str, str]:
     }
 
 
+def get_hotspot_connection_master(connection_name: str) -> str:
+    result = run_command(
+        ["nmcli", "-g", "connection.master", "connection", "show", "id", connection_name],
+        timeout=5,
+    )
+    return result.output.strip() if result.ok else ""
+
+
 def get_active_connections() -> list[dict[str, str]]:
     active_connections = run_command(
         [
@@ -465,7 +480,7 @@ def get_active_connections() -> list[dict[str, str]]:
             **item,
             "type_label": (
                 "热点"
-                if item.get("name") == HOTSPOT_CONNECTION_NAME
+                if item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
                 and item.get("type") == "802-11-wireless"
                 else translate_connection_type(item.get("type", ""))
             ),
@@ -481,7 +496,7 @@ def get_hotspot_active_connections_by_phy(
 ) -> dict[str, dict[str, str]]:
     connections_by_phy: dict[str, dict[str, str]] = {}
     for connection in active_items:
-        if connection.get("name") != HOTSPOT_CONNECTION_NAME:
+        if connection.get("name") not in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}:
             continue
         device = connection.get("device", "").strip()
         phy_name = wireless_phy_map.get(device, "")
@@ -637,7 +652,7 @@ def get_saved_wifi_networks(active_items: list[dict[str, str]]) -> list[dict[str
             continue
 
         name = item.get("name", "").strip()
-        if not name or name == HOTSPOT_CONNECTION_NAME:
+        if not name or name in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}:
             continue
 
         profile_uuid = item.get("uuid", "").strip()
@@ -933,7 +948,15 @@ def gather_hotspot_status() -> HotspotStatus:
             "wifi_link": get_wifi_client_link({**item, "details": details}),
         }
         phy_capability = wireless_phy_capabilities.get(device.get("phy_name", ""), {})
-        frequency_settings = build_hotspot_frequency_settings(device, phy_capability, hotspot_profile)
+        hotspot_connection = hotspot_connections_by_phy.get(device.get("phy_name", ""))
+        hotspot_active = hotspot_connection is not None
+        hotspot_ifname = hotspot_connection.get("device", "") if hotspot_connection else ""
+        active_profile = (
+            get_hotspot_connection_profile(hotspot_connection["name"])
+            if hotspot_connection
+            else hotspot_profile
+        )
+        frequency_settings = build_hotspot_frequency_settings(device, phy_capability, active_profile)
         unavailable_reason = get_hotspot_unavailable_reason(device)
         if unavailable_reason:
             frequency_settings = {
@@ -941,16 +964,20 @@ def gather_hotspot_status() -> HotspotStatus:
                 "available": False,
                 "reason": unavailable_reason,
             }
-        hotspot_connection = hotspot_connections_by_phy.get(device.get("phy_name", ""))
-        hotspot_active = hotspot_connection is not None
-        hotspot_ifname = hotspot_connection.get("device", "") if hotspot_connection else ""
         if hotspot_active and hotspot_ifname:
             hotspot_detail = _get_cached_device_details(hotspot_device_details, hotspot_ifname)
-            hotspot_ip = hotspot_detail["ipv4"][0] if hotspot_detail["ipv4"] else "无"
+            if (
+                HOTSPOT_BRIDGE_INTERFACE
+                and get_hotspot_connection_master(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
+            ):
+                bridge_details = _get_cached_device_details(hotspot_device_details, HOTSPOT_BRIDGE_INTERFACE)
+                hotspot_ip = bridge_details["ipv4"][0] if bridge_details["ipv4"] else "无"
+            else:
+                hotspot_ip = hotspot_detail["ipv4"][0] if hotspot_detail["ipv4"] else "无"
             if hotspot_ifname not in hotspot_radio_statuses:
                 hotspot_radio_statuses[hotspot_ifname] = get_hotspot_radio_status(
                     hotspot_ifname,
-                    hotspot_profile,
+                    active_profile,
                     phy_capability,
                 )
             hotspot_radio_status = hotspot_radio_statuses[hotspot_ifname]
@@ -958,8 +985,8 @@ def gather_hotspot_status() -> HotspotStatus:
             hotspot_ip = "无"
             hotspot_radio_status = {
                 "frequency": "未知",
-                "channel": hotspot_profile["channel"] or "自动",
-                "band_label": hotspot_band_label(hotspot_profile["band"]),
+                "channel": active_profile["channel"] or "自动",
+                "band_label": hotspot_band_label(active_profile["band"]),
             }
         device_mac = normalize_mac_address(hardware_info.get("permanent_mac_address", ""))
         keepalive_protected = bool(
@@ -974,10 +1001,16 @@ def gather_hotspot_status() -> HotspotStatus:
         device["hotspot"] = {
             "active": hotspot_active,
             "conflict": hotspot_conflict and not hotspot_active,
-            "connection_name": HOTSPOT_CONNECTION_NAME,
-            "ssid": hotspot_profile["ssid"],
-            "password": hotspot_profile["password"],
-            "band": hotspot_profile["band"],
+            "connection_name": hotspot_connection["name"] if hotspot_connection else HOTSPOT_CONNECTION_NAME,
+            "managed": bool(hotspot_connection and hotspot_connection["name"] == HOTSPOT_CONNECTION_NAME),
+            "bridged": bool(
+                hotspot_connection
+                and HOTSPOT_BRIDGE_INTERFACE
+                and get_hotspot_connection_master(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
+            ),
+            "ssid": active_profile["ssid"],
+            "password": active_profile["password"],
+            "band": active_profile["band"],
             "band_label": hotspot_radio_status["band_label"],
             "channel": hotspot_radio_status["channel"],
             "ifname": hotspot_ifname or device.get("device", ""),
@@ -1002,7 +1035,7 @@ def gather_hotspot_status() -> HotspotStatus:
         "hotspot": {
             "active": bool(summary_hotspot.get("active")),
             "conflict": bool(summary_hotspot.get("conflict")),
-            "connection_name": HOTSPOT_CONNECTION_NAME,
+            "connection_name": summary_hotspot.get("connection_name", HOTSPOT_CONNECTION_NAME),
             "ssid": summary_hotspot.get("ssid", hotspot_profile["ssid"]),
             "password": summary_hotspot.get("password", hotspot_profile["password"]),
             "band": summary_hotspot.get("band", hotspot_profile["band"]),
@@ -1012,6 +1045,7 @@ def gather_hotspot_status() -> HotspotStatus:
             "ip": summary_hotspot.get("ip", "无"),
             "frequency": summary_hotspot.get("frequency", "未知"),
             "mode": summary_hotspot.get("mode", "exclusive"),
+            "bridged": bool(summary_hotspot.get("bridged")),
         },
         "keepalive": {
             "enabled": bool(keepalive_config),
@@ -1080,7 +1114,19 @@ def get_interface_ipv4_neighbors(ifname: str) -> dict[str, str]:
 
 
 def get_hotspot_dhcp_leases(ifname: str) -> dict[str, dict[str, str]]:
-    lease_path = Path(f"/var/lib/NetworkManager/dnsmasq-{ifname}.leases")
+    active_connection = next(
+        (
+            item for item in get_active_connections()
+            if item.get("device") == ifname
+            and item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
+        ),
+        {},
+    )
+    bridge_master = get_hotspot_connection_master(active_connection["name"]) if active_connection else ""
+    if HOTSPOT_DHCP_LEASE_FILE and HOTSPOT_BRIDGE_INTERFACE and bridge_master == HOTSPOT_BRIDGE_INTERFACE:
+        lease_path = Path(HOTSPOT_DHCP_LEASE_FILE)
+    else:
+        lease_path = Path(f"/var/lib/NetworkManager/dnsmasq-{ifname}.leases")
     try:
         lines = lease_path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1108,7 +1154,16 @@ def get_hotspot_station_clients(ifname: str) -> tuple[list[dict[str, Any]], str 
         return [], result.output or f"无法读取 {ifname} 的热点客户端"
 
     clients = parse_iw_station_dump(result.output)
-    ipv4_neighbors = get_interface_ipv4_neighbors(ifname)
+    active_connection = next(
+        (
+            item for item in get_active_connections()
+            if item.get("device") == ifname
+            and item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
+        ),
+        {},
+    )
+    bridge_master = get_hotspot_connection_master(active_connection["name"]) if active_connection else ""
+    ipv4_neighbors = get_interface_ipv4_neighbors(bridge_master or ifname)
     dhcp_leases = get_hotspot_dhcp_leases(ifname)
     for client in clients:
         normalized_mac = normalize_mac_address(client.get("mac_address", ""))
@@ -1131,7 +1186,7 @@ def gather_hotspot_clients_status() -> HotspotClientsStatus:
     hotspot_connections = [
         item
         for item in active_items
-        if item.get("name") == HOTSPOT_CONNECTION_NAME
+        if item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
         and item.get("type") == "802-11-wireless"
         and item.get("device")
     ]
@@ -1140,11 +1195,12 @@ def gather_hotspot_clients_status() -> HotspotClientsStatus:
     for connection in hotspot_connections:
         hotspot_ifname = connection.get("device", "").strip()
         clients, client_error = get_hotspot_station_clients(hotspot_ifname)
+        connection_profile = get_hotspot_connection_profile(connection["name"])
         if client_error:
             errors.append(client_error)
         hotspots.append(
             {
-                "ssid": hotspot_profile.get("ssid", "") or HOTSPOT_DEFAULT_SSID,
+                "ssid": connection_profile.get("ssid", "") or HOTSPOT_DEFAULT_SSID,
                 "clients": clients,
                 "client_count": len(clients),
             }
@@ -1160,7 +1216,7 @@ def gather_hotspot_clients_status() -> HotspotClientsStatus:
 def get_wifi_networks(ifname: str) -> tuple[list[dict[str, Any]], str | None]:
     device_status = get_device_status_item(ifname)
     interface_is_hotspot = (
-        device_status.get("connection", "").strip() == HOTSPOT_CONNECTION_NAME
+        device_status.get("connection", "").strip() in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
     )
     wifi_list = run_command(
         [

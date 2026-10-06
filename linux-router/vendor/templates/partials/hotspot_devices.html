@@ -51,7 +51,7 @@
               {% if device.hotspot.active %}
               <dl class="key-value compact-key-value">
                 <div><dt>名称</dt><dd>{{ device.hotspot.ssid }}</dd></div>
-                <div><dt>模式</dt><dd>{{ "并发 AP+STA" if device.hotspot.mode == "concurrent" else "独占 AP" }}</dd></div>
+                <div><dt>模式</dt><dd>{{ "并发 AP+STA" if device.hotspot.mode == "concurrent" else ("桥接 LAN" if device.hotspot.bridged else "独占 AP") }}</dd></div>
                 <div><dt>频段</dt><dd>{{ device.hotspot.band_label }}</dd></div>
                 <div><dt>频率</dt><dd class="numeric-value">{{ device.hotspot.frequency }}</dd></div>
                 <div><dt>信道</dt><dd class="numeric-value">{{ device.hotspot.channel }}</dd></div>
@@ -77,6 +77,7 @@
                 <div><dt>IP 段</dt><dd class="mono-value">{{ device.hotspot.ip }}</dd></div>
               </dl>
               <div class="device-actions">
+                {% if device.hotspot.managed %}
                 {% if device.hotspot.keepalive %}
                 <button
                   type="button"
@@ -107,6 +108,14 @@
                 >
                   关闭 AP 热点
                 </button>
+                {% endif %}
+                {% else %}
+                <p class="muted compact">由系统预设 AP profile 管理；热点桥接到 LAN。</p>
+                <button
+                  type="button"
+                  class="button-danger-outline"
+                  data-stop-hotspot-ifname="{{ device.device }}"
+                >关闭 AP 热点</button>
                 {% endif %}
               </div>
               {% else %}

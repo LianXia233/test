@@ -134,7 +134,7 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 ### 4.2 组件边界
 
 - 默认 AP 使用 `H5000M-AP-2G` / `H5000M-AP-5G` NetworkManager profiles，并桥接至 `br-lan`；不要同时启用 hostapd 管理相同无线接口。
-- Linux-Router 中 `DebianRouterHotspot` 是另一种可选热点功能/profile，不是系统首启 AP 的名称；启用前应确认接口/PHY 能力和与默认 AP 的并发关系。
+- Linux-Router 面板识别系统首启 AP profiles `H5000M-AP-2G` / `H5000M-AP-5G`，并可关闭它们；用户从面板启动自定义热点时，`DebianRouterHotspot` 以 `br-lan` 从属接口运行，不启用 NetworkManager `shared` DHCP/NAT，避免与 dnsmasq/nftables 重复提供服务。停止自定义热点后恢复对应系统 AP。
 - ❌ systemd-networkd / dhcpcd 管理任何接口（Debian 安装阶段即禁用）
 - ❌ systemd-resolved 占用 :53（禁用，DNS 统一交给 dnsmasq）
 - ❌ firewalld / ufw（不安装，nftables 为唯一防火墙）
@@ -168,7 +168,7 @@ LAN（eth0，远离电源的 2.5G 口，192.168.88.1/24）
             └── Wi-Fi 客户端从 LAN DHCP 获取地址、使用 LAN 网关
 ```
 
-**Wi-Fi 与 LAN 同网段**：Wi-Fi AP（MT7992 2.4G/5G）作为 `br-lan` 的从属接口（NM 连接 `H5000M-AP-2G/5G`，AP 模式由 wpa_supplicant 提供），与有线 LAN 处于同一二层网络；由同一 dnsmasq 分配 192.168.88.x 地址，可访问 Internet 和 LAN 内设备，不存在独立的 Wi-Fi NAT 网络。
+**Wi-Fi 与 LAN 同网段**：Wi-Fi AP（MT7992 2.4G/5G）作为 `br-lan` 的从属接口（NM 连接 `H5000M-AP-2G/5G`，AP 模式由 wpa_supplicant 提供），与有线 LAN 处于同一二层网络；由同一 dnsmasq 分配 192.168.88.x 地址，可访问 Internet 和 LAN 内设备，不存在独立的 Wi-Fi NAT 网络。Linux-Router 的自定义热点也桥接至 `br-lan`，而非使用它上游默认的 `ipv4.method=shared`，DHCP/DNS/NAT 继续由系统网络栈统一负责。
 
 > Wi-Fi AP 后端说明：Linux-Router 与开机初始化均通过 NetworkManager 管理 Wi-Fi AP（wpa_supplicant 实现 AP 模式）。`hostapd` 已预装，作为独立 AP 后端备用（用户可禁用 NM AP 后改用 `hostapd@.service`），但系统默认不启用 hostapd.service，避免与 NM 争抢接口。
 

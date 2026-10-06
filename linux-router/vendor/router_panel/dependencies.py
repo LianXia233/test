@@ -10,6 +10,8 @@ from .core import (
     APT_TIMEOUT,
     CommandResult,
     HOTSPOT_CONNECTION_NAME,
+    HOTSPOT_BRIDGE_INTERFACE,
+    HOTSPOT_BRIDGED_AP_PROFILES,
     NETPLAN_DIR,
     NETWORKMANAGER_CONFIG_PATH,
     NETWORKMANAGER_CONF_DIR,
@@ -137,7 +139,7 @@ def get_default_route_interface() -> str:
 
 def get_active_hotspot_connection() -> dict[str, str]:
     for item in get_active_connections():
-        if item.get("name") == HOTSPOT_CONNECTION_NAME:
+        if item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}:
             return item
     return {}
 
@@ -152,14 +154,6 @@ def get_hotspot_nat_status() -> dict[str, str]:
             "details": "启动热点后才能检查共享规则",
         }
 
-    uplink_ifname = get_default_route_interface().strip()
-    if not uplink_ifname or uplink_ifname == hotspot_ifname:
-        return {
-            "level": "warning",
-            "summary": "当前没有可用的上联网卡",
-            "details": "请先确保 STA 或有线网络已经联网",
-        }
-
     method = run_command(
         [
             "nmcli",
@@ -168,10 +162,32 @@ def get_hotspot_nat_status() -> dict[str, str]:
             "connection",
             "show",
             "id",
-            HOTSPOT_CONNECTION_NAME,
+            hotspot["name"],
         ],
         timeout=5,
     )
+    if (
+        HOTSPOT_BRIDGE_INTERFACE
+        and method.ok
+        and method.output.strip() == "disabled"
+    ):
+        master = run_command(
+            ["nmcli", "-g", "connection.master", "connection", "show", "id", hotspot["name"]],
+            timeout=5,
+        )
+        if master.ok and master.output.strip() == HOTSPOT_BRIDGE_INTERFACE:
+            return {
+                "level": "ok",
+                "summary": "热点已桥接到 LAN",
+                "details": f"{hotspot_ifname} -> {HOTSPOT_BRIDGE_INTERFACE}；DHCP/DNS/NAT 由路由系统提供",
+            }
+    uplink_ifname = get_default_route_interface().strip()
+    if not uplink_ifname or uplink_ifname == hotspot_ifname:
+        return {
+            "level": "warning",
+            "summary": "当前没有可用的上联网卡",
+            "details": "请先确保 STA 或有线网络已经联网",
+        }
     if method.ok and method.output.strip() == "shared":
         return {
             "level": "ok",
