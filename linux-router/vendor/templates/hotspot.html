@@ -313,16 +313,52 @@
       document.querySelectorAll("[data-hotspot-password-toggle]").forEach((button) => {
         if (button.dataset.bound) return;
         button.dataset.bound = "1";
-        button.addEventListener("click", () => {
-          const value = button.parentElement?.querySelector("[data-hotspot-password-value]");
-          const icon = button.querySelector(".ui-icon");
-          if (!value || !icon) return;
-          const willShow = button.getAttribute("aria-pressed") !== "true";
-          value.textContent = willShow ? (button.dataset.password || "") : "••••••••";
-          icon.style.setProperty("--icon-url", `url('${willShow ? eyeOffIconUrl : eyeIconUrl}')`);
-          button.setAttribute("aria-pressed", willShow ? "true" : "false");
-          button.setAttribute("aria-label", willShow ? "隐藏访问口令" : "显示访问口令");
-          button.title = willShow ? "隐藏访问口令" : "显示访问口令";
+        const value = button.parentElement?.querySelector("[data-hotspot-password-value]");
+        const icon = button.querySelector(".ui-icon");
+        if (!value || !icon) return;
+        let hideTimer = null;
+
+        const maskPassword = () => {
+          value.textContent = "••••••••";
+          icon.style.setProperty("--icon-url", `url('${eyeIconUrl}')`);
+          button.setAttribute("aria-pressed", "false");
+          button.setAttribute("aria-label", "显示访问口令");
+          button.title = "显示访问口令";
+          if (hideTimer) {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+          }
+        };
+
+        button.addEventListener("click", async () => {
+          if (button.getAttribute("aria-pressed") === "true") {
+            maskPassword();
+            return;
+          }
+          const connection = button.dataset.hotspotPasswordConnection || "";
+          if (!connection) return;
+          button.disabled = true;
+          try {
+            const formData = new FormData();
+            formData.set("csrf_token", csrfToken);
+            formData.set("connection", connection);
+            const data = await window.routerHttp.postForm("/hotspot/password/reveal", formData);
+            if (!data || !data.ok) {
+              setPageFeedback((data && data.message) || "读取访问口令失败", "error");
+              return;
+            }
+            value.textContent = data.password || "";
+            icon.style.setProperty("--icon-url", `url('${eyeOffIconUrl}')`);
+            button.setAttribute("aria-pressed", "true");
+            button.setAttribute("aria-label", "隐藏访问口令");
+            button.title = "隐藏访问口令";
+            // 明文只在页面上停留 30 秒，之后自动重新掩码
+            hideTimer = setTimeout(maskPassword, 30000);
+          } catch {
+            setPageFeedback("读取访问口令失败", "error");
+          } finally {
+            button.disabled = false;
+          }
         });
       });
 

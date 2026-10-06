@@ -31,6 +31,16 @@ is_uint() {
 	esac
 }
 
+# 读单行文件（sysfs 属性都是单行）。
+# 守护进程每轮都要读十几个 sysfs 节点，用 cat 意味着每轮十几次 fork+exec；
+# 这里用 shell 内建的 read 完成，进程数降到 0。文件不存在或不可读时返回空串，
+# 与原来的 "$(cat ... || true)" 行为一致。
+sysfs_read() {
+	local value=""
+	[ -r "$1" ] && IFS= read -r value < "$1" 2>/dev/null
+	printf '%s' "${value:-}"
+}
+
 clamp() {
 	local value="$1" min="$2" max="$3"
 	[ "$value" -lt "$min" ] && value="$min"
@@ -39,12 +49,34 @@ clamp() {
 }
 
 log_msg() {
-	# Debian 默认带 bsdutils 的 logger；不可用时回退到 stderr（systemd 捕获到 journal）
+	# 走 journald 并带 syslog 级别，这样 journalctl -p warning 能直接过滤；
+	# logger 不可用时回退到 stderr（systemd 同样会收进 journal）。
 	if command -v logger >/dev/null 2>&1; then
-		logger -t "$TAG" "$@"
+		logger -p daemon.info -t "$TAG" "$@"
 	else
 		printf '%s: %s\n' "$TAG" "$*" >&2
 	fi
+}
+
+warn_msg() {
+	if command -v logger >/dev/null 2>&1; then
+		logger -p daemon.warning -t "$TAG" "$@"
+	else
+		printf '%s: WARN: %s\n' "$TAG" "$*" >&2
+	fi
+}
+
+# 同一类故障在 daemon 循环里每 INTERVAL 都会命中，不去重的话 journal 会被
+# 刷满，反而把真正的故障埋掉。key 相同的只报第一次。
+LOGGED_ONCE=""
+log_once() {
+	local key="$1"
+	shift
+	case " $LOGGED_ONCE " in
+		*" $key "*) return 0 ;;
+	esac
+	LOGGED_ONCE="${LOGGED_ONCE:+$LOGGED_ONCE }$key"
+	warn_msg "$*"
 }
 
 cfg_uint() {
@@ -96,7 +128,7 @@ find_pwm() {
 	local hwmon pwm name
 	for hwmon in /sys/class/hwmon/hwmon*; do
 		[ -d "$hwmon" ] || continue
-		name="$(cat "$hwmon/name" 2>/dev/null || true)"
+		name="$(sysfs_read "$hwmon/name")"
 		[ "$name" = "pwmfan" ] || continue
 		pwm="$hwmon/pwm1"
 		[ -e "$pwm" ] && { echo "$pwm"; return 0; }
@@ -120,12 +152,12 @@ find_thermal_zone() {
 	fallback=""
 	for zone in /sys/class/thermal/thermal_zone*; do
 		[ -r "$zone/policy" ] && [ -r "$zone/available_policies" ] || continue
-		policies="$(cat "$zone/available_policies" 2>/dev/null || true)"
+		policies="$(sysfs_read "$zone/available_policies")"
 		case " $policies " in *" user_space "*) ;; *) continue ;; esac
 		[ -n "$fallback" ] || fallback="$zone"
-		type="$(cat "$zone/type" 2>/dev/null || true)"
-		case "$(printf '%s' "$type" | tr 'A-Z' 'a-z')" in
-			*cpu*|*soc*|*mt798*) echo "$zone"; return 0 ;;
+		type="$(sysfs_read "$zone/type")"
+		case "$type" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*) echo "$zone"; return 0 ;;
 		esac
 	done
 	[ -n "$fallback" ] && { echo "$fallback"; return 0; }
@@ -145,7 +177,7 @@ take_thermal_control() {
 	if [ -f "$POLICY_FILE" ]; then
 		release_thermal_control
 	fi
-	policy="$(cat "$zone/policy" 2>/dev/null || true)"
+	policy="$(sysfs_read "$zone/policy")"
 	[ -n "$policy" ] || return 1
 	CONTROL_ZONE="$zone"
 	CONTROL_POLICY="$policy"
@@ -158,7 +190,7 @@ release_thermal_control() {
 	zone="$(sed -n '1p' "$POLICY_FILE" 2>/dev/null || true)"
 	policy="$(sed -n '2p' "$POLICY_FILE" 2>/dev/null || true)"
 	if [ -r "$zone/policy" ]; then
-		available="$(cat "$zone/available_policies" 2>/dev/null || true)"
+		available="$(sysfs_read "$zone/available_policies")"
 		case " $available " in
 			*" $policy "*) ;;
 			*" step_wise "*) policy="step_wise" ;;
@@ -171,7 +203,7 @@ release_thermal_control() {
 
 read_temp_c() {
 	local value
-	value="$(cat "$1" 2>/dev/null || true)"
+	value="$(sysfs_read "$1")"
 	case "$value" in ''|*[!0-9-]*) return 1 ;; esac
 	if [ "$value" -gt 1000 ] 2>/dev/null || [ "$value" -lt -1000 ] 2>/dev/null; then
 		value=$((value / 1000))
@@ -181,10 +213,19 @@ read_temp_c() {
 }
 
 find_module_temp() {
-	local file value updated now age
+	local file value updated now age line
 	if [ -r "$MT5700M_TEMP_CACHE" ]; then
-		updated="$(sed -n 's/^updated=//p' "$MT5700M_TEMP_CACHE" 2>/dev/null | head -n 1)"
-		now="$(date +%s)"
+		# 缓存文件是脚本自己写的 key=value 文本，用内建 read 扫一遍即可拿到
+		# updated=，省掉 sed | head 两个子进程。
+		updated=""
+		while IFS= read -r line; do
+			case "$line" in
+				updated=*) updated="${line#updated=}"; break ;;
+			esac
+		done < "$MT5700M_TEMP_CACHE"
+		# date 是子进程，只在确实拿到 updated 后才需要调用，避免每轮无条件 fork。
+		now=""
+		is_uint "$updated" && now="$(date +%s)"
 		if is_uint "$updated" && is_uint "$now" && is_uint "$MT5700M_TEMP_MAX_AGE"; then
 			age=$((now - updated))
 			if [ "$age" -ge 0 ] && [ "$age" -le "$MT5700M_TEMP_MAX_AGE" ]; then
@@ -227,13 +268,15 @@ read_sensors() {
 	MODULE_TEMP="$(find_module_temp 2>/dev/null || true)"
 	CONTROL_TEMP=""; CONTROL_SENSOR=""
 
+	# 传感器类型/名称的匹配原先是 printf | tr（每个传感器两个子进程）。这里改成
+	# case 的字符类写法，大小写都能匹配上，且完全不 fork。
 	for zone in /sys/class/thermal/thermal_zone*; do
 		[ -e "$zone/temp" ] || continue
-		type="$(cat "$zone/type" 2>/dev/null || true)"
+		type="$(sysfs_read "$zone/type")"
 		value="$(read_temp_c "$zone/temp" 2>/dev/null || true)"
 		[ -n "$value" ] || continue
-		case "$(printf '%s' "$type" | tr 'A-Z' 'a-z')" in
-			*cpu*|*soc*|*mt798*|*thermal*)
+		case "$type" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*)
 				[ -n "$CPU_TEMP" ] || { CPU_TEMP="$value"; CPU_LABEL="$type"; }
 				;;
 		esac
@@ -241,21 +284,21 @@ read_sensors() {
 
 	for hwmon in /sys/class/hwmon/hwmon*; do
 		[ -d "$hwmon" ] || continue
-		name="$(cat "$hwmon/name" 2>/dev/null || true)"
+		name="$(sysfs_read "$hwmon/name")"
 		value="$(read_temp_c "$hwmon/temp1_input" 2>/dev/null || true)"
 		[ -n "$value" ] || continue
-		case "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" in
-			*cpu*|*soc*|*mt798*|*thermal*)
+		case "$name" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*)
 				[ -n "$CPU_TEMP" ] || { CPU_TEMP="$value"; CPU_LABEL="$name"; }
 				;;
-			*mt799*|*wifi*|*radio*)
+			*[Mm][Tt]799*|*[Ww][Ii][Ff][Ii]*|*[Rr][Aa][Dd][Ii][Oo]*)
 				if [ -z "$WIFI1_TEMP" ]; then
 					WIFI1_TEMP="$value"; WIFI1_LABEL="$name"
 				elif [ -z "$WIFI2_TEMP" ]; then
 					WIFI2_TEMP="$value"; WIFI2_LABEL="$name"
 				fi
 				;;
-			*mdio*|*phy*)
+			*[Mm][Dd][Ii][Oo]*|*[Pp][Hh][Yy]*)
 				[ -n "$PHY_TEMP" ] || { PHY_TEMP="$value"; PHY_LABEL="$name"; }
 				;;
 		esac
@@ -274,7 +317,7 @@ cooling_device_path() {
 	local dev
 	for dev in /sys/class/thermal/cooling_device*; do
 		[ -d "$dev" ] || continue
-		[ "$(cat "$dev/type" 2>/dev/null || true)" = "pwm-fan" ] && { echo "$dev"; return 0; }
+		[ "$(sysfs_read "$dev/type")" = "pwm-fan" ] && { echo "$dev"; return 0; }
 	done
 	return 1
 }
@@ -308,7 +351,7 @@ set_thermal_floor() {
 	THERMAL_OWNER="unknown"
 	dev="$(cooling_device_path 2>/dev/null || true)"
 	[ -n "$dev" ] || return 0
-	THERMAL_MAX_STATE="$(cat "$dev/max_state" 2>/dev/null || echo 0)"
+	THERMAL_MAX_STATE="$(sysfs_read "$dev/max_state")"
 	is_uint "$THERMAL_MAX_STATE" || THERMAL_MAX_STATE=0
 
 	dt="$(readlink -f "$(dirname "$PWM_PATH")/device/of_node" 2>/dev/null || true)"
@@ -376,7 +419,7 @@ acquire_lock() {
 		echo "$$" > "$LOCK_DIR/pid"
 		return 0
 	fi
-	owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+	owner="$(sysfs_read "$LOCK_DIR/pid")"
 	if ! is_uint "$owner" || ! kill -0 "$owner" 2>/dev/null; then
 		rm -rf "$LOCK_DIR" 2>/dev/null
 		mkdir "$LOCK_DIR" 2>/dev/null || return 1
@@ -414,10 +457,19 @@ calc_curve_pwm() {
 	echo $((prev_p * 255 / 100))
 }
 
+# 状态文件是脚本自己写的 key=value 文本，一行一个键。原实现每次取值都跑一遍
+# sed | head（两个子进程），apply_once 一轮要取三次。这里改成用 shell 内建的
+# read 逐行匹配：子进程数降到 0，代价只是每次多打开一次文件（远小于 fork）。
+# 注意不能用 $'\n' 之类的写法——本脚本是 /bin/sh（Debian 上是 dash）。
 state_get() {
-	local key="$1"
+	local key="$1" line
 	[ -f "$STATE_FILE" ] || return 0
-	sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | head -n 1
+	while IFS= read -r line; do
+		case "$line" in
+			"${key}="*) printf '%s' "${line#*=}"; return 0 ;;
+		esac
+	done < "$STATE_FILE"
+	return 0
 }
 
 write_state() {
@@ -444,7 +496,8 @@ apply_once() {
 	load_config
 	PWM_PATH="$(find_pwm 2>/dev/null || true)"
 	if [ -z "$PWM_PATH" ]; then
-		log_msg "PWM control node not found; unable to apply policy"
+		# 每轮都会命中，只报第一次，否则 journal 被刷满
+		log_once "pwm-missing" "PWM control node not found; unable to apply policy"
 		return 1
 	fi
 
@@ -454,7 +507,7 @@ apply_once() {
 
 	if [ "$ENABLED" != "1" ] || [ "$MODE" = "kernel" ]; then
 		release_thermal_control
-		current="$(cat "$PWM_PATH" 2>/dev/null || true)"
+		current="$(sysfs_read "$PWM_PATH")"
 		is_uint "$current" || current=0
 		REQUESTED_PWM=0; TARGET_PWM="$current"; APPLIED_PWM="$current"
 		REASON="kernel"
@@ -492,7 +545,7 @@ apply_once() {
 	TARGET_PWM="$REQUESTED_PWM"
 	[ "$THERMAL_FLOOR" -gt "$TARGET_PWM" ] && { TARGET_PWM="$THERMAL_FLOOR"; REASON="${REASON}+kernel-floor"; }
 
-	current="$(cat "$PWM_PATH" 2>/dev/null || true)"
+	current="$(sysfs_read "$PWM_PATH")"
 	is_uint "$current" || current=0
 	last_pwm="$(state_get applied_pwm)"; is_uint "$last_pwm" || last_pwm="$current"
 	now="$(date +%s)"
@@ -527,7 +580,7 @@ apply_once() {
 			return 1
 		fi
 	fi
-	APPLIED_PWM="$(cat "$PWM_PATH" 2>/dev/null || true)"
+	APPLIED_PWM="$(sysfs_read "$PWM_PATH")"
 	is_uint "$APPLIED_PWM" || APPLIED_PWM="$TARGET_PWM"
 	previous_result="$(state_get result)"
 	if [ "$RESULT" != "$previous_result" ]; then
@@ -563,18 +616,18 @@ print_status() {
 	THERMAL_FLOOR=0; THERMAL_STATE=0; THERMAL_MAX_STATE=0; THERMAL_OWNER="unknown"
 	[ -n "$PWM_PATH" ] && set_thermal_floor
 	zone="$(find_thermal_zone 2>/dev/null || true)"
-	policy="$([ -n "$zone" ] && cat "$zone/policy" 2>/dev/null || true)"
+	policy="$([ -n "$zone" ] && sysfs_read "$zone/policy" || true)"
 	if [ "$ENABLED" != "1" ] || [ "$MODE" = "kernel" ]; then
 		THERMAL_OWNER="kernel"
 	fi
 	print_settings
 	echo "pwm=${PWM_PATH:-}"
-	echo "pwm_value=$([ -n "$PWM_PATH" ] && cat "$PWM_PATH" 2>/dev/null || true)"
+	echo "pwm_value=$([ -n "$PWM_PATH" ] && sysfs_read "$PWM_PATH" || true)"
 	fan="$(find_fan_rpm 2>/dev/null || true)"
 	echo "fan=${fan:-}"
 	if [ -n "$fan" ]; then
 		echo "fan_feedback=1"
-		echo "fan_rpm=$(cat "$fan" 2>/dev/null || true)"
+		echo "fan_rpm=$(sysfs_read "$fan")"
 	else
 		echo "fan_feedback=0"
 		echo "fan_rpm="

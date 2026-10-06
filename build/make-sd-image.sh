@@ -68,6 +68,15 @@ BOOT_DIR="$OUT_DIR/boot"
 # EXTRA_MB=128 时引导层 256 MiB、空闲 **100.2 MiB**，足以支撑到 grow-rootfs 扩容接手。
 # 代价：sysupgrade 由 ~164 MiB 增至 ~270 MiB，仍在设备 /tmp(tmpfs) ≤600 MiB 门槛内。
 EXTRA_MB="128"
+# 【引导层空间下限 —— 实测依据见上方 EXTRA_MB 注释】
+# grow-rootfs 扩容接手之前，冷启动阶段的 journal / NM state / tmp 全写在引导层里。
+# --extra-mb 可以调，但不能调到让"引导层空闲"低于 MIN_BOOT_FREE_MB，否则
+# 就会重现 errno 28 起不来。确知自己在做什么时用 --force-extra-mb 解除拦阻。
+MIN_EXTRA_MB="96"
+MIN_BOOT_FREE_MB="64"
+# ext4 元数据 + journal + 默认 5% root 预留的经验开销（相对 payload）
+BOOT_FS_OVERHEAD_MB="24"
+FORCE_EXTRA_MB=0
 BUSYBOX_LOCAL=""                  # 本地 busybox（arm64 静态）路径；空则从 Debian 下载
 MIRROR="https://deb.debian.org/debian"
 # FIT 内核 load/entry 必须用 0x46000000，不能照抄官方的 0x40000000：
@@ -99,7 +108,8 @@ while [[ $# -gt 0 ]]; do
     --kernel-dir) KERNEL_DIR="$2"; shift 2 ;;
     --squashfs)  SQUASHFS="$2"; shift 2 ;;
     --boot-dir)  BOOT_DIR="$2"; shift 2 ;;
-    --extra-mb)  EXTRA_MB="$2"; shift 2 ;;
+    --extra-mb)       EXTRA_MB="$2"; shift 2 ;;
+    --force-extra-mb) FORCE_EXTRA_MB=1; shift ;;
     --busybox)   BUSYBOX_LOCAL="$2"; shift 2 ;;
     --mirror)    MIRROR="$2"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
@@ -287,8 +297,26 @@ STAGE="$WORK/stage"
 SQ_BYTES=$(stat -c %s "$SQUASHFS")
 IMG_SIZE_MB=$(( ( (SQ_BYTES + BB_SIZE) / 1048576 ) + EXTRA_MB ))
 IMG_SIZE_MB=$(( (IMG_SIZE_MB + 7) / 8 * 8 ))   # 8 MiB 对齐
+
+# 引导层空间断言：算出来的镜像在 grow-rootfs 扩容之前必须还剩足够空闲。
+# 少了这一步，--extra-mb 24 一类取值会静默产出"能编译、能打包、实机起不来"的镜像。
+PAYLOAD_MB=$(( (SQ_BYTES + BB_SIZE) / 1048576 + 1 ))
+BOOT_FREE_MB=$(( IMG_SIZE_MB - PAYLOAD_MB - BOOT_FS_OVERHEAD_MB ))
+if (( FORCE_EXTRA_MB == 0 )); then
+  case "$EXTRA_MB" in
+    ''|*[!0-9]*) die "--extra-mb 必须是非负整数：$EXTRA_MB" ;;
+  esac
+  (( EXTRA_MB >= MIN_EXTRA_MB )) || \
+    die "--extra-mb=${EXTRA_MB} 低于下限 ${MIN_EXTRA_MB} MiB：grow-rootfs 扩容前引导层空闲不足，"
+  (( BOOT_FREE_MB >= MIN_BOOT_FREE_MB )) || \
+    die "引导层预计空闲仅 ${BOOT_FREE_MB} MiB（需 ≥ ${MIN_BOOT_FREE_MB} MiB）："
+fi
 log "生成引导层 ext4 镜像：$ROOTFS_IMG"
 log "  SquashFS $(( SQ_BYTES / 1024 / 1024 )) MiB + busybox $(( BB_SIZE / 1024 / 1024 )) MiB + 余量 ${EXTRA_MB} MiB → ${IMG_SIZE_MB} MiB（8 MiB 对齐）"
+log "  预计引导层空闲 ≈ ${BOOT_FREE_MB} MiB（已扣除 ext4 元数据/journal/root 预留 ${BOOT_FS_OVERHEAD_MB} MiB）"
+if (( FORCE_EXTRA_MB == 1 )); then
+  log "  警告：--force-extra-mb 已启用，跳过空间下限校验"
+fi
 
 mkdir -p "$STAGE"/{sbin,bin,usr/bin,squashfs,boot/extlinux,sq,tmp,dev,proc,sys,etc,overlay/upper,overlay/work,overlay/merged}
 install -m 0755 "$BUSYBOX_BIN" "$STAGE/usr/bin/busybox"

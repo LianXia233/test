@@ -66,6 +66,8 @@ ADMIN_PASSWORD=""                    # 为空则使用默认密码 password
 ROOT_PASSWORD=""                     # 为空则使用默认密码 password
 OVERLAY_DIR="$PROJECT_ROOT/rootfs-overlay"
 PACKAGES_FILE="$PROJECT_ROOT/build/rootfs/packages.list"
+# chroot 内最终配置脚本（原先是本文件里的 heredoc，抽出后进入 CI 静态检查覆盖）
+CHROOT_FINALIZE_SCRIPT="$PROJECT_ROOT/build/rootfs/chroot-finalize.sh"
 FIRMWARE_DIR="$PROJECT_ROOT/build/rootfs/firmware"
 LINUX_ROUTER_SRC="$PROJECT_ROOT/linux-router/vendor"
 LINUX_ROUTER_DIR="/opt/linux-router"
@@ -132,6 +134,7 @@ if [[ "$IS_NATIVE" -eq 0 ]]; then
 fi
 
 [[ -f "$PACKAGES_FILE" ]] || die "缺少软件包清单 $PACKAGES_FILE"
+[[ -f "$CHROOT_FINALIZE_SCRIPT" ]] || die "缺少 chroot 最终配置脚本 $CHROOT_FINALIZE_SCRIPT"
 [[ -d "$OVERLAY_DIR" ]]   || die "缺少覆盖层目录 $OVERLAY_DIR"
 [[ -d "$LINUX_ROUTER_SRC" ]] || die "缺少 Linux-Router 源码目录 $LINUX_ROUTER_SRC"
 [[ -d "$KERNEL_DIR" ]] || {
@@ -223,7 +226,10 @@ chroot "$ROOTFS_DIR" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-ge
 
 # ---------------------------------------------------------------- 6. 覆盖层
 log "第 6 步：应用 rootfs-overlay 覆盖层"
-rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r "$OVERLAY_DIR/" "$ROOTFS_DIR/"
+# --chmod 只约束目录，文件保留覆盖层自身的权限位。
+# 此前的 Fu=rw,Fg=r,Fo=r 会把每个文件强制成 644，把覆盖层脚本的 x 位一起剥掉
+# （git 对这些文件记录的 mode 本来就不一致），事后只能靠 shebang 扫描补回。
+rsync -a --chmod=Du=rwx,Dg=rx,Do=rx "$OVERLAY_DIR/" "$ROOTFS_DIR/"
 
 # 固件下载在构建树中，不会随 overlay 自动进入 Debian rootfs。
 # MT7992 与 MT7987 内置 2.5G PHY 都在运行时从 /usr/lib/firmware 加载。
@@ -243,36 +249,44 @@ for firmware in \
     die "固件未进入 rootfs 或为空：/usr/lib/firmware/mediatek/$firmware"
 done
 
-# 【为什么要「扫描」而不是「逐个列举」——h5000m-led.sh 曾因漏列变成不可执行】
-# rsync 的 --chmod=Fu=rw,Fg=r,Fo=r 会把覆盖层里每个文件强制成 644（剥掉 x 位），
-# 而 git 对 rootfs-overlay 记录的 mode 也全是 100644。原先依赖硬编码白名单逐条
-# chmod 0755，恰好漏了 h5000m-led.sh，于是 systemd 直接报：
+# 【为什么还要「扫描」——h5000m-led.sh 曾因漏列变成不可执行】
+# 原先依赖硬编码白名单逐条 chmod 0755，恰好漏了 h5000m-led.sh，于是 systemd 直接报：
 #     h5000m-led-boot.service: Main process exited, code=exited, status=203/EXEC
 #     h5000m-led-boot.service: Failed with result 'exit-code'
 # （QEMU 虚拟机已复现；注意 bash -n 语法检查不读执行位，测不出来这类问题。）
 # 白名单每新增一个脚本就要记得同步，是不可持续的做法 → 改为按内容判定：
 # 凡覆盖层里带 shebang 的脚本一律 0755，永不遗漏；纯数据文件（如 sshd_config）
 # 首行不是 #!，不受影响，保持 0644。
-log "  按 shebang 扫描并修复覆盖层脚本可执行位"
-while IFS= read -r f; do
+#
+# 扫描范围已扩大到**整个覆盖层**（原先只扫 usr/local/{sbin,bin} 与 NM dispatcher.d，
+# 落在 etc/mt5700、etc/systemd 等处的钩子脚本同样会因缺 x 位报 203/EXEC）。
+# 清单先在宿主机侧的 $OVERLAY_DIR 上算出来，rsync 之后再按清单 chmod，
+# 因此不会误改 Debian 包自带文件的权限位。
+OVERLAY_SCRIPT_LIST="$(mktemp)"
+( cd "$OVERLAY_DIR" && find . -type f -print0 2>/dev/null |
+  while IFS= read -r -d '' f; do
+    head -c 2 "$f" 2>/dev/null | grep -q '#!' && printf '%s\n' "$f"
+  done ) > "$OVERLAY_SCRIPT_LIST"
+
+log "  按 shebang 扫描并修复覆盖层脚本可执行位（范围：整个覆盖层）"
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    f="$ROOTFS_DIR/${rel#./}"
     [ -f "$f" ] || continue
-    head -c 2 "$f" 2>/dev/null | grep -q '#!' || continue
     if [ ! -x "$f" ]; then
         chmod 0755 "$f"
-        log "    +x ${f#$ROOTFS_DIR}"
+        log "    +x ${rel#./}"
     fi
-done < <(find "$ROOTFS_DIR/usr/local/sbin" "$ROOTFS_DIR/usr/local/bin" \
-              "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d" \
-              -type f 2>/dev/null)
+done < "$OVERLAY_SCRIPT_LIST"
 
 # 幂等自检：覆盖层内不得残留「有 shebang 却无执行位」的脚本，否则 systemd 必报 203/EXEC
-BAD_EXEC=$(while IFS= read -r f; do
+BAD_EXEC=$(while IFS= read -r rel; do
+               [ -n "$rel" ] || continue
+               f="$ROOTFS_DIR/${rel#./}"
                [ -f "$f" ] || continue
-               head -c 2 "$f" 2>/dev/null | grep -q '#!' || continue
-               [ -x "$f" ] || printf '%s\n' "${f#$ROOTFS_DIR}"
-           done < <(find "$ROOTFS_DIR/usr/local/sbin" "$ROOTFS_DIR/usr/local/bin" \
-                         "$ROOTFS_DIR/etc/NetworkManager/dispatcher.d" \
-                         -type f 2>/dev/null))
+               [ -x "$f" ] || printf '%s\n' "${rel#./}"
+           done < "$OVERLAY_SCRIPT_LIST")
+rm -f "$OVERLAY_SCRIPT_LIST"
 if [ -n "$BAD_EXEC" ]; then
     echo "[build-rootfs] 警告：以下脚本缺可执行位，systemd 将报 203/EXEC："
     echo "$BAD_EXEC" | sed 's/^/    /'
@@ -352,8 +366,11 @@ log "  [OK] at-webserver + webui + /etc/mt5700 配置已预装（来源见 $MT57
 # ---------------------------------------------------------------- 8. Linux-Router 集成
 log "第 8 步：集成 Linux-Router 到 $LINUX_ROUTER_DIR"
 install -d -m 0755 "$ROOTFS_DIR$LINUX_ROUTER_DIR"
+# install.sh / uninstall 属于部署期工具，随镜像分发等于给设备留一个
+# 可被滥用的 root 级安装/卸载入口；文档同理，只占空间。运行镜像只需要运行时代码。
 rsync -a \
   --exclude tests --exclude data --exclude ".git*" --exclude "*.pyc" --exclude __pycache__ \
+  --exclude install.sh --exclude uninstall.sh --exclude "*.md" \
   "$LINUX_ROUTER_SRC/" "$ROOTFS_DIR$LINUX_ROUTER_DIR/"
 chmod 0644 "$ROOTFS_DIR$LINUX_ROUTER_DIR"/router-panel.service \
            "$ROOTFS_DIR$LINUX_ROUTER_DIR"/router-panel-agent.service
@@ -393,103 +410,14 @@ HOSTNAME="$HOSTNAME" awk '
 ' "$ROOTFS_DIR/etc/hosts" > "$ROOTFS_DIR/etc/hosts.new" && \
   mv -f "$ROOTFS_DIR/etc/hosts.new" "$ROOTFS_DIR/etc/hosts"
 
-chroot "$ROOTFS_DIR" /bin/bash -e -s -- \
+# 整段 chroot 配置已抽到 build/rootfs/chroot-finalize.sh：它原先是本文件里的
+# heredoc 字符串，shellcheck 完全看不到，语法错误要等真机构建才暴露。
+# 现在它进入 CI 的 bash -n 与 shellcheck 覆盖范围。
+install -m 0755 "$CHROOT_FINALIZE_SCRIPT" "$ROOTFS_DIR/tmp/chroot-finalize.sh"
+chroot "$ROOTFS_DIR" /bin/bash /tmp/chroot-finalize.sh \
   "$HOSTNAME" "$TIMEZONE" "$ADMIN_PASSWORD" "$ROOT_PASSWORD" \
-  "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA" <<'CHROOT_SCRIPT'
-  export DEBIAN_FRONTEND=noninteractive
-  HOSTNAME="$1"
-  TIMEZONE="$2"
-  ADMIN_PASSWORD="$3"
-  ROOT_PASSWORD="$4"
-  LINUX_ROUTER_DIR="$5"
-  LINUX_ROUTER_DATA="$6"
-
-  # hostname
-  printf "%s\n" "$HOSTNAME" > /etc/hostname
-
-  # locale / timezone
-  sed -i "s/^# *en_US.UTF-8/en_US.UTF-8/" /etc/locale.gen
-  sed -i "s/^# *zh_CN.UTF-8/zh_CN.UTF-8/" /etc/locale.gen
-  locale-gen >/dev/null 2>&1 || true
-  update-locale LANG=en_US.UTF-8 >/dev/null 2>&1 || true
-  ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-  printf "%s\n" "$TIMEZONE" > /etc/timezone
-
-  # root 密码（首次启动可通过 SSH/串口登录）
-  printf "root:%s\n" "$ROOT_PASSWORD" | chpasswd
-
-  # SSH：允许首次启动 root 密码登录（交付物同时提供 h5000m-initial-credentials）
-  # 注意：/etc/ssh/sshd_config 主配置的兜底放在宿主机侧第 6 步执行，不在本脚本内。
-  # 原因见下方第 6 步注释 —— 本整段脚本是 chroot bash -c '...' 的单引号字符串，
-  # 内部出现任何字面单引号都会提前闭合外层字符串，导致 "unexpected end of file"。
-  mkdir -p /etc/ssh/sshd_config.d
-
-  printf "PermitRootLogin yes\nPasswordAuthentication yes\n" \
-    > /etc/ssh/sshd_config.d/90-h5000m.conf
-  chmod 0644 /etc/ssh/sshd_config.d/90-h5000m.conf
-
-  # Linux-Router 运行账号与数据目录
-  getent group router-panel >/dev/null 2>&1 || groupadd --system router-panel
-  id router-panel >/dev/null 2>&1 || useradd --system \
-    --gid router-panel --home-dir "$LINUX_ROUTER_DATA" \
-    --no-create-home --shell /usr/sbin/nologin router-panel
-  install -d -o router-panel -g router-panel -m 0700 "$LINUX_ROUTER_DATA"
-
-  # 初始化 Linux-Router 数据（auth.json / secret_key / 初始密码）
-  LINUX_ROUTER_DATA_DIR="$LINUX_ROUTER_DATA" \
-  LINUX_ROUTER_INITIAL_PASSWORD="$ADMIN_PASSWORD" \
-    python3 -c "import sys; sys.path.insert(0, \"$LINUX_ROUTER_DIR\"); import app"
-
-  chown -R router-panel:router-panel "$LINUX_ROUTER_DATA"
-  chmod 0700 "$LINUX_ROUTER_DATA"
-  find "$LINUX_ROUTER_DATA" -type f -exec chmod 0600 {} +
-
-  # 首次登录凭据文件（root 可读）
-  cat > /etc/h5000m-initial-credentials <<CRED
-Hiveton H5000M - Debian 13 首次登录凭据
-SSH / 串口: root  / $ROOT_PASSWORD
-WebUI      : http://192.168.88.1  admin / $ADMIN_PASSWORD
-（登录后请立即修改密码）
-CRED
-  chmod 0600 /etc/h5000m-initial-credentials
-
-  # motd 提示
-  cat > /etc/motd <<MOTD
-Welcome to Hiveton H5000M Debian 13 Router
-LAN: 192.168.88.1  |  WebUI: http://192.168.88.1
-模组面板: http://192.168.88.1:9000（MT5700M 5G 管理，WebUI + HTTP API，仅局域网可访问）
-Wi-Fi: OWRT（2.4G / 5G 同名，与 LAN 同一二层网络）
-初始凭据：cat /etc/h5000m-initial-credentials
-MOTD
-
-  # 服务编排（唯一控制面：Linux-Router；禁用冲突服务）
-  systemctl enable NetworkManager.service >/dev/null 2>&1 || true
-  systemctl enable dnsmasq.service >/dev/null 2>&1 || true
-  systemctl enable nftables.service >/dev/null 2>&1 || true
-  systemctl enable h5000m-router-init.service >/dev/null 2>&1 || true
-  systemctl enable h5000m-fancontrol.service >/dev/null 2>&1 || true
-  # 【为什么这三个必须在此显式 enable】覆盖层只拷贝 .service 文件、不携带
-  # .wants 软链，若不在此处 enable，首次启动 systemd 永远不会拉起它们：
-  #   h5000m-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩满分区
-  #     （~7.2 GiB）。漏 enable 会让 /overlay 持久化空间永久锁死在镜像大小，
-  #     与 make-sd-image.sh / make-sysupgrade-tar.sh 注释描述的行为直接矛盾。
-  #     unit 自带 ConditionPathExists=!/var/lib/h5000m-rootfs-grown，天然只跑一次。
-  #   h5000m-led-boot.service（WantedBy=sysinit.target，早期蓝灯闪烁）与
-  #   h5000m-led.service（WantedBy=multi-user.target，就绪后收尾熄灭）：
-  #     与清单内已验证可行的 h5000m-fancontrol.service（同为 WantedBy=sysinit.target）同构。
-  systemctl enable h5000m-grow-rootfs.service >/dev/null 2>&1 || true
-  systemctl enable h5000m-led-boot.service >/dev/null 2>&1 || true
-  systemctl enable h5000m-led.service >/dev/null 2>&1 || true
-  systemctl enable router-panel-agent.service >/dev/null 2>&1 || true
-  systemctl enable router-panel.service >/dev/null 2>&1 || true
-  systemctl enable at-webserver.service >/dev/null 2>&1 || true
-  systemctl enable ssh.service >/dev/null 2>&1 || true
-  systemctl enable systemd-timesyncd.service >/dev/null 2>&1 || true
-
-  systemctl disable systemd-networkd.service systemd-networkd.socket \
-    systemd-resolved.service >/dev/null 2>&1 || true
-  systemctl mask systemd-networkd.service systemd-resolved.service >/dev/null 2>&1 || true
-CHROOT_SCRIPT
+  "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA"
+rm -f "$ROOTFS_DIR/tmp/chroot-finalize.sh"
 
 # 清理构建期文件
 rm -f "$ROOTFS_DIR/packages.list"

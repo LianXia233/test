@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# `iw list` 的 "valid interface combinations" 行在不同内核/iw 版本下空格与
+# 分隔符写法并不稳定（见过 "#{ AP }"、"#{AP}"、"#{ AP, P2P-GO }" 等）。
+# 因此这里按结构解析而不是比对整串字面量。
+INTERFACE_GROUP_RE = re.compile(r"\{([^}]*)\}")
+CHANNEL_LIMIT_RE = re.compile(r"#channels\s*<=\s*(\d+)", re.IGNORECASE)
 
 def split_escaped(line: str, separator: str = ":") -> list[str]:
     values: list[str] = []
@@ -136,23 +143,38 @@ def parse_iw_frequency_line(line: str) -> dict[str, Any] | None:
     }
 
 
+def interface_group_tokens(line: str) -> set[str]:
+    """取出一行里 `#{ ... }` 声明的所有接口类型（如 managed / AP / P2P-GO）。"""
+    tokens: set[str] = set()
+    for group in INTERFACE_GROUP_RE.findall(line):
+        for item in group.split(","):
+            token = item.strip().split("/", 1)[0].strip().lower()
+            if token:
+                tokens.add(token)
+    return tokens
+
+
 def parse_iw_valid_interface_combinations(lines: list[str]) -> dict[str, Any]:
     supports_ap_sta: bool | None = None
     max_channels: int | None = None
 
     for line in lines:
-        has_managed = "managed" in line
-        has_ap = "#{ AP }" in line
+        tokens = interface_group_tokens(line)
+        has_managed = "managed" in tokens
+        has_ap = "ap" in tokens
         if has_managed and has_ap:
             supports_ap_sta = True
 
-        if has_managed and has_ap and "#channels <=" in line:
-            value = line.split("#channels <=", 1)[1].split(",", 1)[0].strip()
-            try:
-                parsed_channels = int(value)
-                max_channels = parsed_channels if max_channels is None else max(max_channels, parsed_channels)
-            except ValueError:
-                pass
+        if has_managed and has_ap:
+            match = CHANNEL_LIMIT_RE.search(line)
+            if match:
+                try:
+                    parsed_channels = int(match.group(1))
+                    max_channels = (
+                        parsed_channels if max_channels is None else max(max_channels, parsed_channels)
+                    )
+                except ValueError:
+                    pass
 
     same_channel_only = bool(max_channels == 1 and supports_ap_sta)
     if supports_ap_sta is None and lines:

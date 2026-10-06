@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import flash, redirect, render_template, request, url_for
+from flask import flash, jsonify, redirect, render_template, request, url_for
 
 from .agent_client import AgentError, query_agent, submit_operation
-from .core import normalize_mac_address
+from .core import (
+    HOTSPOT_BRIDGED_AP_PROFILES,
+    HOTSPOT_CONNECTION_NAME,
+    normalize_mac_address,
+)
+from .security import audit
+from .validation import (
+    validate_hotspot_channel,
+    validate_hotspot_credentials,
+)
 
 
 def register_network_routes(app, login_required, is_async_request) -> None:
@@ -268,10 +277,12 @@ def register_network_routes(app, login_required, is_async_request) -> None:
             return failed(str(exc), {"wireless_devices": [], "hotspot": {}, "errors": [str(exc)]}, "hotspot", "hotspot_page")
         if not ifname:
             return failed("没有可用的无线接口", status, "hotspot", "hotspot_page")
-        if not ssid:
-            return failed("请输入热点名称", status, "hotspot", "hotspot_page")
-        if not 8 <= len(password) <= 63:
-            return failed("热点密码长度必须在 8 到 63 个字符之间", status, "hotspot", "hotspot_page")
+        # 名称与口令的判定统一走 validation，与 agent 侧执行前的校验同源，
+        # 不会出现"页面放行、agent 拒绝"的割裂提示。
+        if error := validate_hotspot_credentials(ssid, password):
+            return failed(error, status, "hotspot", "hotspot_page")
+        if error := validate_hotspot_channel(channel):
+            return failed(error, status, "hotspot", "hotspot_page")
         device = next((item for item in status.get("wireless_devices", []) if item.get("device") == ifname), None)
         if not device:
             return failed(f"找不到无线接口 {ifname}", status, "hotspot", "hotspot_page")
@@ -363,6 +374,55 @@ def register_network_routes(app, login_required, is_async_request) -> None:
             context={"ifname": ifname},
             redirect_endpoint="hotspot_page",
         )
+
+    @app.route("/hotspot/password/reveal", methods=["POST"])
+    @login_required
+    def hotspot_password_reveal():
+        """按需返回单个热点的 PSK。
+
+        热点口令属于长期有效的凭据，此前被直接写进 DOM 的 data-password 属性，
+        任何一次 XSS、浏览器扩展或页面"另存为"都会把它带出去。这里改成：
+        - 页面只渲染掩码，不携带明文；
+        - 只有显式点击且带 CSRF 的 POST 才返回明文；
+        - 连接名走白名单，防止借该接口读取 Wi-Fi STA 等其它连接的密钥；
+        - 每次读取都写审计日志（只记录连接名，不记录口令本身）。
+        """
+        connection = request.form.get("connection", "").strip()
+        allowed = {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
+        if connection not in allowed:
+            audit(
+                "hotspot.password.reveal.rejected",
+                ip=request.remote_addr or "-",
+                connection=connection or "-",
+                reason="connection-not-allowed",
+            )
+            return jsonify({"ok": False, "message": "不支持的连接"}), 400
+
+        try:
+            status = hotspot_status()
+        except AgentError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 502
+
+        device = next(
+            (
+                item
+                for item in status.get("wireless_devices", [])
+                if item.get("hotspot", {}).get("connection_name") == connection
+                and item.get("hotspot", {}).get("active")
+            ),
+            None,
+        )
+        password = (device or {}).get("hotspot", {}).get("password", "")
+
+        audit(
+            "hotspot.password.reveal",
+            ip=request.remote_addr or "-",
+            connection=connection,
+            found=bool(password),
+        )
+        if not password:
+            return jsonify({"ok": False, "message": "该热点当前没有可用的访问口令"}), 404
+        return jsonify({"ok": True, "password": password})
 
 
 __all__ = ["register_network_routes"]

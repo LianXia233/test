@@ -161,11 +161,23 @@ else
 fi
 
 # ---------------------------------------------------------------- 2. 应用补丁
+# 补丁集规模在数百个量级，因此这里刻意做了两件事：
+#   1. 不再对每个补丁先跑一次 `git apply --check`。git apply 本身就是原子的
+#      （任一文件应用失败则整体不落盘），预检只是把同样的解析做两遍，
+#      去掉后这套补丁集能省掉数百次子进程调用。
+#   2. 应用结果汇总成一份报告落盘。数百行 [OK] 日志里找那一个 [FAIL] 很痛苦，
+#      报告里失败清单单独列出，也便于 CI 归档后直接查看。
 log "应用 ImmortalWrt 补丁（backport -> pending -> hack -> mediatek）"
 PATCH_FAILED=0
+PATCH_APPLIED=0
+PATCH_FALLBACK=0
+PATCH_FAILED_NAMES=()
+FAILED_PATCH_REPORT="$OUT_DIR/patch-report.txt"
 apply_patch_series() {
   local series="$1"
   local dir patch name
+  local series_applied=0
+  local series_failed=0
   for dir in $2; do
     if [[ ! -d "$dir" ]]; then
       log "  [SKIP] $series（目录缺失：$dir）"
@@ -177,29 +189,54 @@ apply_patch_series() {
         continue
       fi
       name="$(basename "$patch")"
-      if git -C "$KERNEL_SRC" apply --check "$patch" 2>/dev/null; then
-        git -C "$KERNEL_SRC" apply "$patch"
-        log "  [OK] $series/$name"
+      if git -C "$KERNEL_SRC" apply "$patch" 2>/dev/null; then
+        PATCH_APPLIED=$((PATCH_APPLIED + 1))
+        series_applied=$((series_applied + 1))
       elif command -v patch >/dev/null 2>&1 \
         && patch -d "$KERNEL_SRC" -p1 --forward --dry-run < "$patch" >/dev/null 2>&1; then
-        patch -d "$KERNEL_SRC" -p1 --forward < "$patch" >/dev/null
-        log "  [OK] $series/$name（git apply 失败，patch 回退应用成功）"
+        if patch -d "$KERNEL_SRC" -p1 --forward < "$patch" >/dev/null 2>&1; then
+          PATCH_FALLBACK=$((PATCH_FALLBACK + 1))
+          series_applied=$((series_applied + 1))
+          log "  [OK] $series/$name（patch 回退应用）"
+        else
+          log "  [FAIL] $series/$name（git apply 与 patch 回退均失败）"
+          PATCH_FAILED_NAMES+=("$series/$name")
+          PATCH_FAILED=1
+          series_failed=$((series_failed + 1))
+        fi
       else
         log "  [FAIL] $series/$name（与内核 $KERNEL_VERSION 上下文不匹配，且 patch 回退无法应用）"
+        PATCH_FAILED_NAMES+=("$series/$name")
         PATCH_FAILED=1
+        series_failed=$((series_failed + 1))
       fi
     done
   done
+  log "  -- $series：成功 $series_applied，失败 $series_failed"
 }
 apply_patch_series backport "$GENERIC_PATCH_DIR/backport"
 apply_patch_series pending  "$GENERIC_PATCH_DIR/pending"
 apply_patch_series hack     "$GENERIC_PATCH_DIR/hack"
 apply_patch_series mediatek "$PATCH_DIR"
+{
+  echo "内核补丁应用报告"
+  echo "内核版本：$KERNEL_VERSION"
+  echo "生成时间：$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "git apply 成功：$PATCH_APPLIED"
+  echo "patch 回退成功：$PATCH_FALLBACK"
+  echo "失败：${#PATCH_FAILED_NAMES[@]}"
+  if [[ ${#PATCH_FAILED_NAMES[@]} -gt 0 ]]; then
+    echo "失败清单："
+    printf '  - %s\n' "${PATCH_FAILED_NAMES[@]}"
+  fi
+} > "$FAILED_PATCH_REPORT"
+log "补丁应用报告：$FAILED_PATCH_REPORT（git apply $PATCH_APPLIED / 回退 $PATCH_FALLBACK / 失败 ${#PATCH_FAILED_NAMES[@]}）"
 if [[ "$PATCH_FAILED" -eq 1 ]]; then
   if [[ "$SKIP_FAILED" -eq 1 ]]; then
-    log "存在失败补丁，已按 --skip-failed-patches 继续（硬件功能可能不完整）"
+    log "存在失败补丁，已按 --skip-failed-patches 继续（硬件功能可能不完整）："
+    printf '    %s\n' "${PATCH_FAILED_NAMES[@]}"
   else
-    die "存在失败补丁。请调整 --kernel-version（6.18.x 系列）后重试，或加 --skip-failed-patches 强制继续。"
+    die "存在 ${#PATCH_FAILED_NAMES[@]} 个失败补丁：${PATCH_FAILED_NAMES[*]}。请调整 --kernel-version（6.18.x 系列）后重试，或加 --skip-failed-patches 强制继续。"
   fi
 fi
 

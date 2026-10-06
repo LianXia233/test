@@ -25,6 +25,7 @@ from router_panel import dependencies
 from router_panel import network
 from router_panel import network_operations
 from router_panel import network_parsers
+from router_panel import network_wired
 from router_panel import web_network
 from router_panel import agent_server
 from router_panel import hotspot_keepalive
@@ -44,6 +45,7 @@ EXPECTED_ROUTES = {
     "/hotspot/clients",
     "/hotspot/keepalive/disable",
     "/hotspot/keepalive/enable",
+    "/hotspot/password/reveal",
     "/hotspot/start",
     "/hotspot/stop",
     "/login",
@@ -466,19 +468,23 @@ class ApplicationStructureTests(unittest.TestCase):
             }
             return values.get(path, "")
 
+        # 有线状态已拆到 network_wired：要打桩的是它自己的 run_command/read_text，
+        # 打在 network 上对搬走的实现不再生效。
         with (
             patch.object(
-                network,
+                network_wired,
                 "run_command",
                 side_effect=[
                     CommandResult(True, nmcli_output),
                     CommandResult(True, "manual"),
                 ],
             ) as run_command,
-            patch.object(network, "read_text", side_effect=read_sysfs),
+            patch.object(network_wired, "read_text", side_effect=read_sysfs),
         ):
-            wired = network.gather_wired_network_info()
+            wired = network_wired.gather_wired_network_info()
 
+        # network 仍 re-export 同一个函数对象，既有调用方行为不变。
+        self.assertIs(network.gather_wired_network_info, network_wired.gather_wired_network_info)
         requested_fields = run_command.call_args_list[0].args[0][3]
         self.assertNotIn("GENERAL.SPEED", requested_fields)
         eth0, eth1 = wired["devices"]

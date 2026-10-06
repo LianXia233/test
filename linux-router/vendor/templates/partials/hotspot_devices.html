@@ -58,13 +58,14 @@
                 <div>
                   <dt>访问口令</dt>
                   {% if device.hotspot.password %}
+                  {# 明文口令不再写入 DOM：只渲染掩码，"显示"按钮发起一次带 CSRF 的后端请求按需取回 #}
                   <dd class="hotspot-password-display">
                     <span data-hotspot-password-value>••••••••</span>
                     <button
                       type="button"
                       class="password-visibility-button"
                       data-hotspot-password-toggle
-                      data-password="{{ device.hotspot.password }}"
+                      data-hotspot-password-connection="{{ device.hotspot.connection_name }}"
                       aria-label="显示访问口令"
                       aria-pressed="false"
                       title="显示访问口令"

@@ -15,6 +15,15 @@ DEFAULT_TAILSCALE_CONFIG = {
     "advertise_routes": "",
 }
 
+# Tailscale 的命令大多要先和本机 tailscaled 通过本地 socket 握手，
+# daemon 冷启动 / eMMC 上 systemd 拉起较慢，原先 8/20 秒在实机上会导致
+# "状态异常""启动失败" 这类假阴性（命令其实还在跑，只是被我们掐断了）。
+# 这里统一放宽，并额外给 systemd enable --now 更长的等待窗口。
+TAILSCALE_STATUS_TIMEOUT = 20
+TAILSCALE_UP_TIMEOUT = 30
+TAILSCALE_LOGOUT_TIMEOUT = 30
+TAILSCALE_SERVICE_START_TIMEOUT = 60
+
 
 def describe_tailscale_state(
     *,
@@ -131,7 +140,7 @@ def gather_tailscale_status() -> dict[str, Any]:
         }
 
     service_active = is_service_active("tailscaled.service")
-    result = run_command(["tailscale", "status", "--json"], timeout=8)
+    result = run_command(["tailscale", "status", "--json"], timeout=TAILSCALE_STATUS_TIMEOUT)
     if not result.ok or not result.output:
         return {
             "agent_available": True,
@@ -208,7 +217,9 @@ def start_tailscale_login(config: dict[str, Any]) -> dict[str, Any]:
             "login_url": "",
         }
 
-    service = run_command(["systemctl", "enable", "--now", "tailscaled.service"], timeout=20)
+    service = run_command(
+        ["systemctl", "enable", "--now", "tailscaled.service"], timeout=TAILSCALE_SERVICE_START_TIMEOUT
+    )
     if not service.ok:
         return {
             "ok": False,
@@ -217,7 +228,7 @@ def start_tailscale_login(config: dict[str, Any]) -> dict[str, Any]:
         }
 
     command = build_tailscale_up_command(config)
-    result = run_command(command, timeout=8)
+    result = run_command(command, timeout=TAILSCALE_UP_TIMEOUT)
     login_url = extract_login_url("\n".join([result.stdout, result.stderr, result.output]))
     if login_url:
         return {
@@ -241,7 +252,7 @@ def start_tailscale_login(config: dict[str, Any]) -> dict[str, Any]:
 def logout_tailscale() -> CommandResult:
     if not command_exists("tailscale"):
         return CommandResult(False, "未安装 Tailscale，请先自行安装后再使用")
-    return run_command(["tailscale", "logout"], timeout=20)
+    return run_command(["tailscale", "logout"], timeout=TAILSCALE_LOGOUT_TIMEOUT)
 
 
 __all__ = [

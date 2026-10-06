@@ -7,7 +7,8 @@ from typing import Any
 from flask import abort, redirect, render_template, request, session, url_for
 
 from .agent_client import AgentError, get_operation, query_agent
-from .core import PASSWORD_HINT_PATH, get_build_info
+from .core import get_build_info
+from .security import audit
 from .web_general import register_general_routes
 from .web_network import register_network_routes
 from .web_tools import register_tools_routes
@@ -34,6 +35,17 @@ def register_routes(app) -> None:
     def validate_csrf_token() -> None:
         if request.method != "POST":
             return
+
+        # 【审计】记录所有写操作的来源与路径。只记录 path 与结果，
+        # 绝不记录表单正文（其中可能包含口令）。
+        if request.path != "/login":
+            audit(
+                "request.post",
+                ip=request.remote_addr or "unknown",
+                path=request.path,
+                user=session.get("username", "-"),
+                authenticated="yes" if session.get("logged_in") else "no",
+            )
 
         expected_token = session.get("csrf_token", "")
         submitted_token = request.form.get("csrf_token", "") or request.headers.get(
@@ -103,9 +115,10 @@ def register_routes(app) -> None:
 
     @app.context_processor
     def inject_globals() -> dict[str, Any]:
+        # 【安全】不再注入 initial_password_file：该值指向存放初始口令的文件路径，
+        # 一旦被模板渲染或被 JS 读取即构成凭据泄漏面，且当前没有任何模板使用它。
         return {
             "current_path": request.path,
-            "initial_password_file": str(PASSWORD_HINT_PATH),
             "build_info": get_build_info(),
             "csrf_token": get_csrf_token(),
         }

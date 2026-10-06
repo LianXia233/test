@@ -8,22 +8,48 @@ from typing import Any
 
 from .core import (
     HOTSPOT_CONNECTION_NAME,
-    HOTSPOT_DEFAULT_SSID,
     HOTSPOT_BRIDGE_INTERFACE,
     HOTSPOT_BRIDGED_AP_PROFILES,
-    HOTSPOT_DHCP_LEASE_FILE,
     WIRELESS_PHY_CACHE_TTL,
     get_network_interface_hardware,
-    get_timed_cache,
+    get_or_set_timed_cache,
     is_hotspot_virtual_interface,
     is_service_active,
     normalize_mac_address,
     read_text,
     run_command,
-    set_timed_cache,
 )
-from .contracts import HotspotClientsStatus, HotspotStatus, WirelessStatus
+from .contracts import HotspotStatus, WirelessStatus
 from .hotspot_keepalive import get_hotspot_keepalive_runtime, load_hotspot_keepalive
+# network.py 原先同时承担无线扫描、热点、客户端与有线四类职责。下面几块已经
+# 各自独立成模块，这里 re-export 是为了让既有 import 不需要跟着改：
+#   network_connections      —— 连接/热点配置的只读查询
+#   network_hotspot_clients  —— 已连接客户端 + DHCP 租约
+#   network_wired            —— 有线接口状态与速率展示
+from .network_connections import (
+    get_active_connections,
+    get_hotspot_connection_master,
+    get_hotspot_connection_profile,
+    get_hotspot_profile,
+)
+from .network_hotspot_clients import (
+    gather_hotspot_clients_status,
+    get_current_wifi_link,
+    get_hotspot_dhcp_leases,
+    get_hotspot_station_clients,
+    get_interface_ipv4_neighbors,
+)
+from .network_wired import (
+    default_wired_profile,
+    format_link_speed,
+    gather_wired_network_info,
+    get_wired_carrier,
+    get_wired_ipv4_method_label,
+    get_wired_sysfs_speed,
+    normalize_wired_state,
+    parse_link_speed_mbps,
+    translate_ipv4_method,
+)
 
 from .network_parsers import (
     parse_nmcli_lines,
@@ -42,10 +68,15 @@ from .network_parsers import (
 )
 
 def get_wireless_interface_phy_map() -> dict[str, str]:
-    cached = get_timed_cache("wireless:phy-map", WIRELESS_PHY_CACHE_TTL)
-    if cached is not None:
-        return cached.copy()
+    cached = get_or_set_timed_cache(
+        "wireless:phy-map",
+        WIRELESS_PHY_CACHE_TTL,
+        _collect_wireless_interface_phy_map,
+    )
+    return cached.copy()
 
+
+def _collect_wireless_interface_phy_map() -> dict[str, str]:
     result = run_command(["iw", "dev"], timeout=5)
     if not result.ok or not result.output:
         return {}
@@ -61,15 +92,19 @@ def get_wireless_interface_phy_map() -> dict[str, str]:
             ifname = line.split(" ", 1)[1].strip()
             if ifname:
                 mapping[ifname] = current_phy
-    set_timed_cache("wireless:phy-map", WIRELESS_PHY_CACHE_TTL, mapping.copy())
     return mapping
 
 
 def get_wireless_phy_capabilities() -> dict[str, dict[str, Any]]:
-    cached = get_timed_cache("wireless:phy-capabilities", WIRELESS_PHY_CACHE_TTL)
-    if cached is not None:
-        return json.loads(json.dumps(cached))
+    cached = get_or_set_timed_cache(
+        "wireless:phy-capabilities",
+        WIRELESS_PHY_CACHE_TTL,
+        _collect_wireless_phy_capabilities,
+    )
+    return json.loads(json.dumps(cached))
 
+
+def _collect_wireless_phy_capabilities() -> dict[str, dict[str, Any]]:
     result = run_command(["iw", "phy"], timeout=8)
     if not result.ok or not result.output:
         return {}
@@ -174,7 +209,6 @@ def get_wireless_phy_capabilities() -> dict[str, dict[str, Any]]:
             band["label"] = band_label
             band["nmcli_band"] = hotspot_band_code_from_wifi_band(band_label)
 
-    set_timed_cache("wireless:phy-capabilities", WIRELESS_PHY_CACHE_TTL, json.loads(json.dumps(capabilities)))
     return capabilities
 
 
@@ -408,88 +442,6 @@ def get_hotspot_device_settings(ifname: str) -> dict[str, Any]:
     return device
 
 
-def get_hotspot_profile() -> dict[str, str]:
-    return get_hotspot_connection_profile(HOTSPOT_CONNECTION_NAME)
-
-
-def get_hotspot_connection_profile(connection_name: str) -> dict[str, str]:
-    details = run_command(
-        [
-            "nmcli",
-            "--show-secrets",
-            "-g",
-            "802-11-wireless.ssid,802-11-wireless-security.psk,802-11-wireless.band,802-11-wireless.channel,connection.interface-name",
-            "connection",
-            "show",
-            connection_name,
-        ]
-    )
-    if not details.ok or not details.output:
-        return {
-            "ssid": HOTSPOT_DEFAULT_SSID,
-            "password": "",
-            "band": "",
-            "channel": "",
-            "interface_name": "",
-            "mode": "exclusive",
-        }
-
-    lines = details.output.splitlines()
-    ssid = lines[0].strip() if lines else HOTSPOT_DEFAULT_SSID
-    password = lines[1].strip() if len(lines) > 1 else ""
-    band = lines[2].strip() if len(lines) > 2 else ""
-    channel = lines[3].strip() if len(lines) > 3 else ""
-    interface_name = lines[4].strip() if len(lines) > 4 else ""
-    return {
-        "ssid": ssid or HOTSPOT_DEFAULT_SSID,
-        "password": password,
-        "band": band,
-        "channel": channel,
-        "interface_name": interface_name,
-        "mode": "concurrent" if is_hotspot_virtual_interface(interface_name) else "exclusive",
-    }
-
-
-def get_hotspot_connection_master(connection_name: str) -> str:
-    result = run_command(
-        ["nmcli", "-g", "connection.master", "connection", "show", "id", connection_name],
-        timeout=5,
-    )
-    return result.output.strip() if result.ok else ""
-
-
-def get_active_connections() -> list[dict[str, str]]:
-    active_connections = run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            "NAME,TYPE,DEVICE",
-            "connection",
-            "show",
-            "--active",
-        ]
-    )
-    active_items = (
-        parse_nmcli_lines(active_connections.output, ["name", "type", "device"])
-        if active_connections.ok and active_connections.output
-        else []
-    )
-    return [
-        {
-            **item,
-            "type_label": (
-                "热点"
-                if item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
-                and item.get("type") == "802-11-wireless"
-                else translate_connection_type(item.get("type", ""))
-            ),
-        }
-        for item in active_items
-        if item.get("device") != "lo"
-    ]
-
-
 def get_hotspot_active_connections_by_phy(
     active_items: list[dict[str, str]],
     wireless_phy_map: dict[str, str],
@@ -609,7 +561,9 @@ def get_wifi_connection_profiles(ssid: str) -> list[dict[str, str]]:
     if not ssid:
         return []
 
-    result = run_command(["nmcli", "-t", "-f", "NAME,UUID,TYPE", "connection", "show"])
+    result = run_command(
+        ["nmcli", "-t", "-f", "NAME,UUID,TYPE", "connection", "show"], timeout=15
+    )
     if not result.ok or not result.output:
         return []
 
@@ -636,7 +590,10 @@ def get_active_wifi_connection(ifname: str) -> dict[str, str]:
 
 
 def get_saved_wifi_networks(active_items: list[dict[str, str]]) -> list[dict[str, str]]:
-    result = run_command(["nmcli", "-t", "-f", "NAME,UUID,TYPE,AUTOCONNECT,DEVICE,FILENAME", "connection", "show"])
+    result = run_command(
+        ["nmcli", "-t", "-f", "NAME,UUID,TYPE,AUTOCONNECT,DEVICE,FILENAME", "connection", "show"],
+        timeout=15,
+    )
     if not result.ok or not result.output:
         return []
 
@@ -901,6 +858,18 @@ def _get_cached_device_details(
     return cache[ifname]
 
 
+def _make_cached_lookup(fetcher):
+    """把"每调用一次就起一个 nmcli 子进程"的函数包成按 key 记忆的版本。"""
+    cache: dict[str, Any] = {}
+
+    def lookup(key: str):
+        if key not in cache:
+            cache[key] = fetcher(key)
+        return cache[key]
+
+    return lookup
+
+
 def gather_hotspot_status() -> HotspotStatus:
     keepalive_config = load_hotspot_keepalive()
     keepalive_runtime = get_hotspot_keepalive_runtime()
@@ -927,6 +896,10 @@ def gather_hotspot_status() -> HotspotStatus:
     hotspot_connections_by_phy = get_hotspot_active_connections_by_phy(active_items, wireless_phy_map)
     hotspot_device_details: dict[str, dict[str, Any]] = {}
     hotspot_radio_statuses: dict[str, dict[str, str]] = {}
+    # 同一份连接信息会在"是否桥接"和"是否受管"两处各查一次 nmcli，
+    # 多个无线口还可能共用同一个连接，这里在单次采集内做记忆化。
+    connection_master_lookup = _make_cached_lookup(get_hotspot_connection_master)
+    connection_profile_lookup = _make_cached_lookup(get_hotspot_connection_profile)
 
     wireless_devices: list[dict[str, Any]] = []
     keepalive_online = False
@@ -952,7 +925,7 @@ def gather_hotspot_status() -> HotspotStatus:
         hotspot_active = hotspot_connection is not None
         hotspot_ifname = hotspot_connection.get("device", "") if hotspot_connection else ""
         active_profile = (
-            get_hotspot_connection_profile(hotspot_connection["name"])
+            connection_profile_lookup(hotspot_connection["name"])
             if hotspot_connection
             else hotspot_profile
         )
@@ -968,7 +941,7 @@ def gather_hotspot_status() -> HotspotStatus:
             hotspot_detail = _get_cached_device_details(hotspot_device_details, hotspot_ifname)
             if (
                 HOTSPOT_BRIDGE_INTERFACE
-                and get_hotspot_connection_master(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
+                and connection_master_lookup(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
             ):
                 bridge_details = _get_cached_device_details(hotspot_device_details, HOTSPOT_BRIDGE_INTERFACE)
                 hotspot_ip = bridge_details["ipv4"][0] if bridge_details["ipv4"] else "无"
@@ -1006,7 +979,7 @@ def gather_hotspot_status() -> HotspotStatus:
             "bridged": bool(
                 hotspot_connection
                 and HOTSPOT_BRIDGE_INTERFACE
-                and get_hotspot_connection_master(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
+                and connection_master_lookup(hotspot_connection["name"]) == HOTSPOT_BRIDGE_INTERFACE
             ),
             "ssid": active_profile["ssid"],
             "password": active_profile["password"],
@@ -1054,161 +1027,6 @@ def gather_hotspot_status() -> HotspotStatus:
             "last_error": str(keepalive_runtime.get("last_error", "")),
             "parent_ifname": keepalive_config.get("parent_ifname", "") if keepalive_config else "",
         },
-        "errors": errors,
-    }
-
-
-def get_current_wifi_link(ifname: str) -> dict[str, str]:
-    wifi_list = run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            "IN-USE,SSID,BSSID,CHAN,FREQ,RATE",
-            "device",
-            "wifi",
-            "list",
-            "--rescan",
-            "no",
-            "ifname",
-            ifname,
-        ]
-    )
-    if not wifi_list.ok or not wifi_list.output:
-        return {}
-
-    for item in parse_nmcli_lines(
-        wifi_list.output,
-        ["in_use", "ssid", "bssid", "channel", "frequency", "rate"],
-    ):
-        if item.get("in_use", "").strip() != "*":
-            continue
-        frequency = item.get("frequency", "").strip()
-        return {
-            "ssid": item.get("ssid", "").strip() or "隐藏网络",
-            "bssid": item.get("bssid", "").strip() or "未知",
-            "channel": item.get("channel", "").strip() or "未知",
-            "frequency": frequency or "未知",
-            "band": format_wifi_band(frequency),
-            "rate": item.get("rate", "").strip() or "未知",
-        }
-
-    return {}
-
-
-def get_interface_ipv4_neighbors(ifname: str) -> dict[str, str]:
-    result = run_command(["ip", "-4", "neighbor", "show", "dev", ifname], timeout=5)
-    if not result.ok or not result.output:
-        return {}
-
-    addresses: dict[str, str] = {}
-    for line in result.output.splitlines():
-        parts = line.split()
-        if not parts or "lladdr" not in parts:
-            continue
-        mac_index = parts.index("lladdr") + 1
-        if mac_index >= len(parts):
-            continue
-        addresses[normalize_mac_address(parts[mac_index])] = parts[0]
-    return addresses
-
-
-def get_hotspot_dhcp_leases(ifname: str) -> dict[str, dict[str, str]]:
-    active_connection = next(
-        (
-            item for item in get_active_connections()
-            if item.get("device") == ifname
-            and item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
-        ),
-        {},
-    )
-    bridge_master = get_hotspot_connection_master(active_connection["name"]) if active_connection else ""
-    if HOTSPOT_DHCP_LEASE_FILE and HOTSPOT_BRIDGE_INTERFACE and bridge_master == HOTSPOT_BRIDGE_INTERFACE:
-        lease_path = Path(HOTSPOT_DHCP_LEASE_FILE)
-    else:
-        lease_path = Path(f"/var/lib/NetworkManager/dnsmasq-{ifname}.leases")
-    try:
-        lines = lease_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-
-    leases: dict[str, dict[str, str]] = {}
-    for line in lines:
-        fields = line.split(maxsplit=4)
-        if len(fields) < 4:
-            continue
-        _, mac_address, ip_address, hostname = fields[:4]
-        normalized_mac = normalize_mac_address(mac_address)
-        if not normalized_mac:
-            continue
-        leases[normalized_mac] = {
-            "ip_address": ip_address.strip() or "未知",
-            "device_name": hostname.strip() if hostname.strip() not in {"", "*"} else "未知设备",
-        }
-    return leases
-
-
-def get_hotspot_station_clients(ifname: str) -> tuple[list[dict[str, Any]], str | None]:
-    result = run_command(["iw", "dev", ifname, "station", "dump"], timeout=8)
-    if not result.ok:
-        return [], result.output or f"无法读取 {ifname} 的热点客户端"
-
-    clients = parse_iw_station_dump(result.output)
-    active_connection = next(
-        (
-            item for item in get_active_connections()
-            if item.get("device") == ifname
-            and item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
-        ),
-        {},
-    )
-    bridge_master = get_hotspot_connection_master(active_connection["name"]) if active_connection else ""
-    ipv4_neighbors = get_interface_ipv4_neighbors(bridge_master or ifname)
-    dhcp_leases = get_hotspot_dhcp_leases(ifname)
-    for client in clients:
-        normalized_mac = normalize_mac_address(client.get("mac_address", ""))
-        lease = dhcp_leases.get(normalized_mac, {})
-        client["device_name"] = lease.get("device_name", "未知设备")
-        client["ip_address"] = lease.get("ip_address", "") or ipv4_neighbors.get(normalized_mac, "未知")
-    clients.sort(key=lambda item: item.get("mac_address", ""))
-    return clients, None
-
-
-def gather_hotspot_clients_status() -> HotspotClientsStatus:
-    errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        active_items_future = executor.submit(get_active_connections)
-        hotspot_profile_future = executor.submit(get_hotspot_profile)
-
-        active_items = active_items_future.result()
-        hotspot_profile = hotspot_profile_future.result()
-
-    hotspot_connections = [
-        item
-        for item in active_items
-        if item.get("name") in {HOTSPOT_CONNECTION_NAME, *HOTSPOT_BRIDGED_AP_PROFILES}
-        and item.get("type") == "802-11-wireless"
-        and item.get("device")
-    ]
-
-    hotspots: list[dict[str, Any]] = []
-    for connection in hotspot_connections:
-        hotspot_ifname = connection.get("device", "").strip()
-        clients, client_error = get_hotspot_station_clients(hotspot_ifname)
-        connection_profile = get_hotspot_connection_profile(connection["name"])
-        if client_error:
-            errors.append(client_error)
-        hotspots.append(
-            {
-                "ssid": connection_profile.get("ssid", "") or HOTSPOT_DEFAULT_SSID,
-                "clients": clients,
-                "client_count": len(clients),
-            }
-        )
-
-    return {
-        "hotspots": hotspots,
-        "total_clients": sum(item["client_count"] for item in hotspots),
         "errors": errors,
     }
 
@@ -1280,175 +1098,6 @@ def get_wifi_networks(ifname: str) -> tuple[list[dict[str, Any]], str | None]:
     return networks, None
 
 
-def default_wired_profile(ifname: str) -> dict[str, Any]:
-    return {
-        "name": "",
-        "active_device": ifname,
-        "interface_name": ifname,
-        "autoconnect": True,
-        "ipv4_method": "auto",
-        "ipv4_address": "",
-        "ipv4_gateway": "",
-        "ipv4_dns": "",
-        "route_metric": "-1",
-    }
-
-
-def parse_link_speed_mbps(value: str) -> int:
-    raw = value.strip()
-    if not raw or raw in {"--", "-1"}:
-        return 0
-    try:
-        speed = int(float(raw.split()[0]))
-    except (ValueError, IndexError):
-        return 0
-    return speed if speed > 0 else 0
-
-
-def format_link_speed(value: str) -> str:
-    speed_mbps = parse_link_speed_mbps(value)
-    if not speed_mbps:
-        return "未知"
-    if speed_mbps >= 1000:
-        speed_gbps = speed_mbps / 1000
-        return f"{speed_gbps:g} Gbps"
-    return f"{speed_mbps} Mbps"
-
-
-def get_wired_carrier(ifname: str) -> str:
-    carrier = read_text(f"/sys/class/net/{ifname}/carrier")
-    return carrier if carrier in {"0", "1"} else ""
-
-
-def get_wired_sysfs_speed(ifname: str) -> str:
-    return read_text(f"/sys/class/net/{ifname}/speed")
-
-
-def normalize_wired_state(state: str, carrier: str) -> str:
-    if state == "unavailable" and carrier == "0":
-        return "disconnected"
-    return state
-
-
-def translate_ipv4_method(value: str) -> str:
-    method = value.strip().lower()
-    if method == "manual":
-        return "静态地址"
-    if method in {"auto", "shared"}:
-        return "DHCP"
-    return "未知"
-
-
-def get_wired_ipv4_method_label(connection_name: str) -> str:
-    if not connection_name:
-        return "未知"
-    result = run_command(
-        ["nmcli", "-g", "ipv4.method", "connection", "show", "id", connection_name],
-        timeout=5,
-    )
-    if not result.ok:
-        return "未知"
-    return translate_ipv4_method(result.output)
-
-
-def gather_wired_network_info() -> dict[str, Any]:
-    result = run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            (
-                "GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION,"
-                "GENERAL.HWADDR,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS"
-            ),
-            "device",
-            "show",
-        ]
-    )
-    if not result.ok or not result.output:
-        return {
-            "devices": [],
-            "errors": [result.output or "无法读取有线网络状态"],
-        }
-
-    raw_devices: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for line in result.output.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        value = value.strip()
-
-        if key == "GENERAL.DEVICE":
-            if current:
-                raw_devices.append(current)
-            current = {
-                "device": value,
-                "type": "",
-                "state": "",
-                "connection": "",
-                "mac": "",
-                "ipv4": [],
-                "gateway": "",
-                "dns": [],
-            }
-            continue
-        if current is None:
-            continue
-
-        if key == "GENERAL.TYPE":
-            current["type"] = value
-        elif key == "GENERAL.STATE":
-            current["state"] = normalize_nmcli_general_state(value)
-        elif key == "GENERAL.CONNECTION":
-            current["connection"] = "" if value == "--" else value
-        elif key == "GENERAL.HWADDR":
-            current["mac"] = value
-        elif key.startswith("IP4.ADDRESS"):
-            current["ipv4"].append(value)
-        elif key == "IP4.GATEWAY":
-            current["gateway"] = value
-        elif key.startswith("IP4.DNS"):
-            current["dns"].append(value)
-    if current:
-        raw_devices.append(current)
-
-    devices: list[dict[str, Any]] = []
-    for device in sorted(raw_devices, key=lambda value: value.get("device", "")):
-        if device.get("type") != "ethernet":
-            continue
-        ifname = device.get("device", "")
-        connection_name = device.get("connection", "")
-        carrier = get_wired_carrier(ifname)
-        state = normalize_wired_state(device.get("state", ""), carrier)
-        speed = "" if carrier == "0" else get_wired_sysfs_speed(ifname)
-        profile = default_wired_profile(ifname)
-        profile["name"] = connection_name
-        profile["ipv4_method_label"] = get_wired_ipv4_method_label(connection_name)
-        devices.append(
-            {
-                "device": ifname,
-                "state": state,
-                "state_label": translate_device_state(state),
-                "connection": connection_name or "未连接",
-                "details": {
-                    "mac": device.get("mac", ""),
-                    "carrier": carrier,
-                    "link_speed": format_link_speed(speed),
-                    "ipv4": device.get("ipv4", []),
-                    "gateway": device.get("gateway", ""),
-                    "dns": device.get("dns", []),
-                },
-                "profile": profile,
-            }
-        )
-
-    return {
-        "devices": devices,
-        "errors": [],
-    }
-
-
 __all__ = [
     "parse_nmcli_lines",
     "translate_device_state",
@@ -1494,6 +1143,12 @@ __all__ = [
     "gather_hotspot_clients_status",
     "get_wifi_networks",
     "default_wired_profile",
-    "translate_ipv4_method",
+    "format_link_speed",
     "gather_wired_network_info",
+    "get_wired_carrier",
+    "get_wired_ipv4_method_label",
+    "get_wired_sysfs_speed",
+    "normalize_wired_state",
+    "parse_link_speed_mbps",
+    "translate_ipv4_method",
 ]

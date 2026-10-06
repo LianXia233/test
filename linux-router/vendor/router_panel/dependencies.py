@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 from configparser import ConfigParser
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .core import (
     APT_TIMEOUT,
@@ -21,6 +23,7 @@ from .core import (
     atomic_write_text,
     command_exists,
     file_update_lock,
+    invalidate_service_state_cache,
     is_service_active,
     is_service_enabled,
     package_installed,
@@ -29,6 +32,55 @@ from .core import (
     run_command,
 )
 from .network import gather_wired_network_info, get_active_connections
+
+
+# apt/dpkg 用这两个锁文件串行化，unattended-upgrades 与手动 apt 会长期持有。
+APT_LOCK_PATHS = (
+    Path("/var/lib/dpkg/lock-frontend"),
+    Path("/var/lib/dpkg/lock"),
+    Path("/var/lib/apt/lists/lock"),
+    Path("/var/cache/apt/archives/lock"),
+)
+
+# agent 以 root 运行，依赖修复会改写 /etc 下的网络配置并跑 apt-get，
+# 因此动作必须在动手前卡进白名单。WebUI 与 agent 共用这份集合。
+DEPENDENCY_ACTIONS = frozenset(
+    {
+        "install_packages",
+        "fix_nm_managed",
+        "apply_netplan",
+        "restart_networkmanager",
+        "enable_router_panel_service",
+        "disable_dhcpcd",
+        "fix_ip_forward",
+        "repair_network_stack",
+    }
+)
+
+ProgressCallback = Callable[[str], None]
+
+
+def apt_lock_holder() -> str:
+    """返回当前被占用的 apt/dpkg 锁文件，未被占用返回空串。
+
+    apt-get 在锁被占用时会一直等到超时（APT_TIMEOUT=300s），期间面板只会显示
+    "处理中"，用户无从判断是网络慢还是被 unattended-upgrades 挡住。这里用非阻塞
+    flock 先探一次，被占用就直接给出明确原因。
+    """
+    for path in APT_LOCK_PATHS:
+        try:
+            handle = path.open("rb")
+        except OSError:
+            continue
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return str(path)
+            continue
+        finally:
+            handle.close()
+    return ""
 
 
 def get_networkmanager_managed_setting() -> str:
@@ -112,16 +164,31 @@ def get_netplan_renderer_summary() -> dict[str, Any]:
     }
 
 
+def persistent_ip_forward_enabled() -> bool:
+    """从 sysctl 持久文件里判断 IPv4 转发是否已固化。
+
+    文件里还有 IPv6 转发、bridge-nf-call、accept_redirects 等条目，
+    因此只能按行匹配，不能拿整个文件内容当"是否启用"的依据。
+    """
+    try:
+        content = ROUTER_PANEL_SYSCTL_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for raw_line in content.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == "net.ipv4.ip_forward":
+            return value.strip() == "1"
+    return False
+
+
 def get_ip_forward_status() -> dict[str, str]:
     runtime = read_text("/proc/sys/net/ipv4/ip_forward") or "0"
-    persistent = ""
-    try:
-        persistent = ROUTER_PANEL_SYSCTL_PATH.read_text(encoding="utf-8").strip()
-    except OSError:
-        persistent = ""
     return {
         "runtime": runtime,
-        "persistent": persistent,
+        "persistent": "1" if persistent_ip_forward_enabled() else "0",
     }
 
 
@@ -154,6 +221,10 @@ def get_hotspot_nat_status() -> dict[str, str]:
             "details": "启动热点后才能检查共享规则",
         }
 
+    # nmcli -t 输出偶发丢字段时 name 可能缺失；回退到默认热点连接名，避免 KeyError
+    # 让整页渲染 500。查询失败时 method.ok 为 False，后续分支会保守降级为 warning/error。
+    connection_name = (hotspot.get("name") or "").strip() or HOTSPOT_CONNECTION_NAME
+
     method = run_command(
         [
             "nmcli",
@@ -162,7 +233,7 @@ def get_hotspot_nat_status() -> dict[str, str]:
             "connection",
             "show",
             "id",
-            hotspot["name"],
+            connection_name,
         ],
         timeout=5,
     )
@@ -172,7 +243,7 @@ def get_hotspot_nat_status() -> dict[str, str]:
         and method.output.strip() == "disabled"
     ):
         master = run_command(
-            ["nmcli", "-g", "connection.master", "connection", "show", "id", hotspot["name"]],
+            ["nmcli", "-g", "connection.master", "connection", "show", "id", connection_name],
             timeout=5,
         )
         if master.ok and master.output.strip() == HOTSPOT_BRIDGE_INTERFACE:
@@ -383,27 +454,51 @@ def _restore_runtime_ip_forward(value: str) -> str:
 
 
 def restart_service(service_name: str) -> CommandResult:
-    return run_command(["systemctl", "restart", service_name], timeout=SYSTEM_COMMAND_TIMEOUT)
+    result = run_command(["systemctl", "restart", service_name], timeout=SYSTEM_COMMAND_TIMEOUT)
+    invalidate_service_state_cache(service_name)
+    return result
 
 
 def enable_service(service_name: str) -> CommandResult:
-    return run_command(["systemctl", "enable", service_name], timeout=SYSTEM_COMMAND_TIMEOUT)
+    result = run_command(["systemctl", "enable", service_name], timeout=SYSTEM_COMMAND_TIMEOUT)
+    invalidate_service_state_cache(service_name)
+    return result
 
 
 def disable_service(service_name: str) -> CommandResult:
-    return run_command(
+    result = run_command(
         ["systemctl", "disable", "--now", service_name],
         timeout=SYSTEM_COMMAND_TIMEOUT,
     )
+    invalidate_service_state_cache(service_name)
+    return result
 
 
 def ensure_ip_forward_enabled() -> CommandResult:
+    # 行级 upsert：保留文件里已有的 IPv6 转发 / bridge-nf-call / accept_redirects
+    # 等条目，只更新 net.ipv4.ip_forward。整文件覆写会把构建时铺好的那组参数
+    # 全部抹掉（这正是"sysctl 双来源"最实际的危害）。
     try:
-        atomic_write_text(
-            ROUTER_PANEL_SYSCTL_PATH,
-            "net.ipv4.ip_forward=1\n",
-            mode=0o644,
-        )
+        existing = ""
+        try:
+            existing = ROUTER_PANEL_SYSCTL_PATH.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+
+        kept: list[str] = []
+        for raw_line in existing.splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                # 保留注释与空行，方便人工阅读
+                kept.append(raw_line)
+                continue
+            if line.split("=", 1)[0].strip() == "net.ipv4.ip_forward":
+                continue
+            kept.append(raw_line)
+
+        content = "\n".join(kept).strip("\n")
+        content = f"{content}\nnet.ipv4.ip_forward=1\n" if content else "net.ipv4.ip_forward=1\n"
+        atomic_write_text(ROUTER_PANEL_SYSCTL_PATH, content, mode=0o644)
     except OSError as exc:
         return CommandResult(False, str(exc))
 
@@ -413,17 +508,27 @@ def ensure_ip_forward_enabled() -> CommandResult:
     return CommandResult(True, "已启用 IPv4 转发并写入持久配置")
 
 
-def install_missing_packages() -> CommandResult:
+def install_missing_packages(progress: ProgressCallback | None = None) -> CommandResult:
     missing_packages = [package for package in REQUIRED_PACKAGES if not package_installed(package)]
     if not missing_packages:
         return CommandResult(True, "所有必需软件包已安装")
 
+    if locked := apt_lock_holder():
+        return CommandResult(
+            False,
+            f"软件管理锁被占用（{locked}），可能有系统自动更新正在进行，请稍后重试",
+        )
+
     env = os.environ.copy()
     env["DEBIAN_FRONTEND"] = "noninteractive"
+    if progress:
+        progress("正在更新软件源索引")
     update = run_command(["apt-get", "update"], timeout=APT_TIMEOUT, env=env)
     if not update.ok:
         return CommandResult(False, update.output or "apt-get update 失败")
 
+    if progress:
+        progress(f"正在安装 {len(missing_packages)} 个软件包")
     install = run_command(
         ["apt-get", "install", "-y", "--no-install-recommends", *missing_packages],
         timeout=APT_TIMEOUT,
@@ -580,9 +685,15 @@ def gather_dependency_status() -> dict[str, Any]:
     }
 
 
-def _run_dependency_action(action: str) -> CommandResult:
+def _run_dependency_action(
+    action: str,
+    progress: ProgressCallback | None = None,
+) -> CommandResult:
+    # 白名单前置：动作不合法时一个字节都不该改，避免把网络配置留在半改状态。
+    if action not in DEPENDENCY_ACTIONS:
+        return CommandResult(False, "不支持的修复动作")
     if action == "install_packages":
-        return install_missing_packages()
+        return install_missing_packages(progress)
     if action == "fix_nm_managed":
         networkmanager_state = (
             is_service_enabled("NetworkManager"),
@@ -698,10 +809,16 @@ def _run_dependency_action(action: str) -> CommandResult:
     return CommandResult(False, "不支持的修复动作")
 
 
-def run_dependency_action(action: str) -> CommandResult:
-    return _run_dependency_action(action)
+def run_dependency_action(
+    action: str,
+    progress: ProgressCallback | None = None,
+) -> CommandResult:
+    return _run_dependency_action(action, progress)
 
 __all__ = [
+    "APT_LOCK_PATHS",
+    "DEPENDENCY_ACTIONS",
+    "apt_lock_holder",
     "get_networkmanager_managed_setting",
     "get_netplan_files",
     "get_netplan_renderer_summary",

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Network, ip_network
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from werkzeug.security import generate_password_hash
 
@@ -39,10 +39,23 @@ DEFAULT_LAN_NETWORK = "192.168.88.0/24"
 NETWORKMANAGER_CONFIG_PATH = Path("/etc/NetworkManager/NetworkManager.conf")
 NETWORKMANAGER_CONF_DIR = Path("/etc/NetworkManager/conf.d")
 NETPLAN_DIR = Path("/etc/netplan")
-ROUTER_PANEL_SYSCTL_PATH = Path("/etc/sysctl.d/90-router-panel.conf")
+# sysctl 必须是单一来源：构建时 rootfs-overlay 铺的是 90-h5000m-router.conf
+# （含 IPv4/IPv6 转发、bridge-nf-call、accept_redirects 等整组参数）。此前面板
+# 另写一个 90-router-panel.conf 且只放 net.ipv4.ip_forward=1 —— 两个 90-* 文件
+# 按字典序后者生效，等于面板悄悄接管了 ip_forward，而桥过滤/重定向那几条被
+# 后来的运维改动覆盖时面板完全不知情。现在面板直接维护同一个文件，并且只做
+# 行级 upsert，不整文件覆写。路径仍可用环境变量覆盖以适配其它发行版布局。
+ROUTER_PANEL_SYSCTL_PATH = Path(
+    os.environ.get("LINUX_ROUTER_SYSCTL_PATH", "/etc/sysctl.d/90-h5000m-router.conf")
+)
 HARDWARE_INFO_CACHE_TTL = 15
 WIRELESS_PHY_CACHE_TTL = 15
 SYSTEM_STATIC_CACHE_TTL = 3600
+# 单飞等待上限：producer 通常是 udevadm/iw 之类命令，正常远快于该值；
+# 超时后等待方自行重算，避免一个卡住的线程把所有请求都挂住。
+SINGLE_FLIGHT_WAIT_SECONDS = 10
+# systemctl is-active/is-enabled 的页内去重窗口（秒），见 is_service_active。
+SERVICE_STATE_CACHE_TTL = 3
 APT_TIMEOUT = 300
 SYSTEM_COMMAND_TIMEOUT = 30
 REQUIRED_PACKAGES = (
@@ -88,6 +101,11 @@ class KeyedLockRegistry:
 
 
 _timed_cache: dict[str, tuple[float, Any]] = {}
+# 缓存本身是进程级共享可变状态：Flask/gunicorn 多线程下 dict 的读写与
+# 过期剔除会并发发生，必须加锁；同时用 inflight 事件做单飞，避免缓存刚
+# 过期时 N 个请求同时穿透到 udevadm/iw 这类昂贵命令上。
+_timed_cache_lock = threading.RLock()
+_timed_cache_inflight: dict[str, threading.Event] = {}
 _file_update_locks = KeyedLockRegistry()
 _held_file_locks = threading.local()
 
@@ -174,7 +192,10 @@ def atomic_write_text(
 
 def run_command(
     command: list[str],
-    timeout: int = 8,
+    # 默认超时由 8s 提到 15s：eMMC 忙、systemd/D-Bus 冷启动、nmcli 首次拉起
+    # 时 8 秒很容易被打断，而调用方大多没显式传 timeout，于是变成随机的
+    # "状态读不出来" 假阴性。需要更长/更短的地方仍应显式指定。
+    timeout: int = 15,
     env: dict[str, str] | None = None,
 ) -> CommandResult:
     started_at = time.monotonic()
@@ -286,30 +307,74 @@ def format_hotspot_error(message: str, ifname: str) -> str:
 
 
 def get_timed_cache(key: str, ttl: int) -> Any | None:
-    cached = _timed_cache.get(key)
-    if not cached:
-        return None
+    with _timed_cache_lock:
+        cached = _timed_cache.get(key)
+        if not cached:
+            return None
 
-    expires_at, value = cached
-    if time.time() >= expires_at:
-        _timed_cache.pop(key, None)
-        return None
-    return value
+        expires_at, value = cached
+        if time.time() >= expires_at:
+            _timed_cache.pop(key, None)
+            return None
+        return value
 
 
 def set_timed_cache(key: str, ttl: int, value: Any) -> Any:
-    _timed_cache[key] = (time.time() + ttl, value)
+    with _timed_cache_lock:
+        _timed_cache[key] = (time.time() + ttl, value)
     return value
 
 
 def clear_timed_cache(prefix: str = "") -> None:
-    if not prefix:
-        _timed_cache.clear()
-        return
+    with _timed_cache_lock:
+        if not prefix:
+            _timed_cache.clear()
+            return
 
-    for key in list(_timed_cache):
-        if key.startswith(prefix):
-            _timed_cache.pop(key, None)
+        for key in list(_timed_cache):
+            if key.startswith(prefix):
+                _timed_cache.pop(key, None)
+
+
+def get_or_set_timed_cache(key: str, ttl: int, producer: Callable[[], Any]) -> Any:
+    """带单飞的缓存读取。
+
+    缓存未命中时，同一个 key 只允许一个线程真正执行 producer；其余线程
+    等待结果（最长 SINGLE_FLIGHT_WAIT_SECONDS 秒，超时则自行计算，避免被
+    卡住的线程拖死整个请求）。producer 抛异常时不会污染缓存，等待方会
+    收到 None 并自行重算。
+    """
+    cached = get_timed_cache(key, ttl)
+    if cached is not None:
+        return cached
+
+    waiter: threading.Event | None = None
+    with _timed_cache_lock:
+        cached = _timed_cache.get(key)
+        if cached and time.time() < cached[0]:
+            return cached[1]
+        if key in _timed_cache_inflight:
+            waiter = _timed_cache_inflight[key]
+        else:
+            _timed_cache_inflight[key] = threading.Event()
+
+    if waiter is not None:
+        waiter.wait(SINGLE_FLIGHT_WAIT_SECONDS)
+        cached = get_timed_cache(key, ttl)
+        if cached is not None:
+            return cached
+
+    try:
+        value = producer()
+    except Exception:
+        raise
+    finally:
+        with _timed_cache_lock:
+            event = _timed_cache_inflight.pop(key, None)
+        if event is not None:
+            event.set()
+
+    return set_timed_cache(key, ttl, value)
 
 
 def load_os_release() -> dict[str, str]:
@@ -440,10 +505,15 @@ def get_dt_compatible_vendor_model(compatible: str) -> tuple[str, str]:
 
 
 def get_network_interface_hardware() -> list[dict[str, Any]]:
-    cached = get_timed_cache("hardware:interfaces", HARDWARE_INFO_CACHE_TTL)
-    if cached is not None:
-        return [item.copy() for item in cached]
+    cached = get_or_set_timed_cache(
+        "hardware:interfaces",
+        HARDWARE_INFO_CACHE_TTL,
+        _collect_network_interface_hardware,
+    )
+    return [item.copy() for item in cached]
 
+
+def _collect_network_interface_hardware() -> list[dict[str, Any]]:
     interfaces: list[dict[str, Any]] = []
     sys_class_net = Path("/sys/class/net")
     if not sys_class_net.exists():
@@ -525,12 +595,11 @@ def get_network_interface_hardware() -> list[dict[str, Any]]:
             }
         )
 
-    set_timed_cache("hardware:interfaces", HARDWARE_INFO_CACHE_TTL, [item.copy() for item in interfaces])
     return interfaces
 
 
 def get_cpu_model() -> str:
-    lscpu = run_command(["lscpu"])
+    lscpu = run_command(["lscpu"], timeout=10)
     if lscpu.ok and lscpu.output:
         model_name = ""
         cpu_count = ""
@@ -696,13 +765,46 @@ def get_build_info() -> dict[str, str]:
 
 
 def is_service_active(service_name: str) -> bool:
+    # 一次页面渲染会对同一个服务问 4 次以上（依赖页、热点页、概览页各自
+    # 独立调用），每次都是一个 systemctl 子进程。这里用很短的 TTL 做页内
+    # 去重：既不会让刚执行完 start/stop 的读视图长期失真，也消除了重复的
+    # 进程创建开销。
+    return bool(
+        get_or_set_timed_cache(
+            f"service:active:{service_name}",
+            SERVICE_STATE_CACHE_TTL,
+            lambda: _query_service_active(service_name),
+        )
+    )
+
+
+def _query_service_active(service_name: str) -> bool:
     result = run_command(["systemctl", "is-active", service_name], timeout=5)
     return result.ok and result.output.strip() == "active"
 
 
 def is_service_enabled(service_name: str) -> bool:
+    return bool(
+        get_or_set_timed_cache(
+            f"service:enabled:{service_name}",
+            SERVICE_STATE_CACHE_TTL,
+            lambda: _query_service_enabled(service_name),
+        )
+    )
+
+
+def _query_service_enabled(service_name: str) -> bool:
     result = run_command(["systemctl", "is-enabled", service_name], timeout=5)
     return result.ok and result.output.strip() == "enabled"
+
+
+def invalidate_service_state_cache(service_name: str = "") -> None:
+    """启停服务之后显式失效缓存，避免紧接着的读视图拿到旧状态。"""
+    if not service_name:
+        clear_timed_cache("service:")
+        return
+    clear_timed_cache(f"service:active:{service_name}")
+    clear_timed_cache(f"service:enabled:{service_name}")
 
 
 __all__ = [
@@ -744,6 +846,7 @@ __all__ = [
     "format_hotspot_error",
     "get_timed_cache",
     "set_timed_cache",
+    "get_or_set_timed_cache",
     "clear_timed_cache",
     "load_os_release",
     "read_text",
@@ -768,4 +871,5 @@ __all__ = [
     "get_build_info",
     "is_service_active",
     "is_service_enabled",
+    "invalidate_service_state_cache",
 ]

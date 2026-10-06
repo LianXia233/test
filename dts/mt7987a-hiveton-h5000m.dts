@@ -110,17 +110,24 @@
 	/delete-node/ cpu-passive;
 };
 
+/*
+ * 【为什么这里不再写死 mac-address】
+ * 原先两个 gmac 各写了一个固定值（...:84 / ...:85）。同一个固件刷到多台
+ * 设备上，每台机器的 eth0/eth1 就都是同一个 MAC —— 两台设备插进同一个
+ * 二层网络（上游光猫、交换机、园区网）就会 MAC 漂移/冲突，表现是时断时续、
+ * ARP 表抖动，现场极难定位。MT7987 也没有把出厂 MAC 放在能被内核直接读到的
+ * nvmem/OTP 里，所以这里不写死，交给用户空间按每块板子的 eMMC CID 派生：
+ * 见 /usr/local/sbin/h5000m-router-init.sh 的 derive_board_macs()。
+ * 派生出来的 MAC 落在 02:xx:xx:00:00:xx（本地管理、单播），并通过
+ * NetworkManager 的 ethernet.cloned-mac-address 持久化应用。
+ */
 &gmac0 {
-	/* 厂商已验证 DTB 的板级 MAC（本地管理地址）；如需独占地址可自行修改 */
-	mac-address = [0e c7 2f 5b 6a 84];
 	phy-mode = "2500base-x";
 	phy-handle = <&phy0>;
 	status = "okay";
 };
 
 &gmac1 {
-	/* 厂商已验证 DTB 的板级 MAC（本地管理地址）；如需独占地址可自行修改 */
-	mac-address = [0e c7 2f 5b 6a 85];
 	phy-mode = "internal";
 	phy-handle = <&phy1>;
 	status = "okay";

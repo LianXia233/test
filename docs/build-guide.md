@@ -43,8 +43,20 @@ sudo bash scripts/build.sh \
 ```
 
 > LAN 网段固定为 192.168.88.1/24（见 `rootfs-overlay/etc/default/h5000m-router`），
-> 无需在命令行指定。WebUI/root 初始密码不指定时由脚本随机生成，
-> 构建完成后查看 `out/rootfs/initial-credentials.txt`。
+> 无需在命令行指定。
+>
+> **初始口令**：不指定 `--admin-password` / `--root-password` 时，两者都为出厂默认值
+> `password`（不是随机生成）。这是公开已知值，**首次登录后必须立即修改**：
+>
+> ```bash
+> # WebUI：系统设置 → 修改密码
+> # SSH / 串口：
+> passwd root
+> ```
+>
+> 凭据同时落盘在设备上的 `/etc/h5000m-initial-credentials`（chmod 600）。
+> 该文件的**副本不再进入构建产物与 GitHub Release**，避免公开分发默认口令。
+> 生产环境请用 `--root-password` / `--admin-password` 指定自己的初始值。
 
 产物（`/path/to/out/`）：
 

@@ -55,7 +55,7 @@ aarch64_cortex-a53）并实测分析，全部结论与上述分区方案一致�
 | GPT PARTLABEL 定位 | `lib/upgrade/platform.sh`：`CI_KERNPART="kernel" CI_ROOTPART="rootfs"`；`lib/upgrade/emmc.sh` 用 `find_mmc_part`（按 PARTLABEL）定位分区设备后 **dd 直接写入** | 确认 OpenWrt 仅按 PARTLABEL 写 `kernel`/`rootfs` 两分区，其余区域零写入（与本方案设计一致） |
 | factory 分区 | DTB：`block-partition-factory { partname = "factory"; nvmem-layout … }`（Wi-Fi EEPROM 校准） | 确认 p2 不可动 |
 | 网口映射 | `etc/board.d/02_network`：`ucidef_set_interfaces_lan_wan "eth0" eth1` | LAN=eth0 / WAN=eth1，与方案一致 |
-| MAC 生成 | `macaddr_generate_from_mmc_cid mmcblk0`（LAN=CID 派生，WAN=LAN+1） | 与网络初始化一致（可参考） |
+| MAC 生成 | `macaddr_generate_from_mmc_cid mmcblk0`（LAN=CID 派生，WAN=LAN+1） | 记录的是官方 OpenWrt 行为，仅供参考；Debian 分支没有这套 `02_network` 钩子，改为 `h5000m-router-init.sh` 自行按 eMMC CID 派生（见 `docs/hardware.md` 第 5 节） |
 | eMMC 节点 | DTB `mmc@11230000`，`mmc-card`，`non-removable` | 无 SD 卡槽，仅 eMMC，与方案一致 |
 
 > 实测结论：官方 U-Boot 使用 **GPT PARTLABEL 定位 p4（kernel）→ 读取裸 FIT → bootm**

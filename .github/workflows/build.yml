@@ -20,6 +20,20 @@ on:
         required: false
         default: false
         type: boolean
+      clear_cache:
+        description: '缓存维护：勾选后先清空本仓库全部 Actions 缓存（cache 条目按 key 删除，释放配额并强制下次冷构建）'
+        required: false
+        default: false
+        type: boolean
+      skip_release:
+        description: '只构建不发布：产物仅上传 Artifact，不创建/覆盖 GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+# 【最小权限】默认只读；需要写权限的 job（发布 Release、清理缓存）各自单独声明。
+permissions:
+  contents: read
 
 concurrency:
   group: h5000m-build-${{ github.ref }}
@@ -39,15 +53,161 @@ env:
   APT_CACHE_DIR: ${{ github.workspace }}/.cache/apt-debs
 
 jobs:
+  # ============================================================ 0a. 缓存维护（可选）
+  cache-cleanup:
+    name: 清理 Actions 缓存（可选）
+    if: ${{ inputs.clear_cache }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: write   # 仅本 job 需要：列出并删除 Actions 缓存条目
+    steps:
+      - name: 删除本仓库全部 Actions 缓存
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GH_REPO" --limit 100 --json key,sizeInBytes > /tmp/caches.json
+          python3 - <<'PY'
+          import json
+          try:
+              caches = json.load(open("/tmp/caches.json"))
+          except Exception:
+              caches = []
+          print(f"当前缓存条目：{len(caches)}")
+          for item in caches:
+              print(f"  {item.get('key','?')}\t{int(item.get('sizeInBytes',0))//1048576} MiB")
+          with open("/tmp/cache-keys.txt", "w", encoding="utf-8") as handle:
+              for item in caches:
+                  handle.write(f"{item.get('key','')}\n")
+          PY
+          TOTAL=$(grep -c . /tmp/cache-keys.txt || true)
+          if [[ "${TOTAL:-0}" == "0" ]]; then echo "无缓存可清理"; exit 0; fi
+          # 逐条删除；单条失败不中断（可能已被并发清理或已过期）
+          while read -r KEY; do
+            [[ -n "$KEY" ]] || continue
+            gh cache delete "$KEY" --repo "$GH_REPO" --yes \
+              && echo "  已删除：$KEY" || echo "  跳过（删除失败或已不存在）：$KEY"
+          done < /tmp/cache-keys.txt
+          echo "缓存清理完成"
+
+  # ============================================================ 0b. 质量门
+  quality-gate:
+    name: 质量门（语法 / 静态检查 / 单元测试）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装检查工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck python3 python3-pip python3-flask python3-pyflakes
+          python3 -V
+          pyflakes --version
+
+      - name: Shell 语法检查（bash -n）
+        run: |
+          set -uo pipefail
+          FAIL=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "语法错误：$f"; FAIL=1; }
+          done < <(find . -path ./.git -prune -o -type f \( -name '*.sh' \) -print)
+          # /usr/local/sbin 下的脚本按 shebang 判定为 sh/bash 的一并校验
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "语法错误：$f"; FAIL=1; }
+          done < <(find rootfs-overlay/usr/local/sbin -type f 2>/dev/null || true)
+          [[ "$FAIL" -eq 0 ]] || { echo "Shell 语法检查未通过"; exit 1; }
+          echo "Shell 语法检查通过"
+
+      - name: ShellCheck（告警不计入失败，错误级阻断）
+        run: |
+          set -uo pipefail
+          # 只阻断 error/confirm 级（severity=error）；style/note 级仅提示，避免噪声阻断构建
+          while IFS= read -r f; do
+            shellcheck --severity=error "$f" || { echo "ShellCheck error：$f"; exit 1; }
+          done < <(find . -path ./.git -prune -o -type f -name '*.sh' -print)
+          echo "ShellCheck(error 级) 通过"
+
+      - name: Python 语法检查（py_compile）
+        run: |
+          python3 -m compileall -q linux-router/vendor scripts || exit 1
+          echo "Python 语法检查通过"
+
+      - name: Python 静态检查（pyflakes：未使用导入 / 未定义名）
+        # 模块拆分后最容易留下"搬走了但 import 没清"的残留，pyflakes 能一次抓全。
+        run: |
+          cd linux-router/vendor
+          pyflakes router_panel/*.py tests/*.py app.py agent.py
+          echo "pyflakes 检查通过"
+
+      - name: Python 单元测试（Linux-Router）
+        run: |
+          cd linux-router/vendor
+          python3 -m pip install --quiet --break-system-packages pytest 2>/dev/null \
+            || python3 -m pip install --quiet pytest
+          # 跑整个 tests 目录：新增的测试文件（如共享校验、依赖白名单）自动纳入，
+          # 不需要每次加文件都回来改 CI。
+          PYTHONPATH=. python3 -m pytest tests -q --no-header
+
+      - name: 文件规模守门（仅告警，不阻断）
+        # 大文件不会让构建失败，但会让后续改动越来越难。这里只把它显式列出来，
+        # 让技术债可见、可追踪，而不是悄悄增长。阈值之上先记录，拆分单独排期。
+        run: |
+          set -uo pipefail
+          SHELL_LIMIT=600
+          PY_LIMIT=800
+          OVER=0
+          while IFS= read -r f; do
+            lines=$(wc -l < "$f")
+            if [[ "$lines" -gt "$SHELL_LIMIT" ]]; then
+              echo "::warning file=$f::Shell 脚本 ${lines} 行，超过 ${SHELL_LIMIT} 行，建议拆分"
+              OVER=1
+            fi
+          done < <(find . -path ./.git -prune -o -path ./kernel -prune -o -type f \( -name '*.sh' \) -print; find rootfs-overlay/usr/local/sbin -type f 2>/dev/null)
+          while IFS= read -r f; do
+            lines=$(wc -l < "$f")
+            if [[ "$lines" -gt "$PY_LIMIT" ]]; then
+              echo "::warning file=$f::Python 模块 ${lines} 行，超过 ${PY_LIMIT} 行，建议拆分"
+              OVER=1
+            fi
+          done < <(find linux-router/vendor/router_panel -type f -name '*.py' 2>/dev/null)
+          if [[ "$OVER" -eq 0 ]]; then
+            echo "文件规模检查通过（Shell ≤ ${SHELL_LIMIT} 行，Python ≤ ${PY_LIMIT} 行）"
+          else
+            echo "存在超过阈值的文件（已记录为告警，不阻断构建）"
+          fi
+
+      - name: YAML 语法检查（workflow 自身）
+        run: |
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML 不可用，跳过"); sys.exit(0)
+          bad = 0
+          for path in glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"):
+              try:
+                  yaml.safe_load(open(path, encoding="utf-8"))
+                  print(f"  [OK] {path}")
+              except Exception as exc:
+                  print(f"  [FAIL] {path}: {exc}"); bad = 1
+          sys.exit(bad)
+          PY
+
   # ============================================================ 1. 内核编译
   build-kernel:
     name: 内核 6.18 (MT7987A)
     # 原生 arm64 runner（仓库为 public，GitHub 免费额度内）
+    needs: quality-gate
     runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 240
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装构建依赖
         run: |
@@ -64,7 +224,7 @@ jobs:
           ccache --version | head -1
 
       - name: 缓存内核源码压缩包（只缓存 tar，源码树每次干净解压保证补丁幂等）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: out/kernel/linux-${{ env.KERNEL_VERSION }}.tar.xz
           key: kernel-tar-${{ env.KERNEL_VERSION }}
@@ -72,16 +232,22 @@ jobs:
       - name: 恢复 ccache（内核编译结果跨运行复用）
         # key 组成：内核版本 + 补丁集/dts/配置/脚本 hash + runner 架构。
         # 任一输入变化即重建缓存，保证不会出现"配置变了但复用旧目标文件"的脏命中。
-        uses: actions/cache@v4
+        # restore-keys 提供"同版本不同配置"的部分命中（编译大部分目标文件可复用）。
+        uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'dts/**', 'build/kernel-conf/**', 'build/build-kernel.sh') }}
           restore-keys: |
             ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-
+            ccache-${{ runner.arch }}-
 
-      - name: 初始化 ccache
+      - name: 初始化 ccache（含配额与过期清理）
         run: |
+          # 上限 2G 并显式设置清理策略：避免 ccache 无限增长占满 runner 磁盘与缓存配额
           ccache -M 2G
+          ccache --set-config=max_size=2G
+          # 清理超过 30 天未命中的旧对象（ccache 4.x 支持 --evict-older-than）
+          ccache --evict-older-than 30d 2>/dev/null || ccache -c 2>/dev/null || true
           ccache -z
           ccache -p 2>/dev/null | head -12 || true
 
@@ -125,7 +291,7 @@ jobs:
           ls -l out/kernel-artifacts
 
       - name: 上传内核产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: kernel-artifacts
           path: out/kernel-artifacts/*
@@ -134,14 +300,14 @@ jobs:
   # ============================================================ 2. RootFS + 刷写包
   build-image:
     name: RootFS + 刷写包（FIT / 引导层 ext4 = init + busybox + SquashFS + OverlayFS）
-    needs: build-kernel
+    needs: [quality-gate, build-kernel]
     runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 150
     permissions:
-      contents: write   # 上传固件到 GitHub Releases 需要写权限
+      contents: write   # 上传固件到 GitHub Releases 需要写权限（默认顶层为 read，此处按需放开）
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装构建依赖
         run: |
@@ -186,22 +352,32 @@ jobs:
 
       - name: 恢复 Debian .deb 下载层缓存
         # 只缓存下载层：命中时 apt/debootstrap 不再重复拉取网络包；安装动作始终
-        # 真实执行，产物与无缓存构建完全一致。key 随 packages.list 变化失效。
-        uses: actions/cache@v4
+        # 真实执行，产物与无缓存构建完全一致。
+        #
+        # key 只取 packages.list 的 hash：真正决定"要下载哪些 .deb"的是这份清单，
+        # build-rootfs.sh 只是消费它（不再硬编码额外包）。把构建脚本也放进 key
+        # 会导致改一行脚本就整层几百 MB 失效、全部重下。
+        # restore-keys 保留宽松前缀，清单小改动时仍能复用上一版的 .deb，
+        # 未变更的包继续命中。
+        uses: actions/cache@v5
         with:
           path: ${{ env.APT_CACHE_DIR }}
           key: apt-debs-${{ runner.arch }}-trixie-${{ hashFiles('build/rootfs/packages.list') }}
+          restore-keys: |
+            apt-debs-${{ runner.arch }}-trixie-
 
       - name: 恢复 cargo registry 缓存（mt5700 依赖下载层）
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-registry-${{ runner.arch }}-${{ hashFiles('build/build-mt5700.sh') }}
+          restore-keys: |
+            cargo-registry-${{ runner.arch }}-
 
       - name: 下载内核产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: kernel-artifacts
           path: artifacts/kernel
@@ -306,6 +482,45 @@ jobs:
             --out out/H5000M-debian13-sysupgrade.bin
           ls -lh out/H5000M-debian13-sysupgrade.bin
 
+      - name: 构建后缓存维护（.deb 下载层瘦身 + apt 清理）
+        # 缓存只保留"近期仍在被复用"的 .deb：既避免缓存无限膨胀吃掉 Actions 配额，
+        # 又保证常规重跑仍然命中。容量超过上限时按最后访问时间从旧到新淘汰。
+        if: always()
+        run: |
+          set -uo pipefail
+          sudo mkdir -p "$APT_CACHE_DIR"
+          echo "清理前：$(sudo du -sh "$APT_CACHE_DIR" 2>/dev/null | cut -f1 || echo 未知)"
+          # 1) 删除 14 天以上未访问的 .deb
+          CLEANED=$(sudo find "$APT_CACHE_DIR" -type f -name '*.deb' -atime +14 -print -delete 2>/dev/null | wc -l)
+          echo "已清理过期（>14 天未访问）.deb：$CLEANED 个"
+          # 2) 容量上限 1.5 GiB：超限按 atime 从旧到新淘汰
+          LIMIT_MB=1536
+          CURRENT_MB=$(sudo du -sm "$APT_CACHE_DIR" 2>/dev/null | cut -f1 || echo 0)
+          if [[ "${CURRENT_MB:-0}" -gt "$LIMIT_MB" ]]; then
+            echo "缓存 ${CURRENT_MB} MiB 超过上限 ${LIMIT_MB} MiB，按访问时间淘汰最旧文件"
+            sudo find "$APT_CACHE_DIR" -type f -name '*.deb' -printf '%A@ %p\n' 2>/dev/null \
+              | sort -n \
+              | while read -r _ts path; do
+                  NOW_MB=$(sudo du -sm "$APT_CACHE_DIR" 2>/dev/null | cut -f1 || echo 0)
+                  [[ "${NOW_MB:-0}" -le "$LIMIT_MB" ]] && break
+                  sudo rm -f "$path"
+                done
+          fi
+          sudo apt-get clean || true
+          echo "清理后：$(sudo du -sh "$APT_CACHE_DIR" 2>/dev/null | cut -f1 || echo 未知)"
+
+      - name: ccache 统计与瘦身
+        if: always()
+        run: |
+          command -v ccache >/dev/null 2>&1 && ccache -s || echo "本 job 未使用 ccache"
+
+      - name: 清理中间产物（SquashFS 源树，减少磁盘与后续步骤开销）
+        if: always()
+        run: |
+          # out/rootfs/rootfs 是 500 MiB 级的中间树，SquashFS 已生成，无需保留
+          sudo rm -rf out/rootfs/rootfs out/mt5700/src 2>/dev/null || true
+          df -h "$GITHUB_WORKSPACE" | tail -1 || true
+
       - name: 修正产物属主（sudo 构建产物 → runner 用户）
         # build-rootfs / make-squashfs / make-sd-image 均以 sudo 运行，产物属主为 root；
         # upload-artifact 以 runner 用户打 zip，读不了 root 0600 文件（旧 run 37353387707
@@ -313,16 +528,18 @@ jobs:
         run: |
           sudo chown -R "$(id -u):$(id -g)" out
           chmod -R u+rwX out
-          ls -l out/H5000M-debian13-sysupgrade.bin out/rootfs/initial-credentials.txt
+          ls -l out/H5000M-debian13-sysupgrade.bin
 
       - name: 上传发布产物
-        uses: actions/upload-artifact@v4
+        # 【安全】不再上传 initial-credentials.txt：公开仓库的 Artifact 与 Release
+        # 对任何人可下载，出厂凭据不应出现在分发物中（凭据仍存在于设备
+        # /etc/h5000m-initial-credentials，权限 0600，首启后应立即修改）。
+        uses: actions/upload-artifact@v6
         with:
           name: h5000m-debian13-release
           path: |
             out/H5000M-debian13-sysupgrade.bin
             out/rootfs/rootfs.squashfs
-            out/rootfs/initial-credentials.txt
             out/H5000M-debian13-kernel.bin
             out/H5000M-debian13-rootfs.bin
             out/kernel/Image
@@ -335,7 +552,7 @@ jobs:
           retention-days: 14
 
       - name: 上传固件到 GitHub Releases（参考 OpenWrt 惯例：日期版本 + sha256sums）
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !inputs.skip_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -350,7 +567,9 @@ jobs:
           cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
           cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
           cp -f out/rootfs/rootfs.squashfs "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.squashfs"
-          cp -f out/rootfs/initial-credentials.txt "$RELEASE_DIR/initial-credentials.txt"
+          # 【安全】不再把 initial-credentials.txt 放进 Release：公开 Release 对任何人
+          # 可下载。出厂凭据的说明写入下方 RELEASE-NOTES，实际凭据仍只存在于设备内
+          # /etc/h5000m-initial-credentials（0600），首次登录后必须立即修改。
           (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
           cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<EOF
           Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}（SquashFS + OverlayFS）
@@ -387,10 +606,17 @@ jobs:
           - 可写层：OverlayFS upper/work 位于 p5 引导层 ext4，首启自动扩满 p5（~7.2 GiB），
             /etc /var /opt /服务数据全部持久化，重启保留
           - sysupgrade 整包重写 p5 = 恢复出厂（overlay 旧配置不保留）；保留配置走方式二
-          - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1，
-            凭据见 initial-credentials.txt（登录后立即改密）
+          - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1
           - p1 u-boot-env / p2 factory / p3 fip 全程不触碰，factory 校准数据安全
           - 本包由 ${{ runner.arch }} runner 构建（native arm64 或 x86 回退路径）
+
+          ## 首次登录凭据（出厂默认，必须立即修改）
+
+          - WebUI：http://192.168.88.1 用户 admin
+          - SSH / 串口：root
+          - 默认口令见设备内 /etc/h5000m-initial-credentials（权限 0600，仅本机可读）
+          - 本 Release 不附带凭据文件；出厂默认口令为公开已知值，**首次登录后必须立即修改**：
+            WebUI「系统 → 安全」改 admin 口令，SSH 内执行 passwd 改 root 口令
 
           更多说明：https://github.com/LianXia233/test 仓库 docs/first-boot.md
           EOF

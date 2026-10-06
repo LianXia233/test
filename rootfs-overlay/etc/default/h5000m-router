@@ -22,9 +22,16 @@ AP_2G_IFACE=wlan0
 AP_5G_IFACE=wlan1
 
 # 默认 SSID / 密码（2.4G 与 5G 同名；首次登录后请在 WebUI 修改）
+#
+# 【出厂弱口令，务必修改】AP_PASSWORD 是公开已知的 12345678：
+# 任何人搜到本项目就知道你家 Wi-Fi 的口令。本文件已被收成 0600（root 可读），
+# 但口令本身仍是出厂值，请首次启动后立刻在 WebUI 或本文件里改掉。
+# 想让设备首启就自动换成随机口令：把下面的 H5000M_AP_RANDOMIZE 置为 1，
+# 生成结果会写入 /etc/h5000m-initial-credentials（0600）。
 AP_SSID_2G=OWRT
 AP_SSID_5G=OWRT
 AP_PASSWORD=12345678
+H5000M_AP_RANDOMIZE=0
 
 # 国家/地区（5GHz 信道与发射功率；CN 为完整信道，可按需改 US/DE 等）
 REGULATORY_DOMAIN=CN

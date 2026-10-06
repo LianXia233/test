@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import grp
 import copy
+import inspect
 import json
 import logging
 import os
 import queue
-import re
 import socketserver
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,7 +25,12 @@ from .core import (
     normalize_mac_address,
     request_system_reboot,
 )
-from .dependencies import gather_dependency_status, run_dependency_action
+from .dependencies import (
+    DEPENDENCY_ACTIONS,
+    gather_dependency_status,
+    install_missing_packages,
+    run_dependency_action,
+)
 from .network import (
     gather_hotspot_clients_status,
     gather_hotspot_status,
@@ -60,6 +66,17 @@ from .hotspot_keepalive import (
 )
 from .system import gather_system_info
 from .service_monitor import gather_service_monitor_status, run_service_action
+from .validation import (
+    BAND_MAX_LENGTH,
+    CHANNEL_MAX_LENGTH,
+    IFNAME_MAX_LENGTH,
+    MODE_MAX_LENGTH,
+    PASSWORD_MAX_LENGTH,
+    SSID_MAX_BYTES,
+    validate_hotspot_channel,
+    validate_hotspot_credentials,
+    validate_ifname,
+)
 from .tailscale import (
     gather_tailscale_status,
     logout_tailscale,
@@ -72,9 +89,50 @@ SOCKET_PATH = Path(os.environ.get("LINUX_ROUTER_AGENT_SOCKET", "/run/linux-route
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_QUEUED_OPERATIONS = 32
 MAX_OPERATION_HISTORY = 500
-_IFNAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
-_CHANNEL_RE = re.compile(r"^[0-9]{1,4}$")
+
+# 操作按"互斥域"分片串行，而不是全局单队列串行。
+# 原先所有 scope 共用一个 worker：一次 apt 安装（最长 300 秒）就会把后面
+# 所有网络/热点操作堵死，用户点了"关闭热点"要等到包装完才有反应。
+# 这里按真实资源冲突来分域：
+#   net   —— network/hotspot 都在改 NetworkManager 与同一张无线网卡，必须互斥
+#   pkg   —— dependencies，apt/dpkg，与网络状态互不干涉
+#   sys   —— system（重启、改密码等）
+#   tools —— tools（Tailscale 等外部工具）
+# 域内仍然严格串行，域之间并行，既避免队头阻塞又不引入并发写冲突。
+SCOPE_WORKER_DOMAIN = {
+    "network": "net",
+    "hotspot": "net",
+    "dependencies": "pkg",
+    "system": "sys",
+    "tools": "tools",
+}
+WORKER_DOMAINS = ("net", "pkg", "sys", "tools")
+DEFAULT_WORKER_DOMAIN = "net"
+# 接口名/信道的正则与长度上限统一放在 validation 里，WebUI 与 agent 共用一份，
+# 避免两侧判定漂移后互相打架。
 ProgressCallback = Callable[[str], None]
+
+# AP 保活恢复的退避序列（秒）。恢复一次要重开热点、改 NetworkManager 连接，
+# 失败后立刻重试只会让无线网卡反复上下线，反而更难恢复。退避封顶在 5 分钟：
+# 网卡短暂掉线能快速自愈，网卡彻底故障时也不会以 1 分钟一次的频率无限刷
+# nmcli 与日志。
+KEEPALIVE_RECOVERY_DELAYS = (5.0, 15.0, 30.0, 60.0, 120.0, 300.0)
+
+
+def _env_float(name: str, default: float, minimum: float = 0.1) -> float:
+    """读取可调参数，非法值静默回退默认值，避免打错一个字符就让 agent 起不来。"""
+    raw = os.environ.get(name, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+# 检测间隔默认 12 秒：略长于一次 nmcli 往返，兼顾"掉线能较快发现"与"不给
+# CPU 增加常态负担"。现场需要调快慢时设环境变量即可，不必改代码。
+KEEPALIVE_MONITOR_INTERVAL = _env_float("LINUX_ROUTER_KEEPALIVE_INTERVAL", 12.0)
+KEEPALIVE_MONITOR_INITIAL_DELAY = _env_float("LINUX_ROUTER_KEEPALIVE_INITIAL_DELAY", 3.0)
 
 
 class ValidationError(ValueError):
@@ -83,6 +141,15 @@ class ValidationError(ValueError):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@lru_cache(maxsize=None)
+def _accepts_progress(operation: Callable[..., Any]) -> bool:
+    """判断操作实现是否接受 progress 回调。"""
+    try:
+        return "progress" in inspect.signature(operation).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class OperationRegistry:
@@ -171,9 +238,10 @@ def _require_string(
 
 
 def _require_wireless_interface(params: dict[str, Any]) -> str:
-    ifname = _require_string(params, "ifname", maximum=15)
-    if not _IFNAME_RE.fullmatch(ifname):
-        raise ValidationError("无线接口名称无效")
+    ifname = _require_string(params, "ifname", maximum=IFNAME_MAX_LENGTH)
+    error = validate_ifname(ifname)
+    if error:
+        raise ValidationError(error)
     device = get_device_status_item(ifname)
     if (
         device.get("type") != "wifi"
@@ -310,22 +378,22 @@ def _execute_hotspot_start(
 ) -> dict[str, Any]:
     if progress:
         progress("正在检查热点参数")
-    ifname = _require_string(params, "ifname", maximum=15)
-    if not _IFNAME_RE.fullmatch(ifname):
-        raise ValidationError("无线接口名称无效")
+    ifname = _require_string(params, "ifname", maximum=IFNAME_MAX_LENGTH)
+    if error := validate_ifname(ifname):
+        raise ValidationError(error)
     if load_hotspot_keepalive():
         raise ValidationError("已有 AP 设为保活，请先取消保活")
-    ssid = _require_string(params, "ssid", maximum=32)
-    password = _require_string(params, "password", maximum=63, strip=False)
-    band = _require_string(params, "band", maximum=8)
-    channel = _require_string(params, "channel", maximum=4)
-    mode = _require_string(params, "mode", maximum=16)
-    if not ssid or len(ssid.encode("utf-8")) > 32:
-        raise ValidationError("热点名称必须是 1 到 32 字节")
-    if not 8 <= len(password) <= 63:
-        raise ValidationError("热点密码长度必须在 8 到 63 个字符之间")
-    if channel and not _CHANNEL_RE.fullmatch(channel):
-        raise ValidationError("热点信道无效")
+    ssid = _require_string(params, "ssid", maximum=SSID_MAX_BYTES)
+    password = _require_string(params, "password", maximum=PASSWORD_MAX_LENGTH, strip=False)
+    band = _require_string(params, "band", maximum=BAND_MAX_LENGTH)
+    channel = _require_string(params, "channel", maximum=CHANNEL_MAX_LENGTH)
+    mode = _require_string(params, "mode", maximum=MODE_MAX_LENGTH)
+    # 名称/口令/信道的具体判定在 validation 里，WebUI 用的是同一份，
+    # 所以这里被拒的原因和页面上提示的完全一致。
+    if error := validate_hotspot_credentials(ssid, password):
+        raise ValidationError(error)
+    if error := validate_hotspot_channel(channel):
+        raise ValidationError(error)
 
     device = get_hotspot_device_settings(ifname)
     if not device:
@@ -438,8 +506,21 @@ def _execute_hotspot_keepalive_recover(params: dict[str, Any]) -> dict[str, Any]
     return _result(recover_hotspot_keepalive(config), "保活 AP 已恢复", "保活 AP 恢复失败")
 
 
-def _execute_dependency(params: dict[str, Any]) -> dict[str, Any]:
+def _execute_dependency(
+    params: dict[str, Any],
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
     action = _require_string(params, "action", maximum=64)
+    # agent 以 root 运行，依赖修复会改写 /etc 下的网络配置、重启 NetworkManager、
+    # 甚至跑 apt-get。所以动作必须在真正动手之前就卡进白名单：跑到一半才失败
+    # 会把网络配置留在改了一半的状态。白名单与 dependencies 侧共用同一份常量。
+    if action not in DEPENDENCY_ACTIONS:
+        raise ValidationError("不支持的修复动作")
+    if action == "install_packages":
+        # apt-get update + install 各有 APT_TIMEOUT（300s）预算，最坏情况约 10
+        # 分钟。这类长操作独占 pkg 域的 worker，所以要把阶段进度报上去，让用户
+        # 看到它是在拉索引还是在装包，而不是以为面板卡死了。
+        return _result(install_missing_packages(progress), "已安装缺失软件包", "安装依赖失败")
     return _result(run_dependency_action(action), "处置完成", "处置失败")
 
 
@@ -524,11 +605,15 @@ class AgentRuntime:
         self,
         registry: OperationRegistry | None = None,
         *,
-        monitor_interval: float = 12.0,
-        monitor_initial_delay: float = 3.0,
+        monitor_interval: float = KEEPALIVE_MONITOR_INTERVAL,
+        monitor_initial_delay: float = KEEPALIVE_MONITOR_INITIAL_DELAY,
     ) -> None:
         self.store = registry or OperationRegistry()
-        self.queue: queue.Queue[tuple[str, str, dict[str, Any]]] = queue.Queue(MAX_QUEUED_OPERATIONS)
+        self.queues: dict[str, queue.Queue[tuple[str, str, dict[str, Any]]]] = {
+            domain: queue.Queue(MAX_QUEUED_OPERATIONS) for domain in WORKER_DOMAINS
+        }
+        # 兼容旧引用：热点保活与网络操作都落在 net 域，因此主队列即 net 队列。
+        self.queue = self.queues[DEFAULT_WORKER_DOMAIN]
         self.submit_lock = threading.Lock()
         self._monitor_interval = monitor_interval
         self._monitor_initial_delay = monitor_initial_delay
@@ -536,10 +621,29 @@ class AgentRuntime:
         self._recovery_pending = False
         self._recovery_attempt = 0
         self._next_recovery_at = 0.0
-        self.worker = threading.Thread(target=self._run_worker, name="router-agent-worker", daemon=True)
-        self.worker.start()
+        self.workers = [
+            threading.Thread(
+                target=self._run_worker,
+                args=(domain,),
+                name=f"router-agent-worker-{domain}",
+                daemon=True,
+            )
+            for domain in WORKER_DOMAINS
+        ]
+        for worker in self.workers:
+            worker.start()
+        # 兼容旧引用：默认工作线程即 net 域线程。
+        self.worker = self.workers[WORKER_DOMAINS.index(DEFAULT_WORKER_DOMAIN)]
         self.monitor = threading.Thread(target=self._run_keepalive_monitor, name="router-agent-ap-keepalive", daemon=True)
         self.monitor.start()
+
+    def queue_for(self, scope: str) -> queue.Queue[tuple[str, str, dict[str, Any]]]:
+        return self.queues[SCOPE_WORKER_DOMAIN.get(scope, DEFAULT_WORKER_DOMAIN)]
+
+    def join_all(self) -> None:
+        """等待所有互斥域的队列排空（测试与关机路径用）。"""
+        for domain in WORKER_DOMAINS:
+            self.queues[domain].join()
 
     def submit(
         self,
@@ -552,18 +656,20 @@ class AgentRuntime:
             raise ValidationError("不支持的系统操作")
         if not isinstance(params, dict) or len(params) > 16:
             raise ValidationError("操作参数无效")
-        if scope not in {"network", "hotspot", "dependencies", "system", "tools"}:
+        if scope not in SCOPE_WORKER_DOMAIN:
             raise ValidationError("操作范围无效")
+        pending = self.queue_for(scope)
         with self.submit_lock:
-            if self.queue.full():
+            if pending.full():
                 raise ValidationError("系统操作队列已满，请稍后再试")
             operation = self.store.create(action, scope, _validate_context(context))
-            self.queue.put_nowait((operation["id"], action, params.copy()))
+            pending.put_nowait((operation["id"], action, params.copy()))
         return operation
 
     def _queue_keepalive_recovery(self, config: dict[str, Any]) -> bool:
+        pending = self.queues[DEFAULT_WORKER_DOMAIN]
         with self.submit_lock:
-            if self._recovery_pending or self.queue.full():
+            if self._recovery_pending or pending.full():
                 return False
             operation = self.store.create(
                 "hotspot_keepalive_recover",
@@ -572,7 +678,7 @@ class AgentRuntime:
             )
             self._recovery_pending = True
             set_hotspot_keepalive_runtime(recovering=True, last_error="")
-            self.queue.put_nowait(
+            pending.put_nowait(
                 (operation["id"], "hotspot_keepalive_recover", {"parent_mac": config["parent_mac"]})
             )
         return True
@@ -604,18 +710,20 @@ class AgentRuntime:
         action: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        if action == "hotspot_start":
-            def progress(message: str) -> None:
-                self.store.update_progress(operation_id, message)
-
-            return _execute_hotspot_start(params, progress)
+        def progress(message: str) -> None:
+            self.store.update_progress(operation_id, message)
 
         operation = OPERATIONS.get(action) or INTERNAL_OPERATIONS[action]
+        # 只有部分操作实现了阶段进度上报。用签名判断而不是维护一张白名单表，
+        # 以后新增支持 progress 的操作不需要再回来改这里。
+        if _accepts_progress(operation):
+            return operation(params, progress)
         return operation(params)
 
-    def _run_worker(self) -> None:
+    def _run_worker(self, domain: str) -> None:
+        pending = self.queues[domain]
         while True:
-            operation_id, action, params = self.queue.get()
+            operation_id, action, params = pending.get()
             try:
                 self.store.mark_running(operation_id)
                 logging.info("operation started id=%s action=%s", operation_id, action)
@@ -639,8 +747,9 @@ class AgentRuntime:
                         self._next_recovery_at = 0.0
                         set_hotspot_keepalive_runtime(recovering=False, last_error="")
                     else:
-                        delays = (5, 15, 30, 60)
-                        delay = delays[min(self._recovery_attempt, len(delays) - 1)]
+                        delay = KEEPALIVE_RECOVERY_DELAYS[
+                            min(self._recovery_attempt, len(KEEPALIVE_RECOVERY_DELAYS) - 1)
+                        ]
                         self._recovery_attempt += 1
                         self._next_recovery_at = time.monotonic() + delay
                         set_hotspot_keepalive_runtime(
@@ -650,7 +759,7 @@ class AgentRuntime:
             except Exception:
                 logging.exception("operation state update failed id=%s action=%s", operation_id, action)
             finally:
-                self.queue.task_done()
+                pending.task_done()
 
 
 class AgentRequestHandler(socketserver.StreamRequestHandler):

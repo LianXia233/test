@@ -137,10 +137,15 @@ CONFIG_WIREGUARD=m（可选）
 
 ## 5. WAN / LAN 与 MAC
 
-- LAN MAC：由 eMMC CID 生成（`macaddr_generate_from_mmc_cid mmcblk0`）
-- WAN MAC：LAN MAC + 1
+- LAN MAC / WAN MAC：由**用户空间**按板载 eMMC CID 派生（LAN = `02:<sha256(cid)[0:3]>:00:00`，
+  WAN = LAN + 1），实现在 `/usr/local/sbin/h5000m-router-init.sh` 的 `derive_base_mac()`，
+  并通过 NetworkManager 的 `ethernet.cloned-mac-address` 应用；首次算出的结果持久化在
+  `/etc/h5000m-mac.conf`，后续开机直接复用。
+- **不使用** OpenWrt 的 `macaddr_generate_from_mmc_cid`：这是 ImmortalWrt/OpenWrt 用户空间的
+  `02_network` 钩子，Debian 分支里没有这套机制（历史文档曾误记）。
+- DTS **不再写死** `mac-address`（`dts/mt7987a-hiveton-h5000m.dts` 的 `&gmac0` / `&gmac1`）：
+  固定值会让所有刷了同一固件的设备共用同一组 MAC，接进同一个二层网络就冲突。
 - 接口命名：eth0 = LAN，eth1 = WAN（内核按 gmac 顺序命名，U-Boot 传入 DTB 时 eth0/eth1 即对应 gmac0/gmac1）
-- 若 U-Boot 传入的 `mac-address` 与期望不一致，以 DTS/实测为准，不强行改名。
 
 ## 6. 风扇控制（h5000m-fancontrol）
 

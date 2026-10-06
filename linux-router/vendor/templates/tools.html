@@ -169,6 +169,10 @@
     const tailscaleStatusUrl = "{{ url_for('tailscale_status') }}";
     let tailscaleLoginPollTimer = null;
     let tailscaleLoginPollDeadline = 0;
+    // 登录要等用户在外部页面完成，轮询窗口最长 2 分钟。固定 2s 会打满 60 次
+    // 请求，这里改成 2s 起步、逐步退避到 6s，交互初期仍然跟手。
+    let tailscaleLoginPollInterval = 2000;
+    const tailscaleLoginPollIntervalMax = 6000;
 
     const showLoginLink = (url) => {
       const wrap = document.getElementById("tailscale-login-link-wrap");
@@ -339,12 +343,17 @@
         // Ignore transient status failures while the external login is still in progress.
       }
 
-      tailscaleLoginPollTimer = window.setTimeout(pollTailscaleLoginStatus, 2000);
+      tailscaleLoginPollInterval = Math.min(
+        Math.round(tailscaleLoginPollInterval * 1.5),
+        tailscaleLoginPollIntervalMax,
+      );
+      tailscaleLoginPollTimer = window.setTimeout(pollTailscaleLoginStatus, tailscaleLoginPollInterval);
     };
 
     const startTailscaleLoginPolling = () => {
       stopTailscaleLoginPolling();
       tailscaleLoginPollDeadline = Date.now() + 2 * 60 * 1000;
+      tailscaleLoginPollInterval = 2000;
       pollTailscaleLoginStatus();
     };
 

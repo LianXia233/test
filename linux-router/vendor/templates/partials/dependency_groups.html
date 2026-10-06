@@ -1,0 +1,56 @@
+{% from "macros.html" import icon %}
+{% set group_icons = {
+  "基础软件": "package",
+  "服务状态": "activity",
+  "网络接管": "cable",
+  "热点共享": "share-2"
+} %}
+{% for group_name, rows in dependencies.groups.items() %}
+<article class="card">
+  {# 后端新增分组时模板不必同步改：未登记的分组回退到默认图标，避免整页 500 #}
+  <h3 class="card-title">{{ icon(group_icons.get(group_name, "package")) }}<span>{{ group_name }}</span></h3>
+  <div class="table-scroll">
+    <table class="table dependency-table responsive-detail-table">
+      <thead>
+        <tr>
+          <th>组件</th>
+          <th>状态</th>
+          <th>详情</th>
+          <th>处置</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td data-label="组件">{{ row.name }}</td>
+          <td data-label="状态"><span class="status-badge status-{{ row.level }}">{{ row.status }}</span></td>
+          <td data-label="详情">
+            <div>{{ row.detail }}</div>
+            {% if row.extra_details %}
+              <div class="dependency-extra-list muted{% if row.extra_details_mono|default(true) %} mono-value{% endif %}">
+                {% for item in row.extra_details %}
+                <div>{{ item }}</div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </td>
+          <td class="dependency-action-cell" data-label="处置">
+            {% if row.action %}
+            <form action="{{ url_for('dependency_fix') }}" method="post" class="inline-form" data-agent-operation-form>
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="action" value="{{ row.action }}">
+              <button type="submit" class="dependency-action-link">
+                {{ icon("refresh-cw", 15) }}<span>{{ row.action_label }}</span>
+              </button>
+            </form>
+            {% else %}
+            <span class="muted">无需处置</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
+{% endfor %}

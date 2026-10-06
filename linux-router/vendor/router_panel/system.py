@@ -14,11 +14,10 @@ from .core import (
     get_cpu_model,
     get_cpu_temperature,
     get_network_interface_hardware,
-    get_timed_cache,
+    get_or_set_timed_cache,
     load_os_release,
     read_text,
     run_command,
-    set_timed_cache,
 )
 from .contracts import SystemInfo
 from .network import get_active_connections
@@ -44,10 +43,15 @@ def summarize_network_status(active_connections: list[dict[str, str]]) -> dict[s
 
 
 def get_static_system_info() -> dict[str, str]:
-    cached = get_timed_cache("system:static", SYSTEM_STATIC_CACHE_TTL)
-    if cached is not None:
-        return cached.copy()
+    cached = get_or_set_timed_cache(
+        "system:static",
+        SYSTEM_STATIC_CACHE_TTL,
+        _collect_static_system_info,
+    )
+    return cached.copy()
 
+
+def _collect_static_system_info() -> dict[str, str]:
     os_release = load_os_release()
     uname = os.uname()
     meminfo = read_text("/proc/meminfo")
@@ -70,12 +74,11 @@ def get_static_system_info() -> dict[str, str]:
         "memory_total": format_bytes(mem_values.get("MemTotal", 0)),
         "disk_total": format_bytes(disk_total),
     }
-    set_timed_cache("system:static", SYSTEM_STATIC_CACHE_TTL, static_info.copy())
     return static_info
 
 
 def get_interface_addresses() -> tuple[list[str], dict[str, list[str]]]:
-    result = run_command(["ip", "-j", "address", "show"])
+    result = run_command(["ip", "-j", "address", "show"], timeout=10)
     if not result.ok or not result.output:
         return [], {}
 

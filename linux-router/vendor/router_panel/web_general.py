@@ -11,6 +11,7 @@ from .core import (
     save_auth_config,
     save_network_config,
 )
+from .security import audit, lockout_remaining, register_failure, register_success
 
 
 def register_general_routes(app, login_required, is_async_request) -> None:
@@ -26,6 +27,15 @@ def register_general_routes(app, login_required, is_async_request) -> None:
         flash(message, "success")
         return redirect(url_for(redirect_endpoint))
 
+    def dependency_fragment(status: dict) -> dict[str, str]:
+        return {"dependencies": render_template("partials/dependency_groups.html", dependencies=status)}
+
+    def dependency_status_or_empty() -> dict:
+        try:
+            return query_agent("dependency_status")
+        except AgentError:
+            return {"groups": {}, "summary": {"ok": 0, "warning": 0, "error": 1}}
+
     @app.route("/")
     def index():
         if session.get("logged_in"):
@@ -37,17 +47,37 @@ def register_general_routes(app, login_required, is_async_request) -> None:
     def login():
         error = ""
         if request.method == "POST":
+            # 【登录限流】先检查来源是否处于锁定窗口内；锁定期间直接拒绝，
+            # 不做密码校验也不触碰存储，避免成为 CPU/IO 放大面。
+            client_key = request.remote_addr or "unknown"
+            wait_seconds = lockout_remaining(client_key)
+            if wait_seconds > 0:
+                remaining = int(wait_seconds) + 1
+                audit("login.locked", ip=client_key, retry_after=remaining)
+                return render_template(
+                    "login.html",
+                    error=f"登录失败次数过多，请等待 {remaining} 秒后重试",
+                ), 429
+
             password = request.form.get("password", "")
             auth = load_auth_config()
             username = auth.get("username", "admin")
 
             if check_password_hash(auth.get("password_hash", ""), password):
+                register_success(client_key)
+                audit("login.success", ip=client_key, user=username)
                 session.clear()
                 session.permanent = True
                 session["logged_in"] = True
                 session["username"] = username
                 return redirect(url_for("system_info"))
+
+            delay = register_failure(client_key)
+            # 统一错误文案，不区分"用户不存在/口令错误"，避免用户名枚举
+            audit("login.failure", ip=client_key, lockout=int(delay))
             error = "用户名或密码错误"
+            if delay > 0:
+                error = f"用户名或密码错误（失败次数过多，已锁定 {int(delay)} 秒）"
 
         return render_template("login.html", error=error)
 
@@ -91,9 +121,20 @@ def register_general_routes(app, login_required, is_async_request) -> None:
             )
         except AgentError as exc:
             if is_async_request():
-                return {"ok": False, "pending": False, "message": str(exc)}, 503
+                return {
+                    "ok": False,
+                    "pending": False,
+                    "message": str(exc),
+                    "fragments": dependency_fragment(dependency_status_or_empty()),
+                }, 503
             flash(str(exc), "error")
             return redirect(url_for("dependencies_page"))
+        if is_async_request():
+            response, status_code = queued_response(
+                operation, "依赖修复已加入队列", "dependencies_page"
+            )
+            response["fragments"] = dependency_fragment(dependency_status_or_empty())
+            return response, status_code
         return queued_response(operation, "依赖修复已加入队列", "dependencies_page")
 
 
