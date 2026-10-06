@@ -23,8 +23,11 @@ setenv kernel_addr_r 0x60000000
 setenv fdt_addr_r 0x45000000
 setenv ramdisk_addr_r 0x44000000
 
-# bootargs 与官方 OpenWrt 一致（实测 H5000M sysupgrade.bin chosen/bootargs）
-setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8'
+# bootargs 与官方 OpenWrt 一致（实测 H5000M sysupgrade.bin chosen/bootargs），
+# 但补了 rw：厂商 U-Boot env 默认 bootargs 无 rw，p5 会 ro 挂载导致引导层
+# /sbin/init 的 overlay 组装失败（2026-10-06 实机串口实锤；init 内已另加
+# remount,rw 兜底，此处保证备用引导路径的 cmdline 自身正确）。
+setenv bootargs 'earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf console=ttyS0,115200n8'
 
 echo '### H5000M Debian boot (fallback): trying eMMC p5 (/boot, ext4) ###'
 setenv devtype mmc

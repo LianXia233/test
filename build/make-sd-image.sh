@@ -281,17 +281,51 @@ cat > "$STAGE/sbin/init" <<'INIT_EOF'
 #!/usr/bin/busybox sh
 # H5000M (MT7987A) Debian 13 引导层 init —— SquashFS + OverlayFS 组装
 # 内核已按 cmdline root=PARTLABEL=rootfs 挂载 p5（本引导层 ext4）为 /。
-# 职责：挂 squashfs → 组装 overlay → pivot_root → 交棒 systemd。
+# 职责：remount rw → 挂 squashfs → 组装 overlay → pivot_root → 交棒 systemd。
 set -u
 BB=/usr/bin/busybox
+RETRY_FILE=/dev/.h5000m_rescue_count   # devtmpfs 恒可写：root 只读时也能做救援计数
 $BB mkdir -p /dev /proc /sys /tmp /sq /overlay/upper /overlay/work /overlay/merged
 $BB mount -t proc proc /proc 2>/dev/null || true
 $BB mount -t sysfs sysfs /sys 2>/dev/null || true
 $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true   # 已挂载（DEVTMPFS_MOUNT）则忽略
+# 【根因修复 2026-10-06，勿删】厂商 U-Boot env 默认 bootargs 不含 rw（实测串口：
+# "Kernel command line: ... root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf"），
+# 内核把 p5 以 ro 挂载 → /overlay/upper 不可写 → overlay mount EINVAL
+# （实机日志："overlay: filesystem on /overlay/upper is read-only"）。
+# 显式 remount 为 rw（幂等：本就 rw 时为 no-op）。多写几个变体兜底不同 busybox/内核行为。
+$BB mount -o remount,rw / 2>/dev/null \
+    || $BB mount -o remount,rw /dev/root / 2>/dev/null \
+    || $BB mount -n -o remount,rw / 2>/dev/null \
+    || echo "!!! H5000M: 根文件系统 remount,rw 失败（cmdline 可能含 ro），继续尝试 overlay !!!" >&2
 SQ=/squashfs/rootfs.squashfs
 MERGED=/overlay/merged
 overlay_fail() {
     echo "!!! H5000M: Overlay 组装失败（$*），进入只读救援模式（无持久化）!!!" >&2
+    # 【防 OOM 修复 2026-10-06】旧实现无条件重执行 init → 失败后无限循环：
+    # 实机实测 437 轮（每轮挂 squashfs 泄漏 kmalloc-4k，约 465MiB）→ t=128s
+    # "Kernel panic - not syncing: System is deadlocked on memory"。
+    # 用 devtmpfs 计数器限重试 3 次；超限降级为串口应急 shell（可交互修复）。
+    N=0
+    if [ -f "$RETRY_FILE" ]; then
+        N=$($BB cat "$RETRY_FILE" 2>/dev/null)
+        case "$N" in ''|*[!0-9]*) N=0 ;; esac
+    fi
+    N=$((N + 1))
+    echo "$N" > "$RETRY_FILE" 2>/dev/null
+    if [ "$N" -ge 3 ]; then
+        echo "!!! 救援已重试 $N 次，停止自动重试（防 OOM 循环）!!!" >&2
+        echo "!!! 降级为串口应急 shell：可手动 'mount -o remount,rw /' 排查后 'exec /sbin/init' !!!" >&2
+        while :; do
+            "$BB" sh </dev/console >/dev/console 2>&1
+            echo "!!! 应急 shell 退出，5 秒后重新进入（防 PID1 退出引发 panic）!!!" >&2
+            $BB sleep 5
+        done
+    fi
+    # 重试前清理上一轮挂载，减缓 loop/squashfs 缓存泄漏
+    $BB umount /rmerged 2>/dev/null || true
+    $BB umount /sq 2>/dev/null || true
+    $BB losetup -D 2>/dev/null || true
     $BB mkdir -p /rrun/upper /rrun/work /rmerged
     $BB mount -t overlay overlay -o lowerdir=/,upperdir=/rrun/upper,workdir=/rrun/work /rmerged 2>/dev/null || {
         echo "!!! 救援 overlay 失败：仅只读根，需串口 / U-Boot 重刷 !!!" >&2

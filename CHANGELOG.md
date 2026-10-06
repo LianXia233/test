@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 实机第三阶段修复：cmdline 缺 rw 导致 overlay 组装失败 + 救援循环 OOM panic
+
+**进展**：busybox 修复重刷后（上一条目），实机串口确认 init 已正常执行——但 overlay 组装失败，
+陷入救援循环约 437 轮后 t=128s OOM panic：`Kernel panic - not syncing: System is deadlocked on memory`。
+
+**根因（串口实锤）**：厂商 U-Boot env 默认 bootargs 不含 `rw`——实测 cmdline 为
+`Kernel command line: earlycon=... root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf`，
+内核把 p5（引导层 ext4）以 **ro** 挂载（`VFS: Mounted root (ext4 filesystem) readonly`）→
+`/overlay/upper` 不可写 → `overlay: filesystem on /overlay/upper is read-only` →
+overlay mount EINVAL（Invalid argument）。
+
+**OOM 机理**：旧 `overlay_fail()` 救援失败后无条件重执行 `/sbin/init` → 无限循环；每轮
+挂载 SquashFS 泄漏不可回收 slab（`kmalloc-4k` 达 476648KB ≈ 465MiB，loop 设备一路涨到
+loop437），1GiB DRAM 耗尽 → busybox 被 oom-kill → init（PID1）再触发 OOM → panic 挂死。
+
+**修复**（`build/make-sd-image.sh` 引导层 /sbin/init + `boot/boot.cmd`）：
+- init 挂载 p5 后显式 `mount -o remount,rw /`（三重变体兜底，幂等）——治本：无论
+  cmdline 是否带 rw 都能保证 overlay 可写层可用；
+- 救援路径加 devtmpfs 计数器（`/dev/.h5000m_rescue_count`，root 只读时也可写），
+  限自动重试 3 次；超限降级为**串口应急 shell**（/dev/console 交互，可手动修复），
+  彻底消灭无限重执行 OOM 循环；
+- 每次重试前 `umount /rmerged /sq` + `losetup -D`，减缓 loop/squashfs 缓存泄漏；
+- `boot.cmd` 备用引导路径 bootargs 补 `rw`（与 init 内 remount 双保险）。
+
+**验证状态**：shell 语法校验通过；待 CI 重建 → 重刷 p4+p5 → 实机串口验证（预期：
+remount 成功 → overlay 组装成功 → pivot_root → systemd 正常启动）。
+
 ### 2026-10-06 — 实机第二阶段修复：busybox 误选 16 字节文本导致 init ENOEXEC panic
 
 **进展**：FIT load/entry 改 0x46000000 后（上一条目），实机串口确认 U-Boot 阶段完全修复——
