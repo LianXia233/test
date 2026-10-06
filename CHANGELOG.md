@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 实验 C 优化轮：config 基座二次对齐（NR_CPUS/MINORS）+ frank-w Debian/Ubuntu 对照补强
+
+- **BPI-R4 Mini 对照修正**（用户纠偏）：其参考基准为 Debian/Ubuntu 发行版构建
+  （frank-w/BPI-Router-Images + BPI-Router-Linux），非 OpenWrt feed。R4 Mini/R4 Lite
+  （同为 MT7987A）复用 `arch/arm64/configs/mt7988a_bpi-r4_defconfig`，6.17-main 与
+  6.18-main 两分支核对基线一致；论坛实跑组合为 bpi-r4lite_6.17.0-main + Debian/Ubuntu。
+- **四方对照收敛**：原厂 OpenWrt 6.18.52 filogic、frank-w Debian/Ubuntu defconfig、
+  我方修复后 config 三方调度器基座完全一致（PREEMPT_NONE + HZ_100 + 无 mq 调度器 +
+  无 CMA）；修复前我方 config 为全部已知对照组中唯一 outlier。mmc 驱动层
+  （MMC_MTK/CQHCI/HSQ）由 Kconfig select 链保证，四方一致。
+- **config 二次对齐（`build/kernel-conf/h5000m-6.18.config`）**：
+  - `CONFIG_NR_CPUS=4`（基座默认 512 → 对齐对照组；MT7987A 核数不超过 4，消除
+    per-cpu 预分配与抢占点布局剩余差量）；
+  - `CONFIG_MMC_BLOCK_MINORS=8`（基座默认 32 → 对齐对照组；p1-p5 布局下 7 分区上限
+    仍充足，不触碰分区表）。
+  - 云端 `defconfig → cat 片段 → olddefconfig` 展开验证：两项均生效，实验 C 首轮
+    修复项（PREEMPT_NONE/HZ_100/无 mq/无 CMA）与 MMC 驱动链全部保持。
+- **CI run 37413514157（零缓存全量构建，HEAD 535c7d4）conclusion=success**，
+  修复后固件已产出；本条目提交后手动 dispatch 新一轮构建（缓存跨运行复用 ccache）。
+
 ### 2026-10-06 — 内核版本锁声明 + 新增清理缓存工作流（clean-cache.yml）
 
 - **版本锁**：`KERNEL_VERSION=6.18.54` 在 `build.yml` env 与 `build-kernel.sh` 默认值均为
