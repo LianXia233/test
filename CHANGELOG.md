@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — config 片段健壮性：修复 RFKILL tristate 陷阱 + 清理无效行
+
+- **RFKILL tristate 陷阱**：上游 `CFG80211 depends on "RFKILL || !RFKILL"`，tristate 逻辑下
+  `RFKILL=m` 时该条件求值为 m，把 CFG80211 上限锁死为 m——片段的 `CFG80211=y` 被静默降级，
+  连带 `MAC80211`/`MT76_CORE`/`MT7921E`/`MT7925E`/`MT7996E` 全链降级。CI（板级补丁树下
+  RFKILL 收敛为 y）不受影响，但云端复现展开曾与 CI 结果不一致（wireless 组 CI=y vs 本地=m）。
+  片段 Wi-Fi 段新增 `CONFIG_RFKILL=y` 解锁，任意环境展开均收敛到内建不动点；
+  CI 展开产物不变（本就为 y），无需重跑构建。
+- **清理无效行**：上游 6.18 无 `CONFIG_MT76` 符号（核心为 `MT76_CORE`，由 MT7921E/MT7996E
+  的 select 链置 y），删除该无效行并留注释。
+- 复现方法升级：CI 导出 config（12079 行真实展开，535c7d4）与本地展开全量 diff 定位此问题；
+  除 RFKILL 组、两轮提交差量（NR_CPUS/MINORS）、工具链能力探测符号外无其他隐藏差量。
+
 ### 2026-10-06 — 实验 C 优化轮：config 基座二次对齐（NR_CPUS/MINORS）+ frank-w Debian/Ubuntu 对照补强
 
 - **BPI-R4 Mini 对照修正**（用户纠偏）：其参考基准为 Debian/Ubuntu 发行版构建
