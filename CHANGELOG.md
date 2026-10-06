@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 内核版本锁声明 + 新增清理缓存工作流（clean-cache.yml）
+
+- **版本锁**：`KERNEL_VERSION=6.18.54` 在 `build.yml` env 与 `build-kernel.sh` 默认值均为
+  固定字面量，缓存 key 全部含版本号；`build.yml` env 处补注释明确"禁止改为浮动引用，
+  升版需三处同步 + CHANGELOG 记录"，保障差异分析依赖的版本确定性。
+- **新增 `.github/workflows/clean-cache.yml`**：手动触发的缓存清理工作流，删除本仓库全部
+  Actions 缓存（ccache/kernel-tar/apt-debs/cargo），`confirm=clean` 防误触。清完缓存后
+  再手动 Run build.yml 即为完全从零的无缓存全量构建——用于排除 ccache 旧对象干扰实验
+  C 修复验证。
+
 ### 2026-10-06 — 实验 C：msdc 写挂死差异分析 + 内核 config 对齐对照组 + config 导出失真修复
 
 **分析结论（实验 C）**：对比三方（我方 6.18.54 真实展开 config / ImmortalWrt master filogic 6.18.52 / ctr54188 h5000m-debian 6.12.103 BSP 真实 config）：

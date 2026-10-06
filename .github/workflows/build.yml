@@ -29,6 +29,9 @@ concurrency:
 
 env:
   DEBIAN_FRONTEND: noninteractive
+  # 【内核版本锁】固定字面量，禁止改为浮动引用（如 latest/6.x）：
+  # 实验差异分析依赖版本确定性（6.18.52 对照 / 6.18.54 修复），升版必须显式
+  # 修改此处 + build/build-kernel.sh 默认值 + CHANGELOG 记录三者同步。
   KERNEL_VERSION: 6.18.54
   # ccache 由 build/build-kernel.sh 读取：命中时内核编译从数十分钟降到分钟级
   CCACHE_DIR: ${{ github.workspace }}/.ccache

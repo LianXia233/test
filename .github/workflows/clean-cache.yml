@@ -1,0 +1,39 @@
+name: 清理 Actions 缓存
+
+# 手动触发：删除本仓库全部 GitHub Actions 缓存（ccache / kernel-tar / apt-debs / cargo）。
+# 用途：排查"缓存污染导致修复未真正生效"，或要求完全从零重头编译时使用。
+# 清完后到 Actions 页面手动 Run workflow "H5000M Debian 13 CI 云编译" 即为无缓存全量构建。
+# 防误触：confirm 输入 clean 才执行删除。
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '输入 clean 确认删除全部缓存（其他任何值只列出缓存不删除）'
+        required: true
+        default: ''
+
+jobs:
+  clean:
+    name: 清理仓库 Actions 缓存
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 列出现有缓存
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" || true
+
+      - name: 删除全部缓存（confirm=clean）
+        if: ${{ inputs.confirm == 'clean' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache delete --all --repo "$GITHUB_REPOSITORY"
+          echo "== 删除后剩余缓存 =="
+          gh cache list --repo "$GITHUB_REPOSITORY" || true
+
+      - name: 未确认则跳过删除
+        if: ${{ inputs.confirm != 'clean' }}
+        run: echo "confirm 未输入 clean，仅列出缓存，未执行删除。"
