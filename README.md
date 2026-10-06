@@ -88,6 +88,10 @@ x86_64 runner（交叉编译 + qemu 第二阶段）。
   自校验包）/ `-kernel.bin`（FIT，内核 LZMA 内嵌）/ `-rootfs.bin`（p5 引导层镜像）/
   `-rootfs.squashfs`（只读基础系统，供在线升级）与 `sha256sums.txt`
   （版本号含 GitHub Run 序号，同日重跑不会覆盖旧 Release）；
+  **历史 Release 自动清理**：发布成功后只保留最近 `keep_releases` 个（默认 3，可在手动
+  触发时调整，填 `0` 关闭），更旧的 Release 连同资产与 tag 一并删除——单个 Release 约
+  660 MiB，不清理会持续吃满Release 资产配额；需要回退旧版本时用 `git checkout` 到对应
+  tag 重新构建更可靠；
 - **Actions Artifact**：每次运行保留 14 天（含 `initial-credentials.txt` 首次登录凭据）。
 - **构建健壮性**：内核构建默认 `--strict`，补丁应用失败 / 关键配置符号缺失直接终止构建；
   CI 缓存仅保留原始源码包 `linux-<版本>.tar.xz`，源码树每次干净解压，补丁幂等。

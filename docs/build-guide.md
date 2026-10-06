@@ -244,6 +244,28 @@ sudo bash scripts/install-emmc.sh \
    组装 `H5000M-debian13-sysupgrade.bin`（≈164 MiB），chown 修正产物属主后上传 artifact
    并发布 Release。
 
+发布成功后自动执行历史 Release 清理：按发布时间倒序保留最近 `keep_releases` 个
+（`workflow_dispatch` 输入，默认 `3`，填 `0` 关闭），其余 Release 连同资产与 tag 一并
+删除。设计要点：
+
+| 保护措施 | 作用 |
+| --- | --- |
+| `skip_release=true` 时整体跳过 | 没发新 Release 就不删旧 Release |
+| 输入非法（非整数/负数）按不清理处理并告警 | 手滑输入不会把历史 Release 删光 |
+| 刚发布的 tag 必在保留集内 | 切片从第 `keep_releases+1` 个开始，不会误删本次产物 |
+| 跳过 `draft` | 不动尚未发布的草稿 |
+| 先删 Release 再删 tag | 删 Release 不会自动清 tag，反序会留孤儿 tag |
+| 每次删除打 `::warning` | Actions 页面可审计删了什么 |
+
+单个 Release 含四个大件约 660 MiB，曾堆积到 11 个 / 8.1 GiB，故改为构建后自动清理。
+若需手动清空全部历史 Release，用 `gh release list` 配合 `gh release delete <tag> --yes`
+逐个处理，并同步删除对应 tag。
+
+> 安全提示：旧版本 Release 曾附带 `initial-credentials.txt`（明文出厂口令）。当前
+> `build.yml` 已不再把该文件放入 Release，出厂凭据只存在于设备内
+> `/etc/h5000m-initial-credentials`（0600）。仓库为 public，历史上传过的凭据文件任何人
+> 都可下载，若曾使用过非默认口令应立即轮换。
+
 产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`
 （kernel.bin、rootfs.bin、rootfs.squashfs、sysupgrade.bin、boot.scr、初始凭据）。
 

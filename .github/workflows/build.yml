@@ -30,6 +30,11 @@ on:
         required: false
         default: false
         type: boolean
+      keep_releases:
+        description: '历史 Release 保留数量：发布新固件后自动删除更旧的 Release（连同资产与 tag），0 = 不自动清理'
+        required: false
+        default: '3'
+        type: string
 
 # 【最小权限】默认只读；需要写权限的 job（发布 Release、清理缓存）各自单独声明。
 permissions:
@@ -104,7 +109,7 @@ jobs:
       - name: 安装检查工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck python3 python3-pip python3-flask python3-pyflakes
+          sudo apt-get install -y --no-install-recommends shellcheck python3 python3-pip python3-flask python3-pyflakes python3-yaml
           python3 -V
           pyflakes --version
 
@@ -130,6 +135,40 @@ jobs:
             shellcheck --severity=error "$f" || { echo "ShellCheck error：$f"; exit 1; }
           done < <(find . -path ./.git -prune -o -type f -name '*.sh' -print)
           echo "ShellCheck(error 级) 通过"
+
+      - name: ShellCheck（GitHub Actions 内嵌 run 脚本）
+        # workflow 里的 run: 块同样是 shell 代码，但既不在 .sh 文件里、也不被上面
+        # 两条find 覆盖，等于静态检查盲区。本步骤用 PyYAML 解析出每个 run 块，
+        # 补shebang 后送 shellcheck，避免"CI 里出错的脚本永远查不出来"。
+        run: |
+          set -uo pipefail
+          python3 - <<'PY' > /tmp/embedded-scripts.list
+          import pathlib, yaml
+          for wf in sorted(pathlib.Path('.github/workflows').glob('*.yml')):
+              doc = yaml.safe_load(wf.read_text(encoding='utf-8'))
+              for jname, job in (doc.get('jobs') or {}).items():
+                  for idx, step in enumerate(job.get('steps') or []):
+                      script = step.get('run')
+                      if not script:
+                          continue
+                      # 统一按 bash 处理：GitHub Actions 默认 shell 就是 bash -e {0}
+                      out = pathlib.Path('/tmp/embedded') / f"{wf.stem}.{jname}.{idx}.sh"
+                      out.parent.mkdir(parents=True, exist_ok=True)
+                      out.write_text("#!/bin/bash\n" + script, encoding='utf-8')
+                      print(out)
+          PY
+          [[ -s /tmp/embedded-scripts.list ]] || { echo "未解析到内嵌脚本，跳过"; exit 0; }
+          COUNT=$(wc -l < /tmp/embedded-scripts.list)
+          echo "解析到 $COUNT 段内嵌脚本，逐段ShellCheck"
+          FAIL=0
+          while IFS= read -r f; do
+            # SC2296：${{ runner.arch }} 等 GitHub Actions 表达式在 bash 展开前就已被
+            # Actions 引擎替换，shellcheck 看到的是裸字面量，属误报；用 -e 定向排除。
+            shellcheck --severity=error -s bash -e SC2296 "$f" \
+              || { echo "内嵌脚本 ShellCheck error：$f"; FAIL=1; }
+          done < /tmp/embedded-scripts.list
+          [[ "$FAIL" -eq 0 ]] || { echo "内嵌脚本 ShellCheck 未通过"; exit 1; }
+          echo "内嵌脚本 ShellCheck(error 级) 通过"
 
       - name: Python 语法检查（py_compile）
         run: |
@@ -628,3 +667,63 @@ jobs:
             --title "H5000M Debian 13 固件 ${VERSION}" \
             --notes-file "$RELEASE_DIR/RELEASE-NOTES.md"
           echo "已发布 Release：$TAG"
+
+      - name: 清理过旧的 Release（保留最近 N 个）
+        # 【为什么必须自动清理】每个 Release 含 kernel/rootfs/squashfs/sysupgrade
+        # 四个大件，单个约 660 MiB。历史 Release 只增不减会持续吃掉仓库 Release
+        # 资产配额（曾堆积到 11 个 / 8.1 GiB），且旧版本固件无回滚价值——真要回退
+        # 靠 git checkout 到对应 tag 重新构建更可靠。
+        #
+        # 【安全设计】
+        #   1. 只删"本次发布完成之后仍排在第 N 名之后"的，即按 published_at 倒序
+        #      第 N+1 个及更旧的；刚发布的 $TAG 必然在保留集内。
+        #   2. skip_release=true 时本步骤整体跳过（没有新Release，凭什么删旧的）。
+        #   3. keep_releases 输入非法（非整数/负数）时按"不清理"处理并告警，
+        #      避免手滑输入把全部历史 Release 删光。
+        #   4. 先删 Release 再删 tag：tag 是 Release 的引用来源，顺序反了会留下
+        #      孤儿 tag（GitHub 删除 Release 不会自动清理 tag）。
+        #   5. 每次删除都打 ::warning 日志，Actions 页面可见删了什么。
+        if: github.event_name != 'pull_request' && !inputs.skip_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          KEEP="${INPUT_KEEP_RELEASES:-3}"
+          if ! [[ "$KEEP" =~ ^[0-9]+$ ]]; then
+            echo "::warning::keep_releases 输入非法（'$KEEP'），本次跳过 Release 清理"
+            exit 0
+          fi
+          if [[ "$KEEP" -eq 0 ]]; then
+            echo "keep_releases=0，跳过 Release 清理"
+            exit 0
+          fi
+          # 按发布时间倒序列出全部 Release（API 默认最新在前；不含 draft，避免动未发布草稿）
+          mapfile -t ALL_TAGS < <(
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+              --jq '.[] | select(.draft == false) | .tag_name'
+          )
+          TOTAL="${#ALL_TAGS[@]}"
+          echo "现有正式 Release $TOTAL 个，保留最近 $KEEP 个"
+          if [[ "$TOTAL" -le "$KEEP" ]]; then
+            echo "无需清理"
+            exit 0
+          fi
+          # 索引 KEEP 之后（即第 KEEP+1 个及更旧）的才是要删的；刚发布的 $TAG 在索引 0，必被保留
+          STALE=("${ALL_TAGS[@]:$KEEP}")
+          echo "将删除 ${#STALE[@]} 个：${STALE[*]}"
+          for T in "${STALE[@]}"; do
+            if gh release delete "$T" --repo "$GITHUB_REPOSITORY" --yes; then
+              echo "::warning::已删除旧 Release：$T"
+            else
+              echo "::warning::删除 Release 失败（已跳过）：$T"
+              continue
+            fi
+            # 同步删除 tag：Release 被删后 tag 会变成孤儿，必须显式清掉
+            if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$T" --silent 2>/dev/null; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$T" --silent \
+                && echo "::warning::已删除对应 tag：$T" \
+                || echo "::warning::删除 tag 失败（已跳过）：$T"
+            fi
+          done
+          echo "== 清理后剩余 Release =="
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | "\(.tag_name)\(if .draft then " [draft]" else "" end)"' || true

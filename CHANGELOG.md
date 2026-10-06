@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — 历史 Release 清理与凭据资产清除
+
+- **清空历史 Release**：删除全部 11 个历史 Release 及其 11 个 tag，释放约 8.1 GiB Release 资产（单个 Release 含 kernel/rootfs/squashfs/sysupgrade 四个大件，约 660 MiB）。
+- **清除明文凭据资产**：11 个 Release 均附带 `initial-credentials.txt`（内容为 root 与 WebUI admin 的明文出厂口令）。仓库为 public，任何人无需登录即可下载。已逐个删除全部 11 个该资产；`build.yml` 早已不再把该文件放入 Release，本次清除了历史遗留。
+- **构建后自动清理**：新增 `keep_releases` 输入（默认 3，填 0 关闭）。发布成功后按发布时间倒序保留最近 N 个，其余 Release 连同资产与 tag 一并删除。防护：`skip_release` 时跳过、非法输入按不清理处理并告警、跳过 draft、先删 Release 再删 tag、删除动作打 `::warning` 便于审计。
+- **内嵌脚本纳入静态检查**：quality-gate 新增「GitHub Actions 内嵌 run 脚本」ShellCheck 步骤，用 PyYAML 解析出每个 `run:` 块补shebang 后送 shellcheck（`--severity=error -s bash -e SC2296`，SC2296 为 GitHub 表达式误报），填补 workflow 脚本不在 `find -name '*.sh'` 覆盖范围内的检查盲区；检查工具依赖补 `python3-yaml`。
+- 保留出厂默认口令 `password` 不变；清理为不可逆操作，删除前清单已留档。
+
 ### 2026-10-07 — Linux-Router H5000M 桥接 AP 适配
 
 - **识别系统预设热点**：Linux-Router 面板与网络摘要识别 `H5000M-AP-2G/5G`，展示实际 SSID/无线状态并提供停止操作，不再把系统 AP 误判成 Wi-Fi 客户端。
