@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 刷写与构建链安全加固
+
+- **刷写保护**：`scripts/install-emmc.sh` 现在严格校验 H5000M 原厂 GPT 的分区标签、起始扇区及 p4/p5 大小；不匹配时拒绝执行，避免误写其他磁盘。
+- **构建传输安全**：Debian mirror 默认改用 HTTPS，并拒绝 HTTP mirror；CI 下载 `debootstrap.deb` 后按 Debian 元数据中的 SHA256 校验，避免未验证的构建依赖进入固件。
+- **移除远程脚本执行**：CI 不再通过 `curl | sh` 安装 Rust，改为使用系统软件包提供的 `cargo`/`rustc`。
+- **构建参数安全**：`build/build-rootfs.sh` 改用安全的参数传递方式，避免 hostname、密码等参数通过 Shell 字符串插值造成命令注入或构建失败；hostname 同时增加格式校验。
+- **默认凭据保持不变**：按用户要求，root/WebUI 默认密码及 Wi-Fi 默认密码未修改；刷机后仍应立即改密。
+
 ### 2026-10-06 — 首次启动自动配置审计 + 修复 grow-rootfs/LED 未 enable
 
 **审计范围**：`linux-router/vendor`（面板 + install.sh + systemd units）、`rootfs-overlay`
