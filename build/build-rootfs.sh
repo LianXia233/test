@@ -440,6 +440,18 @@ MOTD
   systemctl enable nftables.service >/dev/null 2>&1 || true
   systemctl enable h5000m-router-init.service >/dev/null 2>&1 || true
   systemctl enable h5000m-fancontrol.service >/dev/null 2>&1 || true
+  # 【为什么这三个必须在此显式 enable】覆盖层只拷贝 .service 文件、不携带
+  # .wants 软链，若不在此处 enable，首次启动 systemd 永远不会拉起它们：
+  #   h5000m-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩满分区
+  #     （~7.2 GiB）。漏 enable 会让 /overlay 持久化空间永久锁死在镜像大小，
+  #     与 make-sd-image.sh / make-sysupgrade-tar.sh 注释描述的行为直接矛盾。
+  #     unit 自带 ConditionPathExists=!/var/lib/h5000m-rootfs-grown，天然只跑一次。
+  #   h5000m-led-boot.service（WantedBy=sysinit.target，早期蓝灯闪烁）与
+  #   h5000m-led.service（WantedBy=multi-user.target，就绪后收尾熄灭）：
+  #     与清单内已验证可行的 h5000m-fancontrol.service（同为 WantedBy=sysinit.target）同构。
+  systemctl enable h5000m-grow-rootfs.service >/dev/null 2>&1 || true
+  systemctl enable h5000m-led-boot.service >/dev/null 2>&1 || true
+  systemctl enable h5000m-led.service >/dev/null 2>&1 || true
   systemctl enable router-panel-agent.service >/dev/null 2>&1 || true
   systemctl enable router-panel.service >/dev/null 2>&1 || true
   systemctl enable at-webserver.service >/dev/null 2>&1 || true

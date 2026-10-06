@@ -4,6 +4,36 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 首次启动自动配置审计 + 修复 grow-rootfs/LED 未 enable
+
+**审计范围**：`linux-router/vendor`（面板 + install.sh + systemd units）、`rootfs-overlay`
+（router-init/grow-rootfs/led/fancontrol、dnsmasq.d、nftables.conf、sysctl、default 配置）、
+`build/build-rootfs.sh`（包列表 + enable 清单 + 凭据预置）、`build/rootfs/packages.list`。
+
+**判定结论**：首次启动自动配置链路整体正确——`h5000m-router-init.service` 作为唯一网络编排
+入口（幂等、每步故障隔离、600s 超时、Before 面板），创建 WAN(eth1 DHCP v4/v6)、br-lan
+(192.168.88.1/24 + ULA)、eth0 入桥、MT7992 双 AP 桥接、reg set CN + rfkill unblock，并拉起
+dnsmasq + nftables；10 个关键服务均 enable；凭据三处预置（auth.json/secret_key、
+/etc/h5000m-initial-credentials、交付 initial-credentials.txt 且随 artifact/release 分发）；
+nftables 单一防火墙后端并 mask networkd/resolved；包列表含 dnsmasq（提供 unit 本体）与
+e2fsprogs（提供 resize2fs）。
+
+**修复 1（实质缺陷）**：`h5000m-grow-rootfs.service` 从未 enable——unit 有
+`WantedBy=multi-user.target`，但覆盖层只拷 .service 不带 .wants 软链，enable 清单漏项且全仓
+无 Wants/Requires 引用，导致首启 `resize2fs` 不执行，p5 引导层不扩满 ~7.2 GiB，`/overlay`
+持久化空间永久锁死在镜像大小，与 `make-sd-image.sh` / `make-sysupgrade-tar.sh` 注释描述的
+行为直接矛盾。已在 enable 清单补 `systemctl enable h5000m-grow-rootfs.service`（unit 自带
+`ConditionPathExists=!/var/lib/h5000m-rootfs-grown`，天然只跑一次）。
+
+**修复 2**：`h5000m-led-boot.service`（sysinit.target）与 `h5000m-led.service`
+（multi-user.target）同样漏 enable，状态灯不会按设计工作。已补入 enable 清单，与清单内
+已验证可行的 `h5000m-fancontrol.service`（同为 WantedBy=sysinit.target）同构。
+
+**已知风险（用户决定保持现状，仅记录）**：`build-rootfs.sh` 默认凭据为
+`ADMIN_PASSWORD=password` / `ROOT_PASSWORD=password`，CI 未传 `--admin-password` /
+`--root-password`，故固件 root 与 WebUI admin 初始密码均为 `password`。用户明确选择保持，
+刷机后需自行立即改密。AP 默认 SSID `OWRT` / 密码 `12345678`（CN 域，2.4G 与 5G 同名）。
+
 ### 2026-10-06 — config 片段健壮性：修复 RFKILL tristate 陷阱 + 清理无效行
 
 - **RFKILL tristate 陷阱**：上游 `CFG80211 depends on "RFKILL || !RFKILL"`，tristate 逻辑下
