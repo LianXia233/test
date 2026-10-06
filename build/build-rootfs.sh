@@ -225,6 +225,24 @@ chroot "$ROOTFS_DIR" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-ge
 log "第 6 步：应用 rootfs-overlay 覆盖层"
 rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r "$OVERLAY_DIR/" "$ROOTFS_DIR/"
 
+# 固件下载在构建树中，不会随 overlay 自动进入 Debian rootfs。
+# MT7992 与 MT7987 内置 2.5G PHY 都在运行时从 /usr/lib/firmware 加载。
+log "  安装 MT7992 / MT7987 固件到 Debian rootfs"
+install -d -m 0755 "$ROOTFS_DIR/usr/lib/firmware/mediatek"
+cp -a "$FIRMWARE_DIR/mediatek/." "$ROOTFS_DIR/usr/lib/firmware/mediatek/"
+for firmware in \
+  mt7996/mt7992_dsp_23.bin \
+  mt7996/mt7992_eeprom_23.bin \
+  mt7996/mt7992_eeprom_23_2i5i.bin \
+  mt7996/mt7992_rom_patch_23.bin \
+  mt7996/mt7992_wa_23.bin \
+  mt7996/mt7992_wm_23.bin \
+  mt7987/i2p5ge-phy-DSPBitTb.bin \
+  mt7987/i2p5ge-phy-pmb.bin; do
+  [[ -s "$ROOTFS_DIR/usr/lib/firmware/mediatek/$firmware" ]] || \
+    die "固件未进入 rootfs 或为空：/usr/lib/firmware/mediatek/$firmware"
+done
+
 # 【为什么要「扫描」而不是「逐个列举」——h5000m-led.sh 曾因漏列变成不可执行】
 # rsync 的 --chmod=Fu=rw,Fg=r,Fo=r 会把覆盖层里每个文件强制成 644（剥掉 x 位），
 # 而 git 对 rootfs-overlay 记录的 mode 也全是 100644。原先依赖硬编码白名单逐条
@@ -312,6 +330,8 @@ rsync -a --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r \
 # WAN/5G 上行侧由 nftables input policy drop 拦截，见 rootfs-overlay/etc/nftables.conf）
 install -m 0644 "$MT5700_DIR/debian/config.json"        "$ROOTFS_DIR/etc/mt5700/config.json"
 install -m 0755 "$MT5700_DIR/debian/on-uplink.sh"       "$ROOTFS_DIR/etc/mt5700/on-uplink.sh"
+# H5000M 由 NetworkManager 独占管理 eth2；避免插件沙箱内另起 DHCP 客户端抢 lease。
+install -m 0755 "$OVERLAY_DIR/etc/mt5700/on-uplink.sh" "$ROOTFS_DIR/etc/mt5700/on-uplink.sh"
 # systemd 单元（SupplementaryGroups=dialout 串口权限 + ProtectSystem=strict 安全基线）
 install -m 0644 "$MT5700_DIR/debian/at-webserver.service" "$ROOTFS_DIR/etc/systemd/system/at-webserver.service"
 

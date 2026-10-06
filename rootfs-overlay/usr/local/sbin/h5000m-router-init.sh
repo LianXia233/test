@@ -3,11 +3,11 @@
 #
 # Hiveton H5000M — 首次启动路由器初始化（幂等，可重复执行）
 #
-# 职责（唯一网络编排入口，由 h5000m-router-init.service 在开机时执行）：
+# 职责（首启基础网络编排，由 h5000m-router-init.service 在开机时执行）：
 #   1. 等待物理接口出现
 #   2. 创建 NetworkManager 连接：WAN(eth1)/5G-WAN(eth2) / LAN(eth0) / br-lan / Wi-Fi AP
 #   3. 设置 regulatory domain 与 rfkill
-#   4. 准备 dnsmasq 上游 DNS 文件并启动 dnsmasq / nftables
+#   4. 准备 dnsmasq 上游 DNS 文件并装载 nftables（dnsmasq 由 systemd 在本服务完成后启动）
 #
 # 故障隔离：每一步失败仅记录日志并继续，绝不阻塞后续步骤。
 # 例如：WAN 无网络不影响 LAN/DHCP；Wi-Fi 失败不影响有线；WebUI 独立于本脚本运行。
@@ -69,17 +69,13 @@ if ! nm_conn_exists "WAN"; then
   fi
 fi
 
-# 实机 OpenWrt 当前 MT5700M uplink 为 eth2（DHCP）；确保迁移后仍有可用的 5G 出口。
-# 较高路由 metric 使 eth1 有线 WAN 优先，eth2 在其不可用时仍可接管默认路由。
+# 实机 OpenWrt 当前 MT5700M uplink 为 eth2（DHCP）。NetworkManager 可先保存
+# 绑定 eth2 的 profile；USB 网卡稍后枚举出来时会自动连接，不在启动时抢时间窗口。
 if ! nm_conn_exists "WAN-5G"; then
-  if wait_iface "eth2" 5; then
-    nmcli connection add type ethernet con-name "WAN-5G" ifname "eth2" \
-      ipv4.method auto ipv4.route-metric 200 ipv6.method auto ipv6.route-metric 200 \
-      connection.autoconnect yes connection.autoconnect-priority 90 \
-      || warn "创建 WAN-5G 连接失败"
-  else
-    log "eth2 未出现，跳过 5G WAN 连接（有线 WAN/LAN 不受影响）"
-  fi
+  nmcli connection add type ethernet con-name "WAN-5G" ifname "eth2" \
+    ipv4.method auto ipv4.route-metric 200 ipv6.method auto ipv6.route-metric 200 \
+    connection.autoconnect yes connection.autoconnect-priority 90 \
+    || warn "创建 WAN-5G 连接失败（有线 WAN/LAN 不受影响）"
 fi
 
 # br-lan：LAN 网桥，静态 192.168.88.1/24 + IPv6 ULA（dnsmasq RA 通告）
@@ -108,18 +104,16 @@ fi
 add_ap() {
   local con="$1" iface="$2" ssid="$3" band="$4"
   if ! nm_conn_exists "$con"; then
-    if wait_iface "$iface" 45; then
-      nmcli connection add type wifi con-name "$con" ifname "$iface" ssid "$ssid" \
-        master "$LAN_BRIDGE" slave-type bridge \
-        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$AP_PASSWORD" \
-        802-11-wireless.mode ap 802-11-wireless.band "$band" \
-        802-11-wireless.channel 0 802-11-wireless.powersave 2 \
-        ipv4.method disabled ipv6.method disabled \
-        connection.autoconnect yes connection.autoconnect-priority 90 \
-        || warn "创建 Wi-Fi AP 连接 $con 失败"
-    else
-      warn "接口 $iface 未出现，跳过 AP $con（不影响有线 LAN）"
-    fi
+    # 先保存绑定接口名的 profile；Wi-Fi 驱动/接口晚到时由 NM 自动激活，
+    # 不在可选无线设备探测期间阻塞有线 LAN、DHCP 或面板启动。
+    nmcli connection add type wifi con-name "$con" ifname "$iface" ssid "$ssid" \
+      master "$LAN_BRIDGE" slave-type bridge \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$AP_PASSWORD" \
+      802-11-wireless.mode ap 802-11-wireless.band "$band" \
+      802-11-wireless.channel 0 802-11-wireless.powersave 2 \
+      ipv4.method disabled ipv6.method disabled \
+      connection.autoconnect yes connection.autoconnect-priority 90 \
+      || warn "创建 Wi-Fi AP 连接 $con 失败"
   fi
 }
 add_ap "H5000M-AP-2G" "$AP_2G_IFACE" "$AP_SSID_2G" "bg"
@@ -135,20 +129,21 @@ fi
 
 # ---- 4. 应用连接并启动 br-lan（先 bridge 后 AP，逐个尝试）----
 nmcli general reload 2>/dev/null
-nmcli connection up "$LAN_BRIDGE" >/dev/null 2>&1 || warn "启动 $LAN_BRIDGE 失败"
-nmcli connection up "WAN" >/dev/null 2>&1 || warn "启动 WAN 失败（LAN 不受影响）"
-nmcli connection up "WAN-5G" >/dev/null 2>&1 || log "WAN-5G 当前不可用（LAN/WAN 不受影响）"
+nmcli --wait 10 connection up "$LAN_BRIDGE" >/dev/null 2>&1 || warn "启动 $LAN_BRIDGE 失败"
+nmcli --wait 10 connection up "WAN" >/dev/null 2>&1 || warn "启动 WAN 失败（LAN 不受影响）"
+# WAN-5G 与 AP 均设为 autoconnect：接口可以晚于本 oneshot 服务出现。
 for con in "H5000M-AP-2G" "H5000M-AP-5G"; do
-  nmcli connection up "$con" >/dev/null 2>&1 || warn "启动 $con 失败（不影响有线 LAN）"
+  nmcli --wait 10 connection up "$con" >/dev/null 2>&1 || log "$con 当前不可用（有线 LAN 不受影响）"
 done
 
-# ---- 5. dnsmasq 上游 DNS 文件（兜底），并确保 DHCP/DNS/防火墙运行 ----
+# ---- 5. 写 dnsmasq 上游 DNS 兜底文件，并装载防火墙 ----
 mkdir -p /run/h5000m
 {
   for ns in $FALLBACK_DNS; do printf 'nameserver %s\n' "$ns"; done
 } > /run/h5000m/upstream-resolv.conf
 
-systemctl restart dnsmasq >/dev/null 2>&1 || warn "dnsmasq 重启失败"
+# dnsmasq.service 通过 After/Requires 排在本 oneshot 之后，由 systemd 在
+# 本服务结束后启动。这里不能同步 restart，否则会等待本服务自身完成。
 systemctl restart nftables >/dev/null 2>&1 || warn "nftables 重启失败"
 
 # ---- 6. 校验并汇总 ----

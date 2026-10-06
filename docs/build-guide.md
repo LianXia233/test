@@ -107,6 +107,7 @@ sudo bash build/build-rootfs.sh \
 4. 配置 Debian 13 软件源（`deb.debian.org` stable），`apt-get update`；
 5. 安装 `build/rootfs/packages.list` 中全部软件包；
 6. 应用 `rootfs-overlay/` 覆盖层（网络配置、Linux-Router 集成、systemd 服务、`/etc/fstab` 使用 `PARTLABEL=rootfs`）；
+   并把下载的 MT7992 / MT7987 PHY 固件安装到 Debian firmware 路径，校验 8 个文件非空；
 7. 集成 Linux-Router 到 `/opt/linux-router`，预初始化运行账号/数据目录/初始密码；
 8. 安装内核产物到 `/boot`、模块到 `/lib/modules`；
 9. 配置 systemd 服务 enable、SSH、locale、首次登录凭据；
@@ -285,7 +286,8 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware
 - MT7992：linux-firmware `mediatek/mt7996/mt7992_*_23.bin`（含 dsp/eeprom/rom_patch/wa/wm）
 - MT7987 2p5g PHY：linux-firmware `mediatek/mt7987/i2p5ge-phy-*.bin`
 
-该脚本使用 Python 标准库（urllib），跨平台（Windows/macOS/Linux 均可运行）。
+该脚本使用 Python 标准库（urllib），跨平台（Windows/macOS/Linux 均可运行）。RootFS 构建流程会自动调用它，
+随后将 6 个 MT7992 文件和 2 个 MT7987 PHY 文件安装至 RootFS 并检查存在且非空；此处手动运行仅用于离线预取/刷新缓存。
 
 ## 6. 验证清单（构建后）
 
@@ -295,6 +297,6 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware
 - [ ] `rootfs.squashfs` 首 4 字节为 `hsqs`，`unsquashfs -s` 显示 Compression zstd / Block 262144
 - [ ] `H5000M-debian13-rootfs.bin` 可 `e2fsck -fn` 通过；debugfs 确认含
       `/sbin/init`、`/usr/bin/busybox`、`/squashfs/rootfs.squashfs`、`/overlay/{upper,work,merged}`
-- [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 与 `mt7987/` 固件齐全
+- [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 的 6 个 MT7992 文件与 `mt7987/` 的 2 个 PHY 文件齐全且非空（构建脚本会强制检查）
 - [ ] rootfs 内 Linux-Router 服务已 enable；`/usr/local/sbin/h5000m-grow-rootfs` 存在
 - [ ] `H5000M-debian13-sysupgrade.bin` 体积 ≤ 600 MiB（当前 ≈164 MiB）

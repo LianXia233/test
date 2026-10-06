@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — 修复 Debian 首启固件与服务编排遗漏
+
+- **固件进入 rootfs**：将已下载的 MT7992 Wi-Fi 与 MT7987 2.5G PHY 固件安装到 `/usr/lib/firmware/mediatek`，并在构建阶段逐项检查文件存在且非空。
+- **消除启动等待闭环**：不再从 `h5000m-router-init` 同步重启被 systemd 排在该服务之后的 dnsmasq；由 systemd 在网络初始化结束后启动 dnsmasq。NetworkManager 激活命令设有限等待，Wi-Fi profile 改为接口晚到后自动连接。
+- **修复 USB 5G 接口竞态**：启动时始终创建绑定 `eth2` 的 DHCP profile，交给 NetworkManager 在 USB 网卡出现时自动激活；MT5700 拨号 hook 改为请求 NetworkManager 接管，避免启动第二个 DHCP 客户端。
+- **消除 LED 服务排序环**：将收尾服务改为排在 `multi-user.target` 之前。
+- **按实现重写文档**：同步 README、架构、首启、构建、硬件与排障说明；明确首启 AP 使用 NetworkManager/wpa_supplicant、USB WAN 晚到行为和 dnsmasq systemd 顺序，并将 MT7992 的 Debian 实机状态标为待验收。
+- 保持实机配置和用户指定的默认密码不变。
+
 ### 2026-10-07 — 实机 H5000M Debian 迁移适配
 
 - **分区布局校正**：依据实机 GPT 将安装器校验的 p1–p5 起始/结束扇区改为实际值，避免合法设备被错误拒绝；分区方案文档同步记录约 14.6 GiB eMMC、p5 约 7.24 GiB、尾部未分配空间及备份 GPT 异常，保持分区表不变。
@@ -33,6 +42,11 @@ dnsmasq + nftables；10 个关键服务均 enable；凭据三处预置（auth.js
 /etc/h5000m-initial-credentials、交付 initial-credentials.txt 且随 artifact/release 分发）；
 nftables 单一防火墙后端并 mask networkd/resolved；包列表含 dnsmasq（提供 unit 本体）与
 e2fsprogs（提供 resize2fs）。
+
+**后续复审修正（2026-10-07）**：上面的审计遗漏了固件未从下载缓存安装进 rootfs、router-init 同步重启
+受其排序约束的 dnsmasq、USB/Wi-Fi 接口晚到以及 LED unit 排序环问题；这些已记录在本文件最新条目并修复。
+原审计把 600s 超时与常规执行流程混为一谈；unit 仍保留 600s 总超时上限作为保护，当前初始化不等待
+无线/USB 设备，dnsmasq 则由 systemd 在 oneshot 完成后启动。
 
 **修复 1（实质缺陷）**：`h5000m-grow-rootfs.service` 从未 enable——unit 有
 `WantedBy=multi-user.target`，但覆盖层只拷 .service 不带 .wants 软链，enable 清单漏项且全仓

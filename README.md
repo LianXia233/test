@@ -5,7 +5,7 @@
 - 内核：Linux 6.18.x（含 ImmortalWrt MT7987A 验证补丁 + H5000M DTB）
 - 用户空间：Debian 13 Trixie ARM64（官方 stable，systemd）
 - 系统形态：**只读基础系统（SquashFS）+ OverlayFS 可写持久层**（系统升级只需替换 SquashFS，配置/数据全保留）
-- 网络控制面：Linux-Router（唯一网络控制面，统一编排 NetworkManager / hostapd / dnsmasq / nftables）
+- 网络服务：NetworkManager 管理接口与连接；`h5000m-router-init` 创建首启连接并装配 nftables；dnsmasq 提供 DHCP/DNS/RA；Linux-Router 提供 WebUI 与代理服务。无线 AP 使用 NetworkManager/wpa_supplicant，hostapd 仅为预装备用组件。
 - 验收目标：开机即路由器，`http://192.168.88.1` 管理 WAN / LAN / DHCP / DNS / Wi-Fi / 防火墙 / NAT / 路由
 
 ## 硬件支持
@@ -15,7 +15,7 @@
 | MT7987A SoC（ARM64, Cortex-A53） | ✅ 自定义 6.18 内核 |
 | 双 2.5G Ethernet（RTL8221B + 内置 PHY） | ✅ |
 | eMMC（约 14.6 GiB，含 factory NVMEM Wi-Fi EEPROM） | ✅ |
-| PCIe + MT7992 Wi-Fi（2.4G/5G） | ✅ mt76 |
+| PCIe + MT7992 Wi-Fi（2.4G/5G） | 内核启用 mt76；构建时打包所需固件，Debian 实机运行仍需验收 |
 | USB / UART / GPIO / LED / 按键 | ✅ |
 | PWM 风扇 + 智能温控 | ✅ pwm-fan + h5000m-fancontrol（自动曲线 / 手动 / 故障保护） |
 
@@ -201,15 +201,15 @@ sudo bash scripts/install-emmc.sh \
 
 1. H5000M 由现有 U-Boot 从 **p4 FIT** 直接引导 Debian 13，**BL2 / U-Boot / FIP / u-boot-env /
    factory / GPT / eMMC 硬件配置零改动**，分区表 Start/End/PARTLABEL 与迁移前逐项一致；
-2. 首次启动即完成：p5 引导层组装 OverlayFS（SquashFS 只读根 + upper 持久层）、WAN DHCP、
-   LAN 192.168.88.1/24 DHCP+DNS+NAT、IPv4/IPv6 forwarding、防火墙、MT7992 Wi-Fi AP（2.4G/5G，
-   与 LAN 同网段）、Linux-Router 与 WebUI 全部自动运行；
+2. 首次启动由 systemd 与 `h5000m-router-init` 建立基础连接：eth1 有线 WAN 优先、eth2 USB 5G WAN 备用、
+   eth0/br-lan 的 `192.168.88.1/24` LAN、dnsmasq DHCP/DNS/RA、nftables 转发/NAT；MT7992 AP profile
+   配置为接口出现后自动连接（默认凭据见首次启动指南），风扇自动温控；无线及硬件功能仍需在目标 Debian 镜像上实测；
 3. LAN/Wi-Fi 客户端自动获取 IP/网关/DNS，直接访问 Internet；
 4. `http://192.168.88.1` 可管理 WAN、LAN、DHCP、DNS、Wi-Fi、防火墙、NAT、路由；
-5. 系统中不存在两个组件同时管理同一网络资源（NetworkManager / hostapd / dnsmasq / nftables
-   均由 Linux-Router 统一编排）；
+5. 默认网络组件职责明确：NetworkManager 管理接口，dnsmasq 提供 DHCP/DNS，nftables 提供防火墙；
+   hostapd 不默认启用，避免与 NetworkManager 的 AP profile 冲突；
 6. 故障隔离：WAN 断网、IPv6 失效、Wi-Fi 失败、单网口异常均不影响其他功能；
-   网络服务崩溃由 systemd 自动恢复；
+   agent / WebUI 等服务按各自 unit 的重启策略恢复；
 7. 持久化与可升级：`/etc` `/var` `/opt` 写入经 OverlayFS 落 p5 重启保留；`h5000m-grow-rootfs`
    服务首启在线扩容 p5 至 ~7.2 GiB；sysupgrade 整包 ≤ 600 MiB（当前 ≈164 MiB）；
    在线升级仅替换 SquashFS、配置零丢失、可回退；

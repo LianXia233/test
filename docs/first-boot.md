@@ -88,9 +88,8 @@ sudo bash scripts/install-emmc.sh \
       → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
   → systemd（Debian 13）
   → h5000m-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
-  → NetworkManager（WAN=eth1 DHCP；实机 MT5700M eth2 为备用 DHCP WAN / LAN=eth0 桥接）
-  → h5000m-router-init（创建 br-lan / WAN / 5G-WAN / Wi-Fi 连接，装配 nftables）
-  → dnsmasq（DHCP + DNS + IPv6 RA，192.168.88.1:53）
+  → NetworkManager + h5000m-router-init（创建 eth1 WAN、eth2 备用 WAN、br-lan、eth0 LAN 与 Wi-Fi profiles；装配 nftables）
+  → dnsmasq（After/Requires h5000m-router-init；其 oneshot 完成后启动，提供 DHCP + DNS + IPv6 RA）
   → h5000m-fancontrol（PWM 风扇温控）
   → Linux-Router（router-panel-agent + router-panel WebUI）
   → http://192.168.88.1
@@ -105,7 +104,7 @@ sudo bash scripts/install-emmc.sh \
 | DHCP Server | 192.168.88.100 - 192.168.88.200 |
 | DNS | dnsmasq 192.168.88.1:53（WAN DHCP DNS + 兜底 1.1.1.1/8.8.8.8/223.5.5.5） |
 | NAT / Firewall | nftables 已装配（LAN→WAN masquerade；input 策略 drop） |
-| Wi-Fi | 双频 AP（NM 连接，桥接进 br-lan）：2.4G / 5G 同名 `OWRT`，密码 `12345678` |
+| Wi-Fi | 双频 AP profiles（NetworkManager/wpa_supplicant，桥接进 br-lan）：2.4G / 5G 同名 `OWRT`，密码 `12345678`；接口/驱动晚到时由 autoconnect 重试 |
 | WebUI | http://192.168.88.1 （admin / password，见 /etc/h5000m-initial-credentials） |
 | SSH | 端口 22，root / password（仅局域网访问，WAN 侧不放行；见 /etc/h5000m-initial-credentials） |
 | LED | 参考官方固件：启动早期蓝色状态灯快闪；系统就绪后熄灭（h5000m-led.service 编排） |
@@ -132,6 +131,8 @@ df -h /                      # 根可写容量 ≈ p5 引导层剩余空间（�
 lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
 ip -br addr                 # eth0 / eth1 / br-lan
 systemctl status h5000m-grow-rootfs h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+nmcli connection show
+ip route
 curl -sI http://192.168.88.1
 ```
 

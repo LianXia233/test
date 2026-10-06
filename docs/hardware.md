@@ -92,8 +92,10 @@ mainline 6.18 mt76 已支持 MT7992，此补丁为 EEPROM 缺失时的发射功�
 `build/rootfs/firmware/`，rootfs 构建时安装。**不依赖 Debian 13 firmware-mediatek 包版本**
 （Trixie 冻结版本不含 mt7987 2p5g PHY 固件，mt7992 固件也以仓库最新为准）。
 
-Wi-Fi EEPROM：MT7992 的 EEPROM 从 eMMC `factory` 分区 NVMEM 读取（DTS `nvmem-cells`），
-不需要额外放置 EEPROM 文件；固件中的 `mt7992_eeprom_23.bin` 仅作为无 EEPROM 时的兜底。
+Wi-Fi EEPROM：DTS 将 MT7992 EEPROM 源绑定到 eMMC `factory` 分区 NVMEM（`nvmem-cells`）；
+构建会同时打包上表所列固件。注意：当前实机观测来自 OpenWrt，曾出现 `eeprom load fail, use default bin`
+告警；这不等同于 Debian 镜像已验证 EEPROM 校准正常。首次 Debian 启动后应检查内核日志、接口、AP 与射频状态，
+不得仅凭驱动/固件已编译或打包宣称 Wi-Fi 已在 Debian 实机验收通过。
 
 ## 4. 内核配置要点（defconfig 片段）
 

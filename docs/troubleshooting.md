@@ -49,15 +49,16 @@
 
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| WAN 无 IP | `nmcli device status`；`journalctl -u NetworkManager` | 确认插在**靠近电源**的 2.5G 口（eth1） |
-| WAN 获取到但无默认路由 | `ip route` | 正常应为 `default via <网关> dev eth1`；IPv6 失败不影响 IPv4 |
+| WAN 无 IP | `nmcli device status`；`journalctl -u NetworkManager` | 有线优先口为靠近电源的 eth1；MT5700M USB 上联为 eth2（profile `WAN-5G`） |
+| WAN 获取到但无默认路由 | `ip route`；`nmcli connection show --active` | eth1 route metric 100 优先，eth2 metric 200 备用；检查对应 profile、链路及 DHCP |
+| MT5700M 已插入但 eth2 未连接 | `ip link show eth2`；`nmcli -f NAME,DEVICE connection show --active`；`journalctl -u NetworkManager` | 确认网卡是 USB 设备、存在 `WAN-5G` profile 且 autoconnect；可重试 `nmcli --wait 0 connection up id WAN-5G ifname eth2`，不要另启动 dhclient/udhcpc |
 | WAN 反复 up/down | PHY 固件缺失 | 确认 `/usr/lib/firmware/mediatek/mt7987/i2p5ge-phy-*.bin` 存在 |
 
 ## 6. LAN / DHCP / DNS
 
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| LAN 无 192.168.88.1 | `ip -br addr show br-lan` | `systemctl restart linux-router-netbringup` |
+| LAN 无 192.168.88.1 | `ip -br addr show br-lan`；`journalctl -u h5000m-router-init` | `systemctl restart h5000m-router-init.service`；再检查 `nmcli connection show br-lan` 与 `LAN` |
 | 客户端无 IP | `systemctl status dnsmasq`；`journalctl -u dnsmasq` | 确认仅一个 dnsmasq 实例（`pgrep -a dnsmasq`） |
 | DNS 不通 | `dig @192.168.88.1 example.com` | dnsmasq 上游：WAN DNS 或 8.8.8.8 兜底；检查 53 端口占用（`ss -lunp \| grep :53`），确保 systemd-resolved 已禁用 |
 | LAN 无法上网 | `nft list ruleset` | 确认 masquerade 规则存在；`sysctl net.ipv4.ip_forward` = 1 |
@@ -66,11 +67,11 @@
 
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| 无 wlan 接口 | `lspci`；`dmesg \| grep -i mt7992` | PCIe 复位 GPIO36；固件是否加载（`dmesg` 看 firmware 路径） |
-| 固件加载失败 | `ls /usr/lib/firmware/mediatek/mt7996/` | 重跑 `scripts/fetch-firmware.py` 并重建 rootfs |
-| AP 起不来 | `systemctl status hostapd*`；`journalctl -u hostapd*` | 检查 hostapd 配置（信道/带宽/国家码）；`iw reg get` |
-| 客户端连不上 | `iw dev <iface> station dump` | 检查 WPA2/WPA3 配置与密码；确认射频未锁定（`rfkill list`） |
-| 无线带外（5G DFS） | 国家码/信道 | 通过 WebUI 选择合法信道；配置已默认使用无 DFS 信道 |
+| 无 wlan 接口 | `lspci -nnk`；`dmesg -T \| grep -Ei 'mt799|firmware|eeprom|pcie'` | 检查 PCIe/mt76 驱动绑定及固件加载；再检查 `rfkill list`。OpenWrt 上的硬件观测不代表 Debian 已验收 |
+| 固件加载失败 | `find /usr/lib/firmware/mediatek -type f -size 0`；`dmesg -T \| grep -i firmware` | 确认 MT7992 6 个文件及 MT7987 PHY 2 个文件均随 rootfs 打包；重新构建 RootFS，不是在设备上运行仓库的下载脚本 |
+| AP 未启动 | `nmcli connection show H5000M-AP-2G`；`nmcli connection show H5000M-AP-5G`；`journalctl -u NetworkManager` | 默认 AP 由 NetworkManager/wpa_supplicant 提供，不是 hostapd；检查 `wlan0`/`wlan1` 是否出现、profile 是否 autoconnect、`iw reg get` 及内核日志 |
+| 客户端连不上 | `iw dev`；`iw dev <iface> station dump`；`rfkill list` | 对照 `/etc/default/h5000m-router` 的 SSID/密码与 AP profile；确认射频未软/硬阻断，并查看 NetworkManager 日志 |
+| Wi-Fi EEPROM/校准告警 | `dmesg -T \| grep -Ei 'eeprom|calibration|mt799'` | 实机 OpenWrt 曾出现 `eeprom load fail, use default bin`；需在目标 Debian 上核查 factory NVMEM 与校准，不要把默认 bin 工作模式当成校准验收通过 |
 
 ## 8. WebUI / Linux-Router
 
@@ -122,7 +123,7 @@ sudo bash scripts/install-emmc.sh \
 
 - overlay 是否正常组装：`findmnt /` 应显示 overlay（否则见 §4 只读救援模式）
 - `/var/lib/linux-router/network.json` 是否存在
-- NetworkManager `nmcli connection show` 中 `DebianRouterHotspot` 与 WAN/LAN 连接是否 autoconnect
+- NetworkManager `nmcli connection show` 中 `H5000M-AP-2G`、`H5000M-AP-5G`、`WAN`、`WAN-5G`、`LAN` 与 `br-lan` profiles 是否存在并按预期 autoconnect
 
 ## 12. 云编译（GitHub Actions）
 

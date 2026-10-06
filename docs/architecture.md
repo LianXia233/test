@@ -16,11 +16,11 @@ p5 引导层 ext4（root=PARTLABEL=rootfs）：/sbin/init（busybox）
   ↓
 Debian 13 (Trixie) ARM64 RootFS（systemd，根 = OverlayFS merged）
   ↓
-Linux-Router（唯一网络控制面 / 路由编排层）
-  ├── NetworkManager（WAN/LAN 网口基础管理，受 Linux-Router 编排）
-  ├── hostapd（MT7992 Wi-Fi AP 底层）
-  ├── dnsmasq（DHCP Server + DNS Forwarder）
-  └── nftables（NAT / 防火墙唯一后端）
+基础网络初始化（h5000m-router-init.service）
+  ├── NetworkManager（管理网口、WAN/LAN bridge 与 Wi-Fi AP profiles）
+  ├── dnsmasq（DHCP Server + DNS Forwarder + IPv6 RA，由 systemd 后续启动）
+  └── nftables（NAT / 防火墙）
+Linux-Router（router-panel + agent，提供 WebUI 与网络管理接口）
   ↓
 WebUI http://192.168.88.1
 ```
@@ -118,24 +118,23 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 
 | 功能 | 唯一控制者 | 底层实现 |
 | --- | --- | --- |
-| WAN/LAN 角色 | Linux-Router | NetworkManager / iproute2 |
-| 网口 | Linux-Router | NetworkManager / iproute2 |
-| Bridge | Linux-Router | Linux bridge |
-| Wi-Fi AP | Linux-Router | NetworkManager/wpa_supplicant（hostapd 预装备用） |
+| 首启默认 WAN/LAN/Bridge | h5000m-router-init | NetworkManager / Linux bridge |
+| WebUI 发起的网络变更 | Linux-Router agent | NetworkManager / nftables / dnsmasq |
+| Wi-Fi AP | 初始化脚本创建默认 profile；NetworkManager 管理 | wpa_supplicant AP 模式（hostapd 预装但默认不启用） |
 | Wi-Fi 驱动 | Linux Kernel | mt76 |
-| DHCP | Linux-Router | dnsmasq |
-| DNS | Linux-Router | dnsmasq（:53） |
-| NAT | Linux-Router | nftables |
-| Firewall | Linux-Router | nftables |
-| IPv4/IPv6 forwarding | Linux-Router | 内核 sysctl |
-| 路由表 | Linux-Router | iproute2 / 内核 |
+| DHCP | dnsmasq | dnsmasq |
+| DNS | dnsmasq | dnsmasq（:53） |
+| NAT / Firewall | nftables 配置；WebUI agent 提供管理入口 | nftables |
+| IPv4/IPv6 forwarding | sysctl 配置 | 内核 |
+| 路由表 | NetworkManager / Linux-Router agent | iproute2 / 内核 |
 | 服务生命周期 | systemd | systemd unit |
 | WebUI | Linux-Router | Gunicorn + Flask |
 | 配置持久化 | Linux-Router | /var/lib/linux-router |
 
-### 4.2 明确的禁止项
+### 4.2 组件边界
 
-- ❌ NetworkManager 自行创建热点（Linux-Router 创建 `DebianRouterHotspot` NM 连接时也禁用自己的独立 DHCP，改用 dnsmasq）
+- 默认 AP 使用 `H5000M-AP-2G` / `H5000M-AP-5G` NetworkManager profiles，并桥接至 `br-lan`；不要同时启用 hostapd 管理相同无线接口。
+- Linux-Router 中 `DebianRouterHotspot` 是另一种可选热点功能/profile，不是系统首启 AP 的名称；启用前应确认接口/PHY 能力和与默认 AP 的并发关系。
 - ❌ systemd-networkd / dhcpcd 管理任何接口（Debian 安装阶段即禁用）
 - ❌ systemd-resolved 占用 :53（禁用，DNS 统一交给 dnsmasq）
 - ❌ firewalld / ufw（不安装，nftables 为唯一防火墙）
@@ -151,9 +150,8 @@ LAN 客户端 ──► 192.168.88.1:53 ──► dnsmasq ──► WAN 上游 D
 
 ```
 Internet
-   │
-   ▼
-WAN（eth1，靠近电源的 2.5G 口，DHCP 自动获取 IPv4/IPv6）
+   ├── WAN eth1（靠近电源的 2.5G 口，DHCP；metric 100，优先）
+   └── WAN-5G eth2（MT5700M USB 网卡，DHCP；metric 200，备用）
    │
 ┌────┴─────┐
 │ Debian 13│
@@ -184,9 +182,9 @@ systemd
  ├── h5000m-grow-rootfs.service（oneshot：首启 findfs + resize2fs 在线扩容 p5 至 ~7.2 GiB，marker 防重复）
  ├── h5000m-fancontrol.service（sysinit.target：PWM 风扇温控，温度曲线/手动/故障保护）
  ├── NetworkManager（WAN/LAN 网口管理）
- ├── h5000m-router-init.service（OneShot：创建 WAN/LAN/br-lan/Wi-Fi 连接，装配 nftables）
+ ├── h5000m-router-init.service（OneShot：创建 WAN/eth2 备用 WAN/LAN/br-lan/Wi-Fi profiles，装配 nftables）
  │    └─ 不阻塞：每步失败仅告警继续，绝不阻止后续步骤
- ├── dnsmasq.service（Requires=h5000m-router-init：等待 br-lan 建立；DHCP + DNS + IPv6 RA）
+ ├── dnsmasq.service（After/Requires=h5000m-router-init：其完成后启动；DHCP + DNS + IPv6 RA）
  ├── router-panel-agent.service（Linux-Router 代理，root 权限执行网络操作）
  ├── router-panel.service（WebUI，Gunicorn :80；Requires=router-panel-agent）
  └── ssh / systemd-timesyncd
@@ -202,16 +200,19 @@ systemd
 - **Wi-Fi 失败不阻塞有线**：Wi-Fi AP 为独立 NM 连接（H5000M-AP-2G/5G），创建或启动失败仅告警。
 - **DHCP 失败不阻塞 WebUI**：dnsmasq 独立服务，WebUI 服务依赖的是 agent，不依赖 dnsmasq。
 - **WebUI 失败不阻塞转发**：内核转发由 sysctl + nftables 生效，与 WebUI 无关。
-- **自动恢复**：所有服务 `Restart=on-failure` + `RestartSec=3`，systemd 自动拉起。
+- **USB WAN 晚到**：`WAN-5G` profile 首启即创建并设为 autoconnect；MT5700 hook 只请求 NetworkManager 激活，不启动第二个 DHCP 客户端。
+- **Wi-Fi 晚到**：先创建 AP profiles；驱动/接口晚于初始化服务出现时，由 NetworkManager autoconnect。
+- **自动恢复**：按各 unit 配置重启策略；oneshot 初始化服务不设置通用 `Restart=on-failure`。
 
 ## 7. 数据面 / 控制面分离
 
 | 层 | 归属 |
 | --- | --- |
-| 控制面 | Linux-Router（WebUI 修改 → agent → 调用 NetworkManager/nftables/dnsmasq/hostapd） |
+| Web 管理面 | Linux-Router（WebUI → agent → 调用网络服务） |
+| 首启编排 | `h5000m-router-init.service`（默认 NetworkManager profiles 与 nftables 规则） |
 | 运行环境 | Debian 13 / systemd |
 | 数据面 | Linux kernel（转发、NAT 由 nftables 注入） |
-| 底层执行组件 | NetworkManager、hostapd、dnsmasq、nftables、iproute2 |
+| 底层执行组件 | NetworkManager、wpa_supplicant、dnsmasq、nftables、iproute2（hostapd 预装备用） |
 
 用户只通过 WebUI 管理网络，不要求手动编辑 `/etc/network/interfaces`、`/etc/NetworkManager/*`、`/etc/dnsmasq.conf`、`/etc/hostapd/*`、`/etc/nftables.conf` 完成日常配置。
 
@@ -221,10 +222,10 @@ systemd
 | --- | --- | --- |
 | WAN 无网络 | LAN 照常 | dnsmasq/NAT/WebUI 不依赖 WAN 可达性 |
 | IPv6 不可用 | IPv4 不受影响 | IPv4/IPv6 分开配置，WAN IPv6 失败不写默认路由 |
-| Wi-Fi 启动失败 | 有线 LAN 正常 | hostapd 独立服务，不阻塞 br-lan |
+| Wi-Fi 启动失败 | 有线 LAN 正常 | AP profile 可晚连接；初始化不等待无线接口，不阻塞 br-lan |
 | 单网口异常 | 另一网口正常 | 两接口独立 PHY/MAC，NetworkManager 分别管理 |
 | DHCP 异常 | WebUI 仍在 | WebUI 依赖 agent，不依赖 dnsmasq |
 | WebUI 异常 | 转发仍工作 | 内核转发 + nftables 已由 bringup 一次性装配 |
-| Linux-Router 崩溃 | 自动恢复 | Restart=on-failure + RestartSec=3 |
+| Linux-Router agent 崩溃 | systemd 自动重启 | agent unit 使用 Restart=always + RestartSec=3；WebUI unit 使用 Restart=on-failure |
 | OverlayFS 组装失败 | 只读救援模式 | /sbin/init 自动降级：SquashFS 根 + tmpfs upper，SSH 可登录修复 |
 | 重启 | 配置恢复 | 写入经 OverlayFS 落 p5 upper 持久保留 + Linux-Router 持久化配置 + NM connection 持久化 |

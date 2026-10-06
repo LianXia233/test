@@ -4,7 +4,7 @@
 Description=Hiveton H5000M LED finalize (done state)
 Documentation=file:/usr/local/sbin/h5000m-led.sh
 After=h5000m-led-boot.service
-After=multi-user.target
+Before=multi-user.target
 
 [Service]
 Type=oneshot
