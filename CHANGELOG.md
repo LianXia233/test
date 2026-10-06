@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — FIT 打包时 fdtput 覆写内嵌 bootargs（补 rw + console，参考 ctr54188/h5000m-debian）
+
+**发现（r31 产物二进制实锤）**：OpenWrt 构建的 DTB 在 `/chosen` 内嵌了 bootargs——
+`earlycon=uart8250,mmio32,0x11000000 \t\t\t    root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf`，
+与实机串口 cmdline 逐字符一致（含制表符）。即：cmdline 来源是 DTB 内嵌值（或与之相同的
+厂商 env），`setenv bootargs` 未必可控，且原值**缺 `rw`**（p5 ro 挂载根源）也**缺
+`console=ttyS0,115200n8`**（earlycon 交接后串口无输出、无法登录排查）。
+
+**修复**（`build/make-sd-image.sh`，与参考仓库同思路）：
+- 新增 `FIT_BOOTARGS` 配置（默认 `console=ttyS0,115200n8 earlycon=... root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf`）；
+- FIT 打包时 `fdtput -t s` 覆写 DTB `/chosen/bootargs`，并 `fdtget` 回读校验，不一致即 die；
+- 工具检测加入 `fdtput`/`fdtget`；
+- init 内 `remount,rw` 兜底保留（防 U-Boot env 覆写 fdt chosen 的未知行为，双保险）。
+
 ### 2026-10-06 — 实机第三阶段修复：cmdline 缺 rw 导致 overlay 组装失败 + 救援循环 OOM panic
 
 **进展**：busybox 修复重刷后（上一条目），实机串口确认 init 已正常执行——但 overlay 组装失败，

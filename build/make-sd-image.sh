@@ -79,6 +79,15 @@ MIRROR="http://deb.debian.org/debian"
 # 0x46000000 与 U-Boot 自身区（0x41e00000+）、FIT 暂存区（0x60000000）均无冲突，
 # 且为 2MB 对齐，满足 arm64 Image 装载对齐要求。
 FIT_LOAD_ADDR="0x46000000"
+# 【内嵌 bootargs，2026-10-06】OpenWrt 构建的 DTB 在 /chosen 内嵌了 bootargs
+# （r31 产物实锤：earlycon=... root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf，
+# 无 rw、无 console=ttyS0——实机串口 cmdline 与之逐字符一致）。若不覆写，
+# 内核 cmdline 永远缺 rw（p5 ro 挂载 → init 只能靠 remount 兜底）且缺
+# console=ttyS0（earlycon 交接后串口无输出）。此处打包时用 fdtput 覆写为
+# 自包含、确定性的 cmdline（与参考仓库 ctr54188/h5000m-debian 同思路）。
+# 注意：U-Boot env 的 bootargs 行为未知（可能覆写 fdt chosen），故 init 内
+# remount,rw 兜底仍必须保留（双保险）。
+FIT_BOOTARGS="${FIT_BOOTARGS:-console=ttyS0,115200n8 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf}"
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -123,7 +132,7 @@ SIGN_ARGS=()           # mkimage 附加参数（签名时填充；显式空数�
 
 # ---------------------------------------------------------------- 工具检测
 # mkimage -f 打包 FIT 时会调用外部 dtc 编译 ITS（device-tree-compiler 包）
-for tool in mkimage dtc lzma mkfs.ext4 e2fsck debugfs; do
+for tool in mkimage dtc fdtput fdtget lzma mkfs.ext4 e2fsck debugfs; do
   command -v "$tool" >/dev/null 2>&1 || \
     die "缺少 $tool。请安装：sudo apt-get install u-boot-tools device-tree-compiler xz-utils e2fsprogs"
 done
@@ -195,6 +204,15 @@ cat > "$WORK/h5000m.its" <<EOF
 EOF
 
 cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
+# 覆写 DTB /chosen/bootargs：OpenWrt 原生 DTB 内嵌的 cmdline 缺 rw 与
+# console=ttyS0（见 FIT_BOOTARGS 注释）。覆写后回读校验，失败即终止。
+log "  覆写 /chosen/bootargs（fdtput）..."
+fdtput -t s "$WORK/mt7987a-hiveton-h5000m.dtb" /chosen bootargs "$FIT_BOOTARGS" \
+  || die "fdtput 覆写 bootargs 失败（device-tree-compiler 包）"
+EMBEDDED="$(fdtget -t s "$WORK/mt7987a-hiveton-h5000m.dtb" /chosen bootargs 2>/dev/null || true)"
+[[ "$EMBEDDED" == "$FIT_BOOTARGS" ]] \
+  || die "bootargs 覆写校验失败：期望 [$FIT_BOOTARGS] 实际 [$EMBEDDED]"
+log "  [OK] 内嵌 bootargs：$EMBEDDED"
 log "  mkimage 打包 FIT ..."
 (
   cd "$WORK"
