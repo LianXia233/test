@@ -374,7 +374,7 @@ HOSTNAME="$HOSTNAME" awk '
   mv -f "$ROOTFS_DIR/etc/hosts.new" "$ROOTFS_DIR/etc/hosts"
 
 chroot "$ROOTFS_DIR" /bin/bash -e -s -- \
-  chroot-build "$HOSTNAME" "$TIMEZONE" "$ADMIN_PASSWORD" "$ROOT_PASSWORD" \
+  "$HOSTNAME" "$TIMEZONE" "$ADMIN_PASSWORD" "$ROOT_PASSWORD" \
   "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA" <<'CHROOT_SCRIPT'
   export DEBIAN_FRONTEND=noninteractive
   HOSTNAME="$1"

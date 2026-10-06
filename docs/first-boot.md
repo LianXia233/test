@@ -33,7 +33,7 @@ out/rootfs/initial-credentials.txt
 进入设备（OpenWrt initramfs / Debian live / 已启动的 Debian），先完整备份：
 
 ```bash
-# 整盘备份（8 GiB，最保险）
+# 整盘备份（实机约 14.6 GiB，最保险）
 dd if=/dev/mmcblk0 of=/tmp/emmc-full.img bs=4M conv=fsync status=progress
 
 # 或仅备份关键区域 + 将被覆盖的 p4/p5（更小）
@@ -88,8 +88,8 @@ sudo bash scripts/install-emmc.sh \
       → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
   → systemd（Debian 13）
   → h5000m-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
-  → NetworkManager（WAN=eth1 DHCP / LAN=eth0 桥接）
-  → h5000m-router-init（创建 br-lan / WAN / Wi-Fi 连接，装配 nftables）
+  → NetworkManager（WAN=eth1 DHCP；实机 MT5700M eth2 为备用 DHCP WAN / LAN=eth0 桥接）
+  → h5000m-router-init（创建 br-lan / WAN / 5G-WAN / Wi-Fi 连接，装配 nftables）
   → dnsmasq（DHCP + DNS + IPv6 RA，192.168.88.1:53）
   → h5000m-fancontrol（PWM 风扇温控）
   → Linux-Router（router-panel-agent + router-panel WebUI）
@@ -100,7 +100,7 @@ sudo bash scripts/install-emmc.sh \
 
 | 项目 | 默认值 |
 | --- | --- |
-| WAN | eth1（靠近电源的 2.5G 口），DHCP 自动 IPv4/IPv6 + 默认路由 |
+| WAN | eth1（靠近电源的 2.5G 口），DHCP 自动 IPv4/IPv6 + 优先默认路由；实机 MT5700M eth2 为高 metric 备用 DHCP WAN |
 | LAN | eth0（远离电源的 2.5G 口），192.168.88.1/24，IPv6 ULA fd88:88::1/64（RA 通告） |
 | DHCP Server | 192.168.88.100 - 192.168.88.200 |
 | DNS | dnsmasq 192.168.88.1:53（WAN DHCP DNS + 兜底 1.1.1.1/8.8.8.8/223.5.5.5） |
@@ -111,6 +111,8 @@ sudo bash scripts/install-emmc.sh \
 | LED | 参考官方固件：启动早期蓝色状态灯快闪；系统就绪后熄灭（h5000m-led.service 编排） |
 
 ## 6. 首次登录
+
+> **管理地址变更提醒**：Debian 默认管理地址为 `192.168.88.1`，刻意保持仓库默认值；实机当前 OpenWrt 使用 `192.168.10.1`。迁移后电脑应通过 LAN/Wi-Fi DHCP 自动取得 `192.168.88.x` 地址。若仍沿用旧静态地址，请改为 `192.168.88.0/24` 网段后访问 Debian。
 
 ```bash
 # 串口或 SSH 登录，读取初始凭据（root / WebUI 默认密码均为 password，已写入该文件）

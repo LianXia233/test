@@ -8,20 +8,20 @@
 
 ## 1. 当前 OpenWrt 完整分区表
 
-设备为 **8 GiB eMMC**，用户可用区约 7.28 GiB（以实际 `sgdisk -p /dev/mmcblk0` 为准）。
+实机为 **约 14.6 GiB eMMC**（30,535,680 个 512-byte sectors）；分区以设备当前 `sgdisk -p /dev/mmcblk0` 为准。
 以下为当前正在运行的 OpenWrt 布局（GPT）：
 
 | 分区 | PARTLABEL | Start (sector) | End (sector) | 大小 | 当前内容 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| p1 | `u-boot-env` | 2048 | 4095 | 1 MiB | U-Boot 环境变量 | **不可修改** |
-| p2 | `factory` | 4096 | 8191 | 2 MiB | 出厂校准 / Wi-Fi EEPROM（NVMEM） | **不可修改** |
-| p3 | `fip` | 8192 | 16383 | 4 MiB | BL2 + FIP（U-Boot 本体） | **不可修改** |
-| p4 | `kernel` | 16384 | 77823 | 30 MiB | OpenWrt FIT 镜像（`fit.itb`） | **复用**（写入 Debian FIT） |
-| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | OpenWrt SquashFS + overlay | **复用**（改为引导层 ext4：init + busybox + SquashFS + overlay） |
+| p1 | `u-boot-env` | 8192 | 10239 | 1 MiB | U-Boot 环境变量 | **不可修改** |
+| p2 | `factory` | 10240 | 14335 | 2 MiB | 出厂校准 / Wi-Fi EEPROM（NVMEM） | **不可修改** |
+| p3 | `fip` | 14336 | 22527 | 4 MiB | BL2 + FIP（U-Boot 本体） | **不可修改** |
+| p4 | `kernel` | 22528 | 83967 | 30 MiB | OpenWrt FIT 镜像（`fit.itb`） | **复用**（写入 Debian FIT） |
+| p5 | `rootfs` | 83968 | 15268830 | ~7.24 GiB | OpenWrt SquashFS + overlay | **复用**（改为引导层 ext4：init + busybox + SquashFS + overlay） |
 
 > 主 GPT：LBA 0（保护 MBR）/ LBA 1（GPT 头）/ LBA 2–33（分区表）。
 > 备份 GPT：磁盘末尾最后 33 个扇区（LBA-34 … LBA-1）。
-> sector 大小 512 B，1 MiB 对齐（sector 2048 起），`1 sector = 512 B`。
+> sector 大小 512 B；实机 p1 从 sector 8192 开始，`1 sector = 512 B`。主 GPT 可读，但实机备份 GPT 校验失败；不要自动改写或重建 GPT。
 
 ### 1.1 关键证据（来自当前运行环境）
 
@@ -130,15 +130,15 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 
 | 分区 | PARTLABEL | Start (sector) | End (sector) | 大小 | Filesystem | Debian 13 用途 |
 | --- | --- | --- | --- | --- | --- | --- |
-| p1 | `u-boot-env` | 2048 | 4095 | 1 MiB | 裸（U-Boot env） | 原样保留 |
-| p2 | `factory` | 4096 | 8191 | 2 MiB | 裸（校准数据） | 原样保留（Wi-Fi EEPROM） |
-| p3 | `fip` | 8192 | 16383 | 4 MiB | 裸（FIP） | 原样保留（BL2/U-Boot） |
-| p4 | `kernel` | 16384 | 77823 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（H5000M-debian13-kernel.bin） |
-| p5 | `rootfs` | 77824 | ~15269854 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian 引导层所在**（init + busybox + rootfs.squashfs + overlay 持久层） |
+| p1 | `u-boot-env` | 8192 | 10239 | 1 MiB | 裸（U-Boot env） | 原样保留 |
+| p2 | `factory` | 10240 | 14335 | 2 MiB | 裸（校准数据） | 原样保留（Wi-Fi EEPROM） |
+| p3 | `fip` | 14336 | 22527 | 4 MiB | 裸（FIP） | 原样保留（BL2/U-Boot） |
+| p4 | `kernel` | 22528 | 83967 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（H5000M-debian13-kernel.bin） |
+| p5 | `rootfs` | 83968 | 15268830 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian 引导层所在**（init + busybox + rootfs.squashfs + overlay 持久层） |
 
 - **PARTUUID**：保持不变（现有 GPT 中已存在，全部保留；Debian 不依赖 PARTUUID）。
 - **PARTLABEL**：保持 `u-boot-env` / `factory` / `fip` / `kernel` / `rootfs` 不变。
-- **不新增 Data 分区**：p5 已覆盖几乎全部用户区（~7.24 GiB），无需独立数据区；
+- **不新增 Data 分区**：p5 为 ~7.24 GiB；实机磁盘尾部另有约 7.3 GiB 未分配空间，本方案保持其未分配，不自动扩分区或改写 GPT；
   如需大数据存储可后续在 p5 内自建目录或视情况增加分区（本方案不改）。
 
 ---
@@ -270,7 +270,7 @@ sgdisk -p /dev/mmcblk0
 ### 13.1 迁移前（在 OpenWrt 中执行，建议）
 
 ```sh
-# 方式 A：整盘备份（8 GiB，最保险）
+# 方式 A：整盘备份（实机约 14.6 GiB，最保险）
 dd if=/dev/mmcblk0 of=/tmp/h5000m-backup-full.img bs=4M conv=fsync status=progress
 
 # 方式 B：仅备份关键不可变区域 + 将被覆盖的 p4/p5（小且够用）

@@ -139,7 +139,7 @@ mapfile -t PTLINES < <(sgdisk -p "$DEVICE" 2>/dev/null)
 N_PART=0
 declare -A PART_NUM PART_LABEL PART_SIZE PART_START PART_END
 for line in "${PTLINES[@]}"; do
-  # sgdisk -p 输出行形如：   4      16384    77823  30720   kernel
+  # sgdisk -p 输出行形如：   4      22528    83967  61440   kernel
   [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+(.*)$ ]] || continue
   num="${BASH_REMATCH[1]}"; start="${BASH_REMATCH[2]}"; end="${BASH_REMATCH[3]}"
   size="${BASH_REMATCH[4]}"; label="$(echo "${BASH_REMATCH[5]}" | xargs)"
@@ -161,11 +161,11 @@ expect_part() {
     die "p$num 结束扇区应为 $end，实际为 '${PART_END[$num]:-（空）}'。拒绝刷写。"
   fi
 }
-expect_part 1 "u-boot-env" 2048 4095
-expect_part 2 "factory"    4096 8191
-expect_part 3 "fip"         8192 16383
-expect_part 4 "kernel"     16384 77823
-expect_part 5 "rootfs"     77824 ""
+expect_part 1 "u-boot-env" 8192 10239
+expect_part 2 "factory"   10240 14335
+expect_part 3 "fip"       14336 22527
+expect_part 4 "kernel"    22528 83967
+expect_part 5 "rootfs"    83968 ""
 
 # 校验关键分区大小符合预期（p4 kernel 30MiB，p5 rootfs 至少 1GiB）
 P4_SIZE_BYTES=$(( ${PART_SIZE[4]:-0} * 512 ))

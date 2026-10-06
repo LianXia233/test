@@ -14,7 +14,7 @@
 | --- | --- |
 | MT7987A SoC（ARM64, Cortex-A53） | ✅ 自定义 6.18 内核 |
 | 双 2.5G Ethernet（RTL8221B + 内置 PHY） | ✅ |
-| eMMC（8 线，含 factory NVMEM Wi-Fi EEPROM） | ✅ |
+| eMMC（约 14.6 GiB，含 factory NVMEM Wi-Fi EEPROM） | ✅ |
 | PCIe + MT7992 Wi-Fi（2.4G/5G） | ✅ mt76 |
 | USB / UART / GPIO / LED / 按键 | ✅ |
 | PWM 风扇 + 智能温控 | ✅ pwm-fan + h5000m-fancontrol（自动曲线 / 手动 / 故障保护） |
@@ -23,6 +23,9 @@
 
 - **LAN = eth0**（远离电源的 2.5G 口，RTL8221B），`192.168.88.1/24`
 - **WAN = eth1**（靠近电源的 2.5G 口，内置 PHY），DHCP 自动获取
+
+实机当前 MT5700M 5G 上联使用 `eth2`；Debian 启动配置将其作为 DHCP 备用 WAN（metric 高于 `eth1`）。
+Debian LAN 管理地址仍为 `192.168.88.1/24`，与当前 OpenWrt `192.168.10.1` 不同；首次迁移后，若电脑未从新 LAN 获取地址，请手动将电脑切到 `192.168.88.0/24` 再访问 WebUI。
 
 详见 [docs/architecture.md](docs/architecture.md) 与 [docs/hardware.md](docs/hardware.md)。
 

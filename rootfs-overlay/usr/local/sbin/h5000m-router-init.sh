@@ -5,7 +5,7 @@
 #
 # 职责（唯一网络编排入口，由 h5000m-router-init.service 在开机时执行）：
 #   1. 等待物理接口出现
-#   2. 创建 NetworkManager 连接：WAN(eth1, DHCP) / LAN(eth0) / br-lan / Wi-Fi AP(2G/5G)
+#   2. 创建 NetworkManager 连接：WAN(eth1)/5G-WAN(eth2) / LAN(eth0) / br-lan / Wi-Fi AP
 #   3. 设置 regulatory domain 与 rfkill
 #   4. 准备 dnsmasq 上游 DNS 文件并启动 dnsmasq / nftables
 #
@@ -58,14 +58,27 @@ wait_iface() {
 # ---- 2. 创建 NM 连接（幂等：已存在则跳过）----
 nm_conn_exists() { nmcli -t -f NAME connection show | grep -qx "$1"; }
 
-# WAN：eth1，DHCP 自动获取 IPv4/IPv6 与默认路由
+# WAN：eth1，优先有线 DHCP；实机当前由 MT5700M 提供 eth2 DHCP 上联，作备用出口
 if ! nm_conn_exists "WAN"; then
   if wait_iface "$WAN_IFACE"; then
     nmcli connection add type ethernet con-name "WAN" ifname "$WAN_IFACE" \
-      ipv4.method auto ipv6.method auto connection.autoconnect yes \
+      ipv4.method auto ipv4.route-metric 100 ipv6.method auto ipv6.route-metric 100 connection.autoconnect yes \
       connection.autoconnect-priority 100 || warn "创建 WAN 连接失败"
   else
     warn "接口 $WAN_IFACE 未出现，跳过 WAN 连接（LAN 不受影响）"
+  fi
+fi
+
+# 实机 OpenWrt 当前 MT5700M uplink 为 eth2（DHCP）；确保迁移后仍有可用的 5G 出口。
+# 较高路由 metric 使 eth1 有线 WAN 优先，eth2 在其不可用时仍可接管默认路由。
+if ! nm_conn_exists "WAN-5G"; then
+  if wait_iface "eth2" 5; then
+    nmcli connection add type ethernet con-name "WAN-5G" ifname "eth2" \
+      ipv4.method auto ipv4.route-metric 200 ipv6.method auto ipv6.route-metric 200 \
+      connection.autoconnect yes connection.autoconnect-priority 90 \
+      || warn "创建 WAN-5G 连接失败"
+  else
+    log "eth2 未出现，跳过 5G WAN 连接（有线 WAN/LAN 不受影响）"
   fi
 fi
 
@@ -124,6 +137,7 @@ fi
 nmcli general reload 2>/dev/null
 nmcli connection up "$LAN_BRIDGE" >/dev/null 2>&1 || warn "启动 $LAN_BRIDGE 失败"
 nmcli connection up "WAN" >/dev/null 2>&1 || warn "启动 WAN 失败（LAN 不受影响）"
+nmcli connection up "WAN-5G" >/dev/null 2>&1 || log "WAN-5G 当前不可用（LAN/WAN 不受影响）"
 for con in "H5000M-AP-2G" "H5000M-AP-5G"; do
   nmcli connection up "$con" >/dev/null 2>&1 || warn "启动 $con 失败（不影响有线 LAN）"
 done
