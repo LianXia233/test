@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+### 2026-10-06 — 实机第二阶段修复：busybox 误选 16 字节文本导致 init ENOEXEC panic
+
+**进展**：FIT load/entry 改 0x46000000 后（上一条目），实机串口确认 U-Boot 阶段完全修复——
+`Uncompressing Kernel Image to 46000000` → `Starting kernel ...` → Linux 6.18.54 正常启动 →
+`VFS: Mounted root (ext4 filesystem) readonly on device 179:5`。
+
+**新故障**：`Starting init: /sbin/init exists but couldn't execute it (error -8)`
+（ENOEXEC）→ /etc/init、/bin/init、/bin/sh 依次失败 → `Kernel panic - not syncing:
+No working init found`。
+
+**根因（产物验尸 + 云服务器复现 + CI 日志三重实锤）**：Debian trixie
+`busybox-static_1.37.0-6+b9_arm64.deb` 内有两个同名文件：
+- `usr/bin/busybox`：真身，arm64 静态 ELF 1,975,064 B（魔数 7f454c46 / e_machine 0xB7）；
+- `usr/share/initramfs-tools/conf-hooks.d/busybox`：**16 字节文本** `BUSYBOXDIR=/bin`。
+
+`make-sd-image.sh` 用 `find -name busybox` 取第一个命中（遍历顺序不保证），CI 上命中
+后者，把 16 字节文本装进引导层 `/usr/bin/busybox`；`/sbin/init`（busybox 脚本）的
+shebang 指向它 → exec 失败 ENOEXEC → panic。CI 日志自证：`busybox：16 字节（静态 arm64）`。
+
+**修复**（`build/make-sd-image.sh`）：
+- 新增 `bb_is_valid()`：ELF 魔数 `7f454c46` + 体积 ≥512000B；
+- 候选选取改为遍历全部同名文件并逐个校验（`mapfile` + 循环，弃用"第一个命中"）；
+- 缓存命中同样过校验，坏缓存自动删除重下；
+- 装入引导层前对最终 busybox 二进制做终检，失败即 die（带根因说明）。
+
+**验证**：云服务器 193.112.22.19 复现 deb 解包，确认 `usr/bin/busybox`（1.97MiB，AArch64）
+与 conf-hooks.d 文本文件并存；修复后筛选逻辑必选中前者。
+
 ### 2026-10-06 — 实机串口定位「Unable to allocate memory 0x40000000 for loading OS」：FIT load/entry 改 0x46000000
 
 **根因（串口日志 + bootloader 源码双重实锤）**：实机冷启动两次复现同一失败——FIT 哈希校验

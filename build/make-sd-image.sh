@@ -207,6 +207,19 @@ dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd
 
 # ================================================================ 2. 获取 busybox（arm64 静态）
 BB_CACHE_DIR="$OUT_DIR/rootfs/.cache"
+# busybox 有效性校验：必须是足够大的 ELF（arm64 静态真身约 1.9 MiB）。
+# 【根因修复，勿删】Debian trixie busybox-static_1.37.0-6+b9 包内有两个同名文件：
+#   * usr/bin/busybox                                —— 真身（arm64 静态 ELF，~1.9 MiB）
+#   * usr/share/initramfs-tools/conf-hooks.d/busybox —— 16 字节文本（内容 BUSYBOXDIR=/bin）
+# find 不保证遍历顺序，曾把后者当二进制装入引导层 → 实机 /sbin/init（busybox 脚本）
+# 的 shebang 指向无效 busybox → exec 失败 ENOEXEC(error -8) → "No working init
+# found" panic（2026-10-06 实机串口 + CI 日志双重实锤）。禁止取"第一个命中"。
+bb_is_valid() {
+  [[ -f "$1" ]] || return 1
+  [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]] || return 1
+  [[ "$(stat -c %s "$1")" -ge 512000 ]] || return 1
+  return 0
+}
 BUSYBOX_BIN="$WORK/busybox"
 if [[ -n "$BUSYBOX_LOCAL" ]]; then
   [[ -f "$BUSYBOX_LOCAL" ]] || die "找不到 --busybox：$BUSYBOX_LOCAL"
@@ -215,10 +228,11 @@ if [[ -n "$BUSYBOX_LOCAL" ]]; then
 else
   CACHE_DEB="$BB_CACHE_DIR/busybox-static_arm64.deb"
   CACHE_BIN="$BB_CACHE_DIR/busybox"
-  if [[ -f "$CACHE_BIN" ]]; then
+  if bb_is_valid "$CACHE_BIN"; then
     cp -f "$CACHE_BIN" "$BUSYBOX_BIN"
     log "busybox：使用缓存 $CACHE_BIN"
   else
+    rm -f "$CACHE_BIN"   # 缓存可能是坏文件（如 16 字节文本），删掉重下
     log "busybox：从 Debian trixie 下载 busybox-static（arm64 静态，~2 MiB）"
     # SIGPIPE 陷阱（务必保留）：本脚本使用 set -Eeuo pipefail。若 awk 命中目标即 exit，
     # 上游 curl/xz 会在写完前被关闭管道写入端而收到 SIGPIPE，整条流水线返回非 0 并被
@@ -233,14 +247,19 @@ else
     curl -sfL -o "$CACHE_DEB" "$MIRROR/$REL" || die "下载失败：$MIRROR/$REL"
     dpkg-deb -x "$CACHE_DEB" "$WORK/bb-extract"
     # 同理避免 head -1 提前关闭管道（pipefail 下的第二类 SIGPIPE 来源）
+    # 候选筛选必须按「ELF 魔数 + 最小体积」，不能取第一个命中（见上方根因说明）
     BB_CAND=""
-    while IFS= read -r cand; do BB_CAND="$cand"; break; done \
-      < <(find "$WORK/bb-extract" -type f -name busybox)
-    [[ -n "$BB_CAND" ]] || die "busybox-static.deb 内未找到 busybox 二进制"
+    mapfile -t BB_ALL < <(find "$WORK/bb-extract" -type f -name busybox)
+    for cand in "${BB_ALL[@]}"; do
+      if bb_is_valid "$cand"; then BB_CAND="$cand"; break; fi
+    done
+    [[ -n "$BB_CAND" ]] || die "busybox-static.deb 内未找到有效 busybox ELF（需 magic 7f454c46 且 >=512000B；conf-hooks.d/busybox 为 16 字节文本会被排除）"
+    log "busybox：选中 $BB_CAND"
     cp -f "$BB_CAND" "$BUSYBOX_BIN"
     cp -f "$BUSYBOX_BIN" "$CACHE_BIN"   # 缓存供后续构建复用
   fi
 fi
+bb_is_valid "$BUSYBOX_BIN" || die "busybox 校验失败：$BUSYBOX_BIN 不是有效 arm64 ELF（拒绝装入引导层，避免实机 ENOEXEC panic）"
 BB_SIZE=$(stat -c %s "$BUSYBOX_BIN")
 log "  busybox：$BB_SIZE 字节（静态 arm64）"
 
