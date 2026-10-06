@@ -141,7 +141,7 @@ sudo bash build/make-sd-image.sh \
   --kernel-dir /path/to/out/kernel \
   --squashfs /path/to/out/rootfs/rootfs.squashfs \
   --boot-dir /path/to/out/boot \
-  [--extra-mb 24] [--busybox /path/to/busybox] [--mirror http://deb.debian.org/debian]
+  [--extra-mb 24] [--busybox /path/to/busybox] [--mirror https://deb.debian.org/debian]
 ```
 
 输出（对应现有 eMMC 分区，**不创建任何分区表**）：

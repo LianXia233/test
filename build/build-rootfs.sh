@@ -19,7 +19,7 @@
 #     --hostname h5000m-debian \
 #     [--kernel-dir /path/to/out/kernel] \
 #     [--admin-password 初始WebUI密码] [--root-password root密码] \
-#     [--mirror http://deb.debian.org/debian] [--timezone Asia/Shanghai] \
+#     [--mirror https://deb.debian.org/debian] [--timezone Asia/Shanghai] \
 #     [--skip-tar] [--apt-cache-dir /path/to/deb-cache]
 #
 # 构建模式（自动判定）：
@@ -60,7 +60,7 @@ KERNEL_DIR="$OUT_DIR/kernel"
 HOSTNAME="h5000m-debian"
 SUITE="trixie"                       # Debian 13 稳定版（固定，不允许 Testing/Unstable）
 ARCH="arm64"
-MIRROR="http://deb.debian.org/debian"
+MIRROR="https://deb.debian.org/debian"
 TIMEZONE="Asia/Shanghai"
 ADMIN_PASSWORD=""                    # 为空则使用默认密码 password
 ROOT_PASSWORD=""                     # 为空则使用默认密码 password
@@ -106,9 +106,11 @@ mkdir -p "$ROOTFS_DIR" "$BOOT_DIR" "$OUT_DIR/rootfs"
 # 密码兜底：未指定时使用默认密码 password（交付时写入 /etc/h5000m-initial-credentials）
 [[ -n "$ADMIN_PASSWORD" ]] || ADMIN_PASSWORD="password"
 [[ -n "$ROOT_PASSWORD"  ]] || ROOT_PASSWORD="password"
-
 log() { printf '[build-rootfs] %s\n' "$*"; }
 die() { printf '[build-rootfs] ERROR: %s\n' "$*" >&2; exit 1; }
+[[ "$HOSTNAME" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] || \
+  die "hostname 格式无效：仅允许字母、数字、点和连字符"
+[[ "$MIRROR" == https://* ]] || die "Debian mirror 必须使用 HTTPS：$MIRROR"
 
 # ---------------------------------------------------------------- 构建机依赖检查
 # qemu-aarch64-static 只在 foreign（宿主非 arm64）模式下必需。
@@ -191,7 +193,7 @@ cat > "$ROOTFS_DIR/etc/apt/sources.list" <<EOF
 # Debian 13 (Trixie) stable — H5000M 固定使用，禁止混用 Testing/Unstable
 deb $MIRROR $SUITE main contrib non-free-firmware
 deb $MIRROR $SUITE-updates main contrib non-free-firmware
-deb http://security.debian.org/debian-security $SUITE-security main contrib non-free-firmware
+deb https://security.debian.org/debian-security $SUITE-security main contrib non-free-firmware
 EOF
 
 log "第 5 步：apt-get update 并安装软件包"
@@ -365,16 +367,22 @@ fi
 # ---------------------------------------------------------------- 10. chroot 内最终配置
 log "第 10 步：chroot 内最终配置（hostname / locale / 服务 / Linux-Router 预初始化）"
 # 主机会改变 /etc/hosts 中 hostname 行
-sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$HOSTNAME/" "$ROOTFS_DIR/etc/hosts" 2>/dev/null || true
+HOSTNAME="$HOSTNAME" awk '
+  /^127\.0\.1\.1([[:space:]]|$)/ { print "127.0.1.1\t" ENVIRON["HOSTNAME"]; next }
+  { print }
+' "$ROOTFS_DIR/etc/hosts" > "$ROOTFS_DIR/etc/hosts.new" && \
+  mv -f "$ROOTFS_DIR/etc/hosts.new" "$ROOTFS_DIR/etc/hosts"
 
-chroot "$ROOTFS_DIR" /bin/bash -e -c '
+chroot "$ROOTFS_DIR" /bin/bash -e -s -- \
+  chroot-build "$HOSTNAME" "$TIMEZONE" "$ADMIN_PASSWORD" "$ROOT_PASSWORD" \
+  "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA" <<'CHROOT_SCRIPT'
   export DEBIAN_FRONTEND=noninteractive
-  HOSTNAME="'"$HOSTNAME"'"
-  TIMEZONE="'"$TIMEZONE"'"
-  ADMIN_PASSWORD="'"$ADMIN_PASSWORD"'"
-  ROOT_PASSWORD="'"$ROOT_PASSWORD"'"
-  LINUX_ROUTER_DIR="'"$LINUX_ROUTER_DIR"'"
-  LINUX_ROUTER_DATA="'"$LINUX_ROUTER_DATA"'"
+  HOSTNAME="$1"
+  TIMEZONE="$2"
+  ADMIN_PASSWORD="$3"
+  ROOT_PASSWORD="$4"
+  LINUX_ROUTER_DIR="$5"
+  LINUX_ROUTER_DATA="$6"
 
   # hostname
   printf "%s\n" "$HOSTNAME" > /etc/hostname
@@ -461,7 +469,7 @@ MOTD
   systemctl disable systemd-networkd.service systemd-networkd.socket \
     systemd-resolved.service >/dev/null 2>&1 || true
   systemctl mask systemd-networkd.service systemd-resolved.service >/dev/null 2>&1 || true
-'
+CHROOT_SCRIPT
 
 # 清理构建期文件
 rm -f "$ROOTFS_DIR/packages.list"

@@ -148,13 +148,30 @@ for line in "${PTLINES[@]}"; do
   if (( num > N_PART )); then N_PART=$num; fi
 done
 
+# 校验 H5000M 原厂 GPT 布局。只检查存在 p4/p5 不够安全：任何带 5 个分区的
+# 磁盘都可能被误当成目标设备，后续 dd/mkfs 会造成不可逆数据破坏。
 (( N_PART >= 5 )) || die "分区数量不足 5（当前 $N_PART）。拒绝在非 H5000M 原厂布局上刷写。"
+expect_part() {
+  local num="$1" label="$2" start="$3" end="$4"
+  [[ "${PART_LABEL[$num]:-}" == "$label" ]] || \
+    die "p$num PARTLABEL 应为 '$label'，实际为 '${PART_LABEL[$num]:-（空）}'。拒绝刷写。"
+  [[ "${PART_START[$num]:-}" == "$start" ]] || \
+    die "p$num 起始扇区应为 $start，实际为 '${PART_START[$num]:-（空）}'。拒绝刷写。"
+  if [[ -n "$end" && "${PART_END[$num]:-}" != "$end" ]]; then
+    die "p$num 结束扇区应为 $end，实际为 '${PART_END[$num]:-（空）}'。拒绝刷写。"
+  fi
+}
+expect_part 1 "u-boot-env" 2048 4095
+expect_part 2 "factory"    4096 8191
+expect_part 3 "fip"         8192 16383
+expect_part 4 "kernel"     16384 77823
+expect_part 5 "rootfs"     77824 ""
 
-# 校验关键分区存在且大小符合预期（p4 kernel 30MiB 左右，p5 rootfs）
+# 校验关键分区大小符合预期（p4 kernel 30MiB，p5 rootfs 至少 1GiB）
 P4_SIZE_BYTES=$(( ${PART_SIZE[4]:-0} * 512 ))
 P5_SIZE_BYTES=$(( ${PART_SIZE[5]:-0} * 512 ))
-(( P4_SIZE_BYTES > 0 )) || die "缺少 p4（kernel）分区。"
-(( P5_SIZE_BYTES > 0 )) || die "缺少 p5（rootfs）分区。"
+(( P4_SIZE_BYTES == 30 * 1024 * 1024 )) || die "p4 大小不是预期的 30 MiB（实际 $(( P4_SIZE_BYTES / 1024 / 1024 )) MiB）。拒绝刷写。"
+(( P5_SIZE_BYTES >= 1024 * 1024 * 1024 )) || die "p5 小于 1 GiB（实际 $(( P5_SIZE_BYTES / 1024 / 1024 )) MiB）。拒绝刷写。"
 log "p4 kernel 分区大小：$(( P4_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[4]} END=${PART_END[4]}）"
 log "p5 rootfs 分区大小：$(( P5_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[5]} END=${PART_END[5]}）"
 
@@ -165,10 +182,6 @@ FIT_SIZE_BYTES=$(stat -c %s "$KERNEL_FIT")
 LABEL_P4="${PART_LABEL[4]:-}"
 LABEL_P5="${PART_LABEL[5]:-}"
 log "p4 PARTLABEL = '${LABEL_P4:-（空）}'，p5 PARTLABEL = '${LABEL_P5:-（空）}'"
-if [[ "${LABEL_P5,,}" != "rootfs" ]]; then
-  log "警告：p5 的 PARTLABEL 不是 'rootfs'（当前：'${LABEL_P5}'）。"
-  log "     内核通过 root=PARTLABEL=rootfs 定位根分区，请确认 p5 名称正确，否则系统无法启动。"
-fi
 
 # 检查 p4/p5 是否被挂载（全新刷写必须在未挂载状态下进行；在线升级模式 p5 即运行中的 root，跳过检查）
 for pn in 4 5; do

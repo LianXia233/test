@@ -31,7 +31,7 @@
 # 用法：
 #   sudo bash build/make-sd-image.sh --out out \
 #     --kernel-dir out/kernel --squashfs out/rootfs/rootfs.squashfs [--boot-dir out/boot] \
-#     [--extra-mb 24] [--busybox /path/to/busybox] [--mirror http://deb.debian.org/debian]
+#     [--extra-mb 24] [--busybox /path/to/busybox] [--mirror https://deb.debian.org/debian]
 #
 # 平台：仅 Linux。行尾：本文件为 LF。
 set -Eeuo pipefail
@@ -69,7 +69,7 @@ BOOT_DIR="$OUT_DIR/boot"
 # 代价：sysupgrade 由 ~164 MiB 增至 ~270 MiB，仍在设备 /tmp(tmpfs) ≤600 MiB 门槛内。
 EXTRA_MB="128"
 BUSYBOX_LOCAL=""                  # 本地 busybox（arm64 静态）路径；空则从 Debian 下载
-MIRROR="http://deb.debian.org/debian"
+MIRROR="https://deb.debian.org/debian"
 # FIT 内核 load/entry 必须用 0x46000000，不能照抄官方的 0x40000000：
 # 板上 U-Boot（bl-mt798x，mt7987_airpi_h5000m_defconfig）TEXT_BASE=0x41e00000 且
 # POSITION_INDEPENDENT，bootm_load_os 用 lmb_alloc_mem 要求
@@ -109,6 +109,7 @@ done
 
 log() { printf '[make-sd-image] %s\n' "$*"; }
 die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
+[[ "$MIRROR" == https://* ]] || die "Debian mirror 必须使用 HTTPS：$MIRROR"
 
 # 规范化路径为绝对路径（mkimage 在 (cd "$WORK") 子 shell 中展开相对路径会解析错）
 mkdir -p "$OUT_DIR"

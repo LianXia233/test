@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-command -v cargo >/dev/null 2>&1 || die "缺少 cargo（Rust 工具链）。安装：curl https://sh.rustup.rs -sSf | sh -s -- -y"
+command -v cargo >/dev/null 2>&1 || die "缺少 cargo（请通过系统软件包管理器安装 Rust 工具链）"
 command -v git    >/dev/null 2>&1 || die "缺少 git"
 
 HOST_ARCH="$(uname -m)"

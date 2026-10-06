@@ -151,7 +151,7 @@ jobs:
           # squashfs-tools：mksquashfs 生成只读基础系统（zstd/xz）
           sudo apt-get install -y --no-install-recommends \
             debootstrap rsync zstd xz-utils e2fsprogs u-boot-tools \
-            device-tree-compiler squashfs-tools curl patch
+            device-tree-compiler squashfs-tools curl patch cargo rustc
           # 仅 x86 回退路径需要：qemu 用户态模拟（RootFS 第二阶段）+ 交叉工具链（mt5700）
           if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
             echo "宿主非 arm64 → 安装 qemu-user-static + binfmt + 交叉工具链（x86 回退路径）"
@@ -171,11 +171,16 @@ jobs:
             exit 0
           fi
           echo "runner 自带 debootstrap 不含 trixie 脚本，安装 Debian 上游版"
-          FN="$(curl -fsSL http://deb.debian.org/debian/dists/trixie/main/binary-all/Packages.xz \
-                | xz -d \
-                | awk '/^Package: debootstrap$/{f=1} f && /^Filename:/{print $2; exit}')"
-          [[ -n "$FN" ]] || { echo "错误：未解析到 debootstrap 包路径"; exit 1; }
-          curl -fsSL -o /tmp/debootstrap.deb "http://deb.debian.org/debian/$FN"
+          META="$(curl --proto '=https' --tlsv1.2 -fsSL \
+            https://deb.debian.org/debian/dists/trixie/main/binary-all/Packages.xz \
+            | xz -d \
+            | awk 'BEGIN{RS=""; FS="\n"} {pkg=arch=fn=sha=""; for(i=1;i<=NF;i++){if($i=="Package: debootstrap")pkg=1; else if($i=="Architecture: all")arch=1; else if($i ~ /^Filename:/){sub(/^Filename: /,"",$i); fn=$i} else if($i ~ /^SHA256:/){sub(/^SHA256: /,"",$i); sha=$i}} if(pkg&&arch&&fn&&sha){print fn "\t" sha; exit}}')"
+          IFS=$'\t' read -r FN EXPECTED_SHA <<< "$META"
+          [[ -n "$FN" && "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{64}$ ]] || {
+            echo "错误：未解析到 debootstrap 包路径或 SHA256"; exit 1;
+          }
+          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/debootstrap.deb "https://deb.debian.org/debian/$FN"
+          echo "$EXPECTED_SHA  /tmp/debootstrap.deb" | sha256sum -c -
           sudo apt-get install -y --no-install-recommends /tmp/debootstrap.deb
           ls /usr/share/debootstrap/scripts/trixie
 
@@ -254,11 +259,7 @@ jobs:
         # 源码固定 commit 保证可复现（见 build/build-mt5700.sh 头注释）。
         # arm64 runner 上为宿主原生目标，无需 --target 与交叉 linker。
         run: |
-          # 兜底：GitHub 托管 runner 通常预装 rustup/cargo，缺失时经 rustup.rs 安装
-          if ! command -v cargo >/dev/null 2>&1; then
-            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+          command -v cargo >/dev/null 2>&1 || { echo "错误：cargo 未安装"; exit 1; }
           bash build/build-mt5700.sh --out out
           ls -lh out/mt5700 out/mt5700/debian
           cat out/mt5700/PROVENANCE.txt
