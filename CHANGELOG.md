@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — 修复 quality-gate pyflakes 命令缺失（127）
+
+- **根因**：Ubuntu noble（runner 24.04）的 apt 包 `python3-pyflakes` 只提供 `/usr/bin/pyflakes3`，不带 `pyflakes` 入口脚本；CI 步骤调用裸 `pyflakes --version` 报 `command not found`（exit 127），run 37550743057 的「安装检查工具」步骤失败、后续质量门全部跳过。沙箱内验证未暴露该差异，因为 pip 安装的 pyflakes 才带同名入口脚本。
+- **修复**：两处调用统一改为 `python3 -m pyflakes`（版本探测与静态检查步骤），模块名跨发行版固定，不再依赖入口脚本命名。
+- 全仓确认无其他裸 `pyflakes` 调用残留；YAML 校验与 `python3 -m pyflakes` 实测通过。
+- 同步 CHANGELOG。
+
 ### 2026-10-07 — 修复 clean-cache 工作流 403 权限失败
 
 - **根因**：`clean-cache.yml` 未声明 `permissions`，仓库默认工作流权限为只读（contents/packages read），`gh cache delete` 需要的 `actions: write` 不在授权内，实测报 `HTTP 403: Resource not accessible by integration`（run 37549966619）。`build.yml` 的 `cache-cleanup` job 因早已显式声明 `actions: write` 不受影响。

@@ -111,7 +111,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck python3 python3-pip python3-flask python3-pyflakes python3-yaml
           python3 -V
-          pyflakes --version
+          # 注意：Ubuntu noble 的 python3-pyflakes 只提供 /usr/bin/pyflakes3，
+          # 不带 pyflakes 入口脚本（pip 装的才带）。统一走 python3 -m pyflakes，
+          # 模块名跨发行版固定（run 37550743057 实测 command not found 127）。
+          python3 -m pyflakes --version
 
       - name: Shell 语法检查（bash -n）
         run: |
@@ -177,9 +180,11 @@ jobs:
 
       - name: Python 静态检查（pyflakes：未使用导入 / 未定义名）
         # 模块拆分后最容易留下"搬走了但 import 没清"的残留，pyflakes 能一次抓全。
+        # 用 python3 -m pyflakes 而非裸命令：apt 的 python3-pyflakes 在不同发行版
+        # 提供的入口脚本名不一致（noble 只有 pyflakes3），模块调用方式永远一致。
         run: |
           cd linux-router/vendor
-          pyflakes router_panel/*.py tests/*.py app.py agent.py
+          python3 -m pyflakes router_panel/*.py tests/*.py app.py agent.py
           echo "pyflakes 检查通过"
 
       - name: Python 单元测试（Linux-Router）
