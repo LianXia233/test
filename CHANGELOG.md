@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — 修复 clean-cache 工作流 403 权限失败
+
+- **根因**：`clean-cache.yml` 未声明 `permissions`，仓库默认工作流权限为只读（contents/packages read），`gh cache delete` 需要的 `actions: write` 不在授权内，实测报 `HTTP 403: Resource not accessible by integration`（run 37549966619）。`build.yml` 的 `cache-cleanup` job 因早已显式声明 `actions: write` 不受影响。
+- **修复**：job 级显式声明 `permissions: actions: write`（最小授权，仅这一个 job 拿写权限）。
+- **删除逻辑加固**：改为逐条删除（`gh api DELETE .../actions/caches/{id}`），单条失败不中断并继续；`gh cache list` 显式 `--limit 1000`（默认只列 30 条）；全部失败以非零退出让 run 明确红掉；删除后仍输出剩余缓存清单便于核对。`--jq` 输出格式已在本地用真实仓库实测。
+- 同步 CHANGELOG。
+
 ### 2026-10-07 — 历史 Release 清理与凭据资产清除
 
 - **清空历史 Release**：删除全部 11 个历史 Release 及其 11 个 tag，释放约 8.1 GiB Release 资产（单个 Release 含 kernel/rootfs/squashfs/sysupgrade 四个大件，约 660 MiB）。

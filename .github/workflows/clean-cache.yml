@@ -4,6 +4,11 @@ name: 清理 Actions 缓存
 # 用途：排查"缓存污染导致修复未真正生效"，或要求完全从零重头编译时使用。
 # 清完后到 Actions 页面手动 Run workflow "H5000M Debian 13 CI 云编译" 即为无缓存全量构建。
 # 防误触：confirm 输入 clean 才执行删除。
+#
+# 【权限】仓库 Settings → Actions → Workflow permissions 为默认只读时，GITHUB_TOKEN
+# 不带 actions: write 就无法删除缓存，实测报
+# "HTTP 403: Resource not accessible by integration"（run 37549966619）。
+# 故本 job 显式声明 actions: write（删除缓存的 API 属于 Actions 域）。
 
 on:
   workflow_dispatch:
@@ -18,6 +23,8 @@ jobs:
     name: 清理仓库 Actions 缓存
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: write   # gh cache delete 需要 Actions 写权限；未声明时 token 只有仓库默认读权限
     steps:
       - name: 列出现有缓存
         env:
@@ -30,9 +37,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh cache delete --all --repo "$GITHUB_REPOSITORY"
+          set -uo pipefail
+          # 逐条删除而非 --all：单条失败不中断（可能已被并发清理或已过期），且
+          # 删完仍能输出剩余缓存清单；全部失败时以非零退出，让 run 明确红掉。
+          # 注意 gh cache list 默认只列 30 条，必须显式 --limit。
+          FAILED=0
+          while IFS=$'\t' read -r ID _KEY _SIZE; do
+            [[ -n "$ID" ]] || continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$ID" --silent \
+              && echo "  已删除：$_KEY" \
+              || { echo "  跳过（删除失败或已不存在）：$_KEY"; FAILED=$((FAILED + 1)); }
+          done < <(gh cache list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+                     --json id,key,sizeInBytes \
+                     --jq '.[] | "\(.id)\t\(.key)\t\(.sizeInBytes)"')
           echo "== 删除后剩余缓存 =="
           gh cache list --repo "$GITHUB_REPOSITORY" || true
+          [[ "$FAILED" -eq 0 ]] || { echo "共 $FAILED 条删除失败"; exit 1; }
+          echo "缓存清理完成"
 
       - name: 未确认则跳过删除
         if: ${{ inputs.confirm != 'clean' }}
