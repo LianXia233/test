@@ -263,10 +263,22 @@ done
 # 清单先在宿主机侧的 $OVERLAY_DIR 上算出来，rsync 之后再按清单 chmod，
 # 因此不会误改 Debian 包自带文件的权限位。
 OVERLAY_SCRIPT_LIST="$(mktemp)"
+# 【坑】循环体里 `head | grep -q && printf` 看似与 if 等价，但 set -e 语义完全不同：
+# while 循环的退出码 = 循环体最后一次执行的状态。当 find 枚举的**最后一个**文件
+# 恰好无 shebang 时，`grep -q && printf` 整条返回 1（grep 失败），循环返回 1，
+# pipefail 让子 shell 静默退出 1，主脚本（set -Eeuo pipefail）跟着无消息退出——
+# CI run 37551055700 即此因：runner 的文件枚举序把一个普通配置文件排在最后，
+# 构建 46ms 内静默失败且无任何错误输出。是否炸取决于文件枚举顺序，属不确定性行为。
+# 修复：把判定搬进 if 语境（if 条件失败不影响循环退出码），并加结果兜底。
 ( cd "$OVERLAY_DIR" && find . -type f -print0 2>/dev/null |
   while IFS= read -r -d '' f; do
-    head -c 2 "$f" 2>/dev/null | grep -q '#!' && printf '%s\n' "$f"
+    if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+      printf '%s\n' "$f"
+    fi
   done ) > "$OVERLAY_SCRIPT_LIST"
+# 兜底：扫描结果为空 = 覆盖层异常（任何覆盖层都至少有启动脚本），显式报错而非静默放过
+[[ -s "$OVERLAY_SCRIPT_LIST" ]] || \
+  die "覆盖层 shebang 扫描无结果（$OVERLAY_DIR 为空或扫描失败）"
 
 log "  按 shebang 扫描并修复覆盖层脚本可执行位（范围：整个覆盖层）"
 while IFS= read -r rel; do

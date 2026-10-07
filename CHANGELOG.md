@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 2026-10-07 — 修复 RootFS 构建 shebang 扫描静默退出（不确定性失败）
+
+- **根因**（run 37551055700 / build #42）：`build-rootfs.sh` 覆盖层 shebang 扫描的循环体写的是 `head | grep -q '#!' && printf`。在 `set -Eeuo pipefail` 下 while 循环的退出码等于循环体**最后一次执行**的状态：当 `find` 枚举的最后一个文件恰好无 shebang（如普通配置文件）时整条管道返回 1，子 shell 静默退出，主脚本无消息退出 1——runner 日志表现为打印"安装固件"后 46ms 内 exit 1，无任何错误输出。
+- **为何以前不炸**：旧版扫描范围只含 `usr/local/{sbin,bin}` 与 dispatcher.d（全是脚本文件，循环体最后必成功）；上轮审计修复把范围扩大到整个覆盖层后引入 18 个无 shebang 的配置文件，是否触发取决于文件枚举顺序，属不确定性行为（本地恰好存活、CI 必炸）。
+- **修复**：判定搬进 `if` 语境（if 条件失败不影响循环退出码），并新增兜底——扫描结果为空时 `die` 显式报错。
+- **验证**：构造"末位无 shebang"场景复测原结构必挂、修复后存活；对真实覆盖层全量扫描结果与旧逻辑一致（7 个脚本）；`bash -n` / shellcheck 通过；全仓确认无其他 `grep -q ... && ...` 循环体模式。
+- 同步 CHANGELOG。
+
 ### 2026-10-07 — 修复 quality-gate pyflakes 命令缺失（127）
 
 - **根因**：Ubuntu noble（runner 24.04）的 apt 包 `python3-pyflakes` 只提供 `/usr/bin/pyflakes3`，不带 `pyflakes` 入口脚本；CI 步骤调用裸 `pyflakes --version` 报 `command not found`（exit 127），run 37550743057 的「安装检查工具」步骤失败、后续质量门全部跳过。沙箱内验证未暴露该差异，因为 pip 安装的 pyflakes 才带同名入口脚本。
