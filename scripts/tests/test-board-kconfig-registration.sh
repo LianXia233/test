@@ -86,6 +86,53 @@ if [[ -f "$DRIVER_DIR/Kconfig" ]]; then
 	else
 		ok "无空格缩进行（全部 tab）"
 	fi
+
+	# 【depends 符号可达性 —— 2026-10-09 第二次 CI 失败根因】
+	# 任何 `depends on X && Y` 里的 X/Y 必须是**真实存在的 Kconfig 符号**。
+	# 首版写了 `depends on GPIOLIB && HRTIMER`：HRTIMER 在内核里根本不是
+	# Kconfig 符号（只有 HIGH_RES_TIMERS），于是恒为 n → config 永远不可见
+	# → .config 的 =m 被 olddefconfig 静默丢弃，症状与"缺 Kconfig"完全相同。
+	#
+	# 这里无法访问内核源码树，因此采用**已知合法符号白名单** + **已知非法
+	# 陷阱清单**双向校验：白名单外的符号触发 FAIL 并要求人工确认（保守），
+	# 陷阱清单命中的直接 FAIL（这些是宏/内部名，绝不可能出现在 Kconfig）。
+	dep_line="$(grep -E '^[[:space:]]+depends on ' "$DRIVER_DIR/Kconfig" || true)"
+	if [[ -n "$dep_line" ]]; then
+		# 抽出所有大写标识符（去掉 depends on 关键字）
+		syms="$(printf '%s\n' "$dep_line" | sed 's/depends on//' | grep -oE '\b[A-Z][A-Z0-9_]*\b' | sort -u)"
+		# 非 Kconfig 符号陷阱清单（宏 / 内部 API / 头文件名，恒不可能是 CONFIG_*）
+		TRAPS="HRTIMER GPIO_LOOKUP_IDX_OF GPIOLIB_LEGACY HRTIMER_MODE_REL
+		       IS_ENABLED LINUX_VERSION_CODE OF_GPIO HWMON_DEVICE_ATTR"
+		trap_hit=""
+		for s in $syms; do
+			for t in $TRAPS; do
+				[[ "$s" == "$t" ]] && trap_hit="$trap_hit $s"
+			done
+		done
+		if [[ -n "$trap_hit" ]]; then
+			bad "depends 引用了非 Kconfig 符号：$trap_hit —— 该符号恒为 n，config 将永远不可见（=m 被静默丢弃）"
+		else
+			ok "depends 未引用已知非 Kconfig 符号（检查项：$(printf '%s' "$syms" | tr '\n' ' '))"
+		fi
+
+		# 正向确认：每个 depends 符号必须能在注释里找到"为什么它是合法符号"的依据，
+		# 或落在公认合法白名单内。白名单外的符号仅告警（不阻断），提示人工核对。
+		KNOWN="GPIOLIB HWMON OF PWM THERMAL EXPERT HAS_IOMEM ACPI PCI PM
+		       COMPILE_TEST ARCH_MEDIATEK REGULATOR"
+		unknown=""
+		for s in $syms; do
+			found=0
+			for k in $KNOWN; do
+				[[ "$s" == "$k" ]] && found=1
+			done
+			[[ "$found" -eq 0 ]] && unknown="$unknown $s"
+		done
+		if [[ -n "$unknown" ]]; then
+			bad "depends 含白名单外符号：$unknown —— 必须确认它在 Kconfig 树中真实存在（grep -r '^config <SYM>' --include=Kconfig）"
+		else
+			ok "depends 全部符号落在已知合法集内"
+		fi
+	fi
 fi
 
 # ---------------------------------------------------------------- C. build-kernel.sh 双注册

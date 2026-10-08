@@ -15,9 +15,21 @@
 # 结论：Makefile 只负责"怎么编"，Kconfig 才负责"符号是否存在、能否被选中"，
 # 两者必须同时提供。
 
+# 【depends 只能用真正的 Kconfig 符号 —— 2026-10-09 第二次 CI 失败根因】
+# 首版写作 `depends on GPIOLIB && HRTIMER`，导致符号**永远不可见**：
+#   HRTIMER 在内核里**不是一个 Kconfig 符号**（hrtimer 是核心基础设施，
+#   无条件编入；Kconfig 里只有 HIGH_RES_TIMERS 这个可选项）。
+#   于是 `depends on ... && HRTIMER` 中 HRTIMER 恒求值为 n，
+#   `config AIRPI_GPIO_FAN` 被 Kconfig 判为不可见 →
+#   .config 里的 =m **再次被 olddefconfig 静默丢弃**，
+#   症状与"缺 Kconfig"小时一模一样（--strict 报未启用）。
+# 教训：写 depends 前必须确认每个符号都真实存在于 Kconfig 树
+# （`grep -r '^config <SYM>' --include=Kconfig`），尤其别把**宏/内部函数名**
+# 当成 CONFIG 符号。hrtimer API 的可用性由源码 include 与 export 保证，
+# 不需要也不应该写进 depends。
 config AIRPI_GPIO_FAN
 	tristate "AirPi AP3000M GPIO soft-PWM fan control"
-	depends on GPIOLIB && HRTIMER
+	depends on GPIOLIB
 	help
 	  Software PWM fan controller for the AirPi AP3000M router (MediaTek
 	  MT7981B). Some hardware revisions of this board do not route the fan
