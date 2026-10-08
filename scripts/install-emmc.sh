@@ -368,7 +368,7 @@ fi
 # 【为什么必须在这里做】此刻 p5 **未挂载**：/overlay 与 loop(SquashFS) 都不存在，
 # 是整条刷写链上唯一能安全做大范围 ext4 扩容的时刻；写坏了人还站在 shell 里，可重试。
 #
-# 背景（2026-10-09 实机串口实证）：此前扩容只在首启由 h5000m-grow-rootfs.service
+# 背景（2026-10-09 实机串口实证）：此前扩容只在首启由 router-grow-rootfs.service
 # 在**运行中的根文件系统**上执行 —— 那是这台设备上最重的一次 eMMC 写操作。在
 # 该服务首次真正执行（CHANGELOG 2026-10-06 明确记录它此前从未被 enable）的固件上，
 # 串口在 t≈10s 出现静默内核级冻结：CPU 0/1/3 的 softirq 计数冻结、CPU3 定时器停摆、
@@ -390,7 +390,7 @@ if [[ "$MODE_ONLINE" -eq 1 ]]; then
 elif [[ -z "$ROOTFS_IMG" ]]; then
   log "p5 扩容：mkfs.ext4 已按分区全尺寸创建文件系统，无需扩容"
 elif (( NO_GROW == 1 )); then
-  log "p5 扩容：已按 --no-grow 跳过。首启将由 ${BOARD}-grow-rootfs.service 兜底扩容"
+  log "p5 扩容：已按 --no-grow 跳过。首启将由 router-grow-rootfs.service 兜底扩容"
   log "          （注意：该路径会在运行中的根文件系统上做全区 resize，本设备有 msdc 写挂死风险）"
 else
   command -v resize2fs >/dev/null 2>&1 || \

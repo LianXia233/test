@@ -137,7 +137,7 @@ BOOT_DIR="$OUT_DIR/rootfs/boot"
 ROOTFS_TAR="$OUT_DIR/rootfs/debian13-arm64-rootfs.tar.zst"
 mkdir -p "$ROOTFS_DIR" "$BOOT_DIR" "$OUT_DIR/rootfs"
 
-# 密码兜底：未指定时使用默认密码 password（交付时写入 /etc/h5000m-initial-credentials）
+# 密码兜底：未指定时使用默认密码 password（交付时写入 /etc/<board>-initial-credentials）
 [[ -n "$ADMIN_PASSWORD" ]] || ADMIN_PASSWORD="password"
 [[ -n "$ROOT_PASSWORD"  ]] || ROOT_PASSWORD="password"
 log() { printf '[build-rootfs] %s\n' "$*"; }
@@ -332,8 +332,9 @@ for firmware in "${REQUIRED_FIRMWARE[@]}"; do
 done
 log "  [OK] 固件校验通过（${#REQUIRED_FIRMWARE[@]} 项）"
 
-# 【为什么还要「扫描」——h5000m-led.sh 曾因漏列变成不可执行】
-# 原先依赖硬编码白名单逐条 chmod 0755，恰好漏了 h5000m-led.sh，于是 systemd 直接报：
+# 【为什么还要「扫描」——router-led.sh（当时名 h5000m-led.sh）曾因漏列变成不可执行】
+# 原先依赖硬编码白名单逐条 chmod 0755，恰好漏了它，于是 systemd 直接报（当时 unit 名
+# 尚未板级无关化，故日志里是 h5000m-led-boot.service）：
 #     h5000m-led-boot.service: Main process exited, code=exited, status=203/EXEC
 #     h5000m-led-boot.service: Failed with result 'exit-code'
 # （QEMU 虚拟机已复现；注意 bash -n 语法检查不读执行位，测不出来这类问题。）
@@ -409,7 +410,7 @@ if [ ! -f "$SSHD_CFG" ] && [ -f "$SSHD_TMPL" ]; then
     log "  警告：$SSHD_CFG 缺失，回落到 openssh 官方模板"
     install -m 0644 "$SSHD_TMPL" "$SSHD_CFG"
 fi
-# 主配置必须 Include sshd_config.d，否则 90-h5000m.conf 的定制会被静默忽略
+# 主配置必须 Include sshd_config.d，否则 90-<board>.conf 的定制会被静默忽略
 if [ -f "$SSHD_CFG" ] && ! grep -q "^Include /etc/ssh/sshd_config.d/" "$SSHD_CFG"; then
     sed -i "1i Include /etc/ssh/sshd_config.d/*.conf" "$SSHD_CFG"
     log "  已为 sshd_config 补 Include /etc/ssh/sshd_config.d/*.conf"
