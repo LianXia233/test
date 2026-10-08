@@ -37,7 +37,8 @@
 | --- | --- | --- |
 | 启动进入"只读救援模式"提示 | 串口日志 `/sbin/init` 的 overlay 组装失败原因；`findmnt /`（救援模式根为 squashfs + tmpfs） | SSH/串口登录后检查 p5：`e2fsck -fn /dev/mmcblk0p5`；`/overlay/upper`/`work` 是否损坏或占满；修复后 `reboot`（引导层 init 每次启动都会重试组装） |
 | 串口日志 `overlay: filesystem on /overlay/upper is read-only` → mount EINVAL → 救援循环 | 串口看 `Kernel command line:` 是否缺 `rw`；`VFS: Mounted root (ext4 filesystem) readonly` | 2026-10-06 实机实锤并已修复：init 现会自动 `mount -o remount,rw /`；若仍出现，说明 p5 ext4 内核层强制 ro（ext4 错误降级），按上行 e2fsck 流程修复 |
-| 串口日志 `System is deadlocked on memory` panic（启动后 ~2 分钟） | 串口 OOM dump：`kmalloc-4k` 是否占数百 MB；loop 设备编号是否暴涨（loop4xx） | 2026-10-06 实机实锤并已修复：旧版救援路径无限重执行 init（437 轮 × 每轮 SquashFS 挂载泄漏）→ OOM。现版本限重试 3 次，超限降级为串口应急 shell；若见到 `降级为串口应急 shell` 提示，直接在串口手动排查 |
+| 串口日志 `System is deadlocked on memory` panic（启动后 ~2 分钟） | 串口 OOM dump：`kmalloc-4k` 是否占数百 MB；loop 设备编号是否暴涨（loop4xx） | 2026-10-06 实机实锤并已修复：旧版救援路径无限重执行 init（437 轮 × 每轮 SquashFS 挂载泄漏）→ OOM。现版本**救援只尝试 1 次**（SquashFS 为根 + tmpfs 可写上层），失败即转串口应急 shell；见到 `降级为串口应急 shell` 提示就直接在串口手动排查 |
+| distro boot 兜底引导报 `File not found: /boot/Image` | `ls /boot/Image`（在 p5 引导层 `/boot` 内；可挂载 `/dev/mmcblk0p5` 查看） | 这属**预期**行为：该文件仅在构建时加 `make-sd-image.sh --keep-boot-image` 才落盘（默认不生成，避免镜像 +60 MiB）。需要兜底引导就带该参数重建，不需要则走主路径 p4 FIT。2026-10-09 之前是真缺陷：`extlinux.conf` 恒被写入却从不落 Image，兜底引导 100% 失败（未加参数时现已不写 extlinux.conf，二者同进同退） |
 | 根分区只读、写入报 Read-only | `findmnt /` 看 upperdir；`mount \| grep overlay` | upper/work 未挂上（引导层 p5 只读挂载？）：检查 `dmesg \| grep -i "EXT4-fs error"`，必要时 e2fsck 修复 |
 | `/overlay` 空间不足 | `df -h /`（overlay 容量 = p5 剩余）；`du -xsh /var/* \| sort -h` | 清理日志/缓存；确认 `h5000m-grow-rootfs.service` 已跑过（`systemctl status h5000m-grow-rootfs`；marker `/var/lib/h5000m-rootfs-grown`） |
 | 重启后配置丢失 | overlay upper 是否持久：`ls /overlay/upper/etc/`（经 `/tmpold` 视角） | 正常情况下 `/etc` `/var` 写入自动落 upper；若为空说明 overlay 未组装成功（见救援模式行） |

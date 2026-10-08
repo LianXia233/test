@@ -174,7 +174,8 @@ out/H5000M-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 镜像�
   - `/squashfs/rootfs.squashfs`：只读基础系统；
   - `/overlay/{upper,work,merged}`：OverlayFS 可写层（p5 剩余空间 = 持久化数据，首启由
     `h5000m-grow-rootfs` 在线扩容至 ~7.2 GiB）；
-  - `/boot`：备用引导（DTB / extlinux.conf / boot.scr，供 distro boot 兜底）。
+  - `/boot`：引导文件。`boot.scr` 与 DTB 始终落盘；`extlinux.conf` 与其引用的 `Image`
+    仅在加 `--keep-boot-image` 时落盘（默认省空间不生成 ~60 MiB 的重复内核，二者同进同退）。
 
   镜像以 `mkfs.ext4 -d` 免挂载构建，经 e2fsck + debugfs 三重自检（init / busybox /
   squashfs 逐项存在且大小与源一致）。

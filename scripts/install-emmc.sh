@@ -27,7 +27,9 @@
 #       --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst [--dev /dev/mmcblk0] [--yes]
 #     sudo bash scripts/install-emmc.sh \
 #       --kernel-fit out/H5000M-debian13-kernel.bin \
-#       --rootfs-img out/H5000M-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes]
+#       --rootfs-img out/H5000M-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes] [--no-grow]
+#     （--rootfs-img 路径默认在写盘后**离线扩容** p5 到分区实际大小，见下方"离线扩容"说明；
+#       加 --no-grow 可跳过，改由首启 h5000m-grow-rootfs.service 兜底。）
 #   方式二：运行中在线升级（SquashFS + OverlayFS 架构；保留 /etc /var 等全部持久化数据）：
 #     sudo bash scripts/install-emmc.sh \
 #       --kernel-fit out/H5000M-debian13-kernel.bin \
@@ -63,6 +65,7 @@ ROOTFS_SQUASHFS=""            # 在线升级模式：仅替换 p5 上的 SquashF
 BACKUP_FULL=""                # 可选：整盘备份文件
 BACKUP_P45=""                 # 可选：p4+p5 内容备份文件
 ASSUME_YES=0
+NO_GROW=0                     # --no-grow：跳过写盘后的 p5 离线扩容（改由首启兜底）
 
 usage() {
   sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
@@ -78,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --backup-full)      BACKUP_FULL="$2"; shift 2 ;;
     --backup-p45)       BACKUP_P45="$2"; shift 2 ;;
     --yes)              ASSUME_YES=1; shift ;;
+    --no-grow)          NO_GROW=1; shift ;;
     -h|--help)          usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 1 ;;
   esac
@@ -134,19 +138,47 @@ fi
 log "读取 $DEVICE 现有 GPT 分区表（只读校验）："
 sgdisk -p "$DEVICE" >&2 || die "无法读取 $DEVICE 分区表，中止（绝不在未知布局上写入）。"
 
-# 解析分区表为数组
-mapfile -t PTLINES < <(sgdisk -p "$DEVICE" 2>/dev/null)
+# 解析分区表为数组。
+#
+# 【2026-10-09 修复：原正则在该设备上 100% 解析失败，刷入通道会在写盘前直接中止】
+# 原实现用一条正则要求 Size 列是纯整数：
+#     ^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+(.*)$
+# 但 `sgdisk -p` 的 Size 列是**人类可读**值，含小数点与单位：
+#     Number  Start (sector)    End (sector)  Size       Code  Name
+#        4           22528           83967   30.0 MiB   8300  kernel
+# 第 4 组 `[0-9]+` 后面要紧跟空白，在 `.` 处必然失配（回溯也无法成功）→ 每一行都 `continue`
+# → N_PART=0 → 下方 die「分区数量不足 5（当前 0）」。即只要 Size 列带小数点，脚本就永远
+# 无法进入写盘阶段（属 fail-safe，不会损坏设备，但文档承诺的刷入通道实际不可用）。
+# 即便放宽正则也不应使用该列：它是显示值而非扇区数（原注释假设的 61440 与真实输出不符），
+# 且第 5 组会把 Code 与 Name 一起吞掉（PART_LABEL 变成 "8300 kernel"），expect_part 仍会 die。
+#
+# 现改为与显示格式无关的做法：
+#   * 只取 Number / Start / End 三个**纯数字**列；
+#   * 扇区数一律由 `End - Start + 1` 推导（不再读 Size 列，因此 `sgdisk` 版本差异无影响）；
+#   * 分区名取 Name 列起的全部内容（Name 允许含空格）。**Name 的起始列会漂移**：
+#     Size 列是显示值时占两列（`30.0` + `MiB`），是纯扇区数时只占一列（`61440`），
+#     因此不能用固定的 $7，而要按「第 5 列是否为容量单位」动态判定；取不到则 label 为空
+#     → expect_part die，属 fail-safe。
 N_PART=0
 declare -A PART_NUM PART_LABEL PART_SIZE PART_START PART_END
-for line in "${PTLINES[@]}"; do
-  # sgdisk -p 输出行形如：   4      22528    83967  61440   kernel
-  [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+(.*)$ ]] || continue
-  num="${BASH_REMATCH[1]}"; start="${BASH_REMATCH[2]}"; end="${BASH_REMATCH[3]}"
-  size="${BASH_REMATCH[4]}"; label="$(echo "${BASH_REMATCH[5]}" | xargs)"
+while read -r num start end label; do
+  [[ -n "$num" && -n "$start" && -n "$end" ]] || continue
   PART_NUM[$num]="$num"; PART_START[$num]="$start"; PART_END[$num]="$end"
-  PART_SIZE[$num]="$size"; PART_LABEL[$num]="$label"
+  PART_SIZE[$num]=$(( end - start + 1 ))
+  PART_LABEL[$num]="$label"
   if (( num > N_PART )); then N_PART=$num; fi
-done
+done < <(sgdisk -p "$DEVICE" 2>/dev/null | awk '
+  # 表体行：前三个字段为纯数字，其后是 Size [单位] / Code / Name
+  /^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]/ {
+    name_start = ($5 ~ /^(B|KB|KiB|MB|MiB|GB|GiB|TB|TiB|PB|PiB|EB|EiB|bytes|sectors)$/) ? 7 : 6;
+    label = "";
+    for (i = name_start; i <= NF; i++) label = (label == "") ? $i : label " " $i;
+    printf "%s %s %s %s\n", $1, $2, $3, label;
+  }')
+
+if (( N_PART == 0 )); then
+  die "无法从 'sgdisk -p $DEVICE' 解析出任何分区行。请人工确认分区表输出格式后再刷写。"
+fi
 
 # 校验 H5000M 原厂 GPT 布局。只检查存在 p4/p5 不够安全：任何带 5 个分区的
 # 磁盘都可能被误当成目标设备，后续 dd/mkfs 会造成不可逆数据破坏。
@@ -291,6 +323,64 @@ else
     trap - EXIT
     rm -rf "$WORK"
   fi
+fi
+
+# ---------------------------------------------------------------- 5b. p5 离线扩容
+# 【为什么必须在这里做】此刻 p5 **未挂载**：/overlay 与 loop(SquashFS) 都不存在，
+# 是整条刷写链上唯一能安全做大范围 ext4 扩容的时刻；写坏了人还站在 shell 里，可重试。
+#
+# 背景（2026-10-09 实机串口实证）：此前扩容只在首启由 h5000m-grow-rootfs.service
+# 在**运行中的根文件系统**上执行 —— 那是这台设备上最重的一次 eMMC 写操作。在
+# 该服务首次真正执行（CHANGELOG 2026-10-06 明确记录它此前从未被 enable）的固件上，
+# 串口在 t≈10s 出现静默内核级冻结：CPU 0/1/3 的 softirq 计数冻结、CPU3 定时器停摆、
+# `Sending NMI` 取不到任何 per-CPU 回栈，系统永远到不了 multi-user.target；
+# 与本项目长期跟踪的「msdc 写挂死」特征一致。
+# 把扩容前移到刷写时，正常刷写的设备就**完全不再需要**运行中的兜底扩容。
+#
+# 只读读取 ext4 容量（字节）；任何异常都返回空串——诊断信息不能把刷写流程带崩。
+fs_bytes_readonly() {
+  command -v dumpe2fs >/dev/null 2>&1 || return 0
+  dumpe2fs -h "$1" 2>/dev/null | awk -F: '
+    /^Block count/{gsub(/ /,"",$2);c=$2}
+    /^Block size/ {gsub(/ /,"",$2);s=$2}
+    END{if(c!=""&&s!="")print c*s}' || true
+}
+
+if [[ "$MODE_ONLINE" -eq 1 ]]; then
+  log "p5 扩容：在线升级模式跳过（ext4 容量未变，仅替换 SquashFS 文件）"
+elif [[ -z "$ROOTFS_IMG" ]]; then
+  log "p5 扩容：mkfs.ext4 已按分区全尺寸创建文件系统，无需扩容"
+elif (( NO_GROW == 1 )); then
+  log "p5 扩容：已按 --no-grow 跳过。首启将由 h5000m-grow-rootfs.service 兜底扩容"
+  log "          （注意：该路径会在运行中的根文件系统上做全区 resize，本设备有 msdc 写挂死风险）"
+else
+  command -v resize2fs >/dev/null 2>&1 || \
+    die "缺少 resize2fs（离线扩容 p5 需要）。请安装 e2fsprogs（sudo apt-get install e2fsprogs），或加 --no-grow 跳过。"
+  # 离线扩容的硬前提：p5 绝不能处于挂载状态
+  if findmnt -rn -S "$P5_DEV" >/dev/null 2>&1 || grep -qE "^${P5_DEV}[[:space:]]" /proc/mounts 2>/dev/null; then
+    die "$P5_DEV 仍处于挂载状态，拒绝扩容（离线扩容必须在未挂载时进行）。请先 umount 后重试。"
+  fi
+  # dd 之后内核页缓存可能仍持有 p5 的旧扇区；先冲刷缓冲区，让 resize2fs 读到新超级块。
+  if command -v blockdev >/dev/null 2>&1; then blockdev --flushbufs "$P5_DEV" 2>/dev/null || true; fi
+
+  P5_DEV_BYTES=$(( ${PART_SIZE[5]:-0} * 512 ))
+  FS_BYTES="$(fs_bytes_readonly "$P5_DEV" || true)"
+  log "p5 离线扩容：resize2fs $P5_DEV（p5 未挂载）"
+  if [[ -n "$FS_BYTES" ]]; then
+    log "  扩容前：文件系统 ${FS_BYTES} 字节 / p5 分区 ${P5_DEV_BYTES} 字节"
+  fi
+  resize2fs "$P5_DEV" || die "p5 离线扩容失败（resize2fs 非 0 退出）。启动链未被改动，可安全重试。"
+
+  FS_BYTES_AFTER="$(fs_bytes_readonly "$P5_DEV" || true)"
+  if [[ -n "$FS_BYTES_AFTER" ]]; then
+    # 允许不足一个块组（128 MiB）的零头：resize2fs 扩到最后可能填不满最后一个块组。
+    if (( FS_BYTES_AFTER + 134217728 >= P5_DEV_BYTES )); then
+      log "  [OK] p5 已扩满：文件系统 ${FS_BYTES_AFTER} 字节"
+    else
+      log "  [WARN] 扩容后文件系统为 ${FS_BYTES_AFTER} 字节，明显小于 p5（${P5_DEV_BYTES} 字节），请复核"
+    fi
+  fi
+  sync
 fi
 
 # ---------------------------------------------------------------- 6. 校验

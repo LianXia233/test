@@ -196,6 +196,27 @@ jobs:
           # 不需要每次加文件都回来改 CI。
           PYTHONPATH=. python3 -m pytest tests -q --no-header
 
+      - name: 脚本回归测试（scripts/tests/*.sh）
+        # 这些测试**抽取被测脚本里的真实代码块**执行（而不是复制一份逻辑），专门覆盖
+        # CI 本来查不到的判定分支：install-emmc.sh 需要真实块设备与 root 权限，从不在此
+        # 执行；make-sd-image.sh 只在 build-image job 里跑，且跑不到「GPT 解析 / 空间预算」
+        # 这两处已经出过 P0/P1 缺陷的分支（前者曾 100% 失配导致刷入通道全程中止，
+        # 后者曾把 /boot 引导文件排除在镜像尺寸之外）。
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          tests=(scripts/tests/*.sh)
+          # 新增测试文件自动纳入，不需要每次加文件都回来改 CI
+          if [[ ${#tests[@]} -eq 0 ]]; then
+            echo "scripts/tests/ 下没有测试文件（回归网被删空？）"; exit 1
+          fi
+          FAIL=0
+          for t in "${tests[@]}"; do
+            echo "== $t =="
+            bash "$t" || { echo "测试失败：$t"; FAIL=1; }
+          done
+          [[ "$FAIL" -eq 0 ]] || { echo "脚本回归测试未通过"; exit 1; }
+
       - name: 文件规模守门（仅告警，不阻断）
         # 大文件不会让构建失败，但会让后续改动越来越难。这里只把它显式列出来，
         # 让技术债可见、可追踪，而不是悄悄增长。阈值之上先记录，拆分单独排期。

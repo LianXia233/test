@@ -93,7 +93,10 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 不是 EFI/GRUB、不依赖传统 PC 启动路径。
 
 > 若个别固件版本的 U-Boot 使用 distro boot（`bootflow scan`），其会扫描文件系统分区
-> 寻找 `boot.scr` / `extlinux/extlinux.conf`。本项目同时在这两条路径都提供启动文件（见 §8）。
+> 寻找 `boot.scr` / `extlinux/extlinux.conf`。本项目在 p5 的 `/boot` 提供 `boot.scr`；
+> `extlinux/extlinux.conf` 及其引用的 `/boot/Image` 需构建时加 `--keep-boot-image` 才生成
+> （默认省空间不落盘，见 §8）。USB 兜底路径（`boot.cmd` 的 `usb 0:1` 分支）则需自行在
+> U 盘上手工放入 `/boot/Image`。
 
 ---
 
@@ -147,13 +150,13 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 
 | 内容 | 位置 |
 | --- | --- |
-| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb` |
+| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb`（**Image 仅在 `make-sd-image.sh --keep-boot-image` 时落盘**；默认省空间不生成，此时 boot.scr 的 p5 分支与 extlinux 均不可用） |
 | **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb`（p5 引导层内） |
 | **RootFS（只读基础系统）** | p5 引导层内 `/squashfs/rootfs.squashfs`（Debian 13 Trixie ARM64，zstd 压缩，~120 MiB，只读不可变） |
 | **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；首启 `h5000m-grow-rootfs` 在线扩容 p5 至 ~7.2 GiB |
 | **引导脚本** | p5 引导层 `/sbin/init`（busybox 静态）：挂 SquashFS → 组装 OverlayFS → pivot_root → systemd；失败进入只读救援模式 |
 | **Data** | p5 引导层 overlay 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
-| **U-Boot 启动脚本（备用）** | p5 引导层 `/boot/boot.scr`（由 boot/boot.cmd 编译）+ `/boot/extlinux/extlinux.conf` |
+| **U-Boot 启动脚本（备用）** | p5 引导层 `/boot/boot.scr`（由 boot/boot.cmd 编译，始终落盘）+ `/boot/extlinux/extlinux.conf`（**仅在 `--keep-boot-image` 时落盘**：其 `KERNEL ../Image` 依赖同目录 Image，缺 Image 时不写该文件，避免留下引用不存在文件的配置） |
 
 ---
 
@@ -177,7 +180,14 @@ FIT 镜像结构与 OpenWrt 完全同型（`type="kernel"` / `flat_dt`、`compre
 
 **兜底路径（可选）**：若 U-Boot 为 distro boot（`bootflow scan`），自动发现 p5（ext4）后：
 优先执行 `/boot/boot.scr`（备用脚本，从 mmc 0:5 加载 `/boot/Image` + DTB 后 `booti`），
-其次读取 `/boot/extlinux/extlinux.conf`。两套文件均已预置。
+其次读取 `/boot/extlinux/extlinux.conf`。
+
+> **前提**：这两条路径都依赖 p5 引导层 `/boot/Image`。该文件**默认不落盘**（p4 的 FIT 已含
+> 同一内核，再存一份约 +60 MiB，2026-10-06 起为省空间跳过），需构建时显式加
+> `--keep-boot-image`。加了它 `extlinux.conf` 才会一并生成，二者**同进同退**——这是
+> 2026-10-09 修掉的缺陷：此前 `extlinux.conf` 恒被写入、而 `/boot/Image` 从不落盘，
+> 兜底引导 100% 以 `File not found: /boot/Image` 失败（文档却声称"已预置"）。
+> USB 兜底（`boot.cmd` 的 `usb 0:1` 分支）与本项无关，需自行往 U 盘 `/boot/` 放 Image。
 
 ---
 

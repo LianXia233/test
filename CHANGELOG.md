@@ -4,6 +4,90 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 实机启动硬挂死诊断 + 五组缺陷修复（内核可诊断性 / Wi-Fi 时序 / 首启扩容 / 刷写脚本 / 兜底引导与救援）
+
+**实机现象（串口实锤，COM3 115200 8N1 全程录制）**：t≈10.0s 起完全静默冻结，此后只有 RCU 告警
+（录制至 t=409s 仍在刷）。判读证据：① `t=2105 jiffies` + `CONFIG_HZ=100` 反推挂死起点；
+② CPU 0/1/3 的 softirq 计数在 7 次 dump 中**逐字相同**（1096/1097、928/939、839/839），CPU3
+`timer-softirq=251` 冻结、内核自述 `Possible timer handling issue on cpu=3`；③ `Sending NMI from
+CPU 2 to CPUs 0/1/3` 之后**无任何回栈**（`CONFIG_ARM64_PSEUDO_NMI` 未启用时
+`arch_trigger_cpumask_backtrace()` 走普通 IPI，被钉死的核取不到中断）；④ 连 systemd(1) 都不再推进
+（oneshot 默认 90s 应打 `Timed out` 而没打）→ 持 `console_lock` 的正是被钉死的核。
+结论：**内核级硬挂死，不是慢 I/O**。首要嫌疑：`h5000m-grow-rootfs` 首次真机执行（CHANGELOG
+2026-10-06 明确记录它此前从未被 enable，本机内核编译于 2026-10-07）→ 全分区在线 `resize2fs`
+（设备上最重的 eMMC 写）→ 命中本项目长期跟踪的「msdc 写挂死」。
+
+- **内核 config**（`build/kernel-conf/h5000m-6.18.config`）：
+  - **Wi-Fi 由内置改模块**（`CONFIG_CFG80211=m` / `MAC80211=m` / `MT7921E=m` / `MT7925E=m` /
+    `MT7996E=m`，`WLAN=y`）：内置驱动 t=1.505s 请求 `mediatek/mt7996/mt7992_rom_patch_23.bin`，
+    而 `VFS: Mounted root` 在 t=1.754s → `-ENOENT` → `mt7996e probe ... failed with error -2`，
+    Wi-Fi 100% 起不来（`regulatory.db` 同理）。新增
+    `rootfs-overlay/etc/modules-load.d/h5000m-wifi.conf` 在 rootfs 就绪后确定性加载。
+  - 新增 `CONFIG_EFI_PARTITION=y`（`root=PARTLABEL=rootfs` 依赖；此前纯属侥幸可用）。
+  - 新增挂死可诊断性：`ARM64_PSEUDO_NMI=y`、`SOFTLOCKUP_DETECTOR`/`HARDLOCKUP_DETECTOR=y`、
+    `DETECT_HUNG_TASK=y`、`DEFAULT_HUNG_TASK_TIMEOUT=30`、`RCU_CPU_STALL_TIMEOUT=10` —— 让下一次
+    "静默冻结"能直接给出带函数名的现场，而不是只有 softirq 计数。
+  - `build/build-kernel.sh` 的 `REQUIRED_SYMBOLS` 同步扩充（把上述关键项纳入构建期断言）。
+- **首启扩容**（`h5000m-grow-rootfs.service` + `usr/local/sbin/h5000m-grow-rootfs`）：
+  - `StartLimitBurst` / `StartLimitIntervalSec` 从 `[Service]` 移到 `[Unit]` —— 实机日志实证
+    systemd 报 `Unknown key` 并直接忽略（配置写错段等于没写）。
+  - service 移出启动关键路径：`After=local-fs.target multi-user.target` + `TimeoutStartSec=90`，
+    不再让一次 eMMC 重写卡住整个 boot。
+  - 脚本改为「先只读容量比对，已扩容则一行不写」：读 `sys/class/block/*/size` 与 `dumpe2fs -h`
+    算多余空间，不足一个块组直接 `exit 0` 并打 marker，避免每次启动都做无谓写盘。
+- **刷写脚本**（`scripts/install-emmc.sh`）：
+  - **P0：GPT 解析 100% 失配 → 刷入通道全程中止**。原正则要求 `sgdisk -p` 的 Size 列为纯整数
+    （`([0-9]+)` 后紧跟空白），而真实输出是**人类可读**的 `30.0 MiB`（含小数点、占两列）→
+    每行 `continue` → `N_PART=0` → `die`。新解析块按「第 5 列是否为容量单位」动态判定 Name
+    起始列，两种格式（人类可读 / 纯扇区数）通吃；无表体时 `die` 兜底（绝不在未知布局上写盘）。
+  - 新增 `--no-grow` 与 **p5 离线扩容段**（写 p5 后、§6 校验前）：挂载状态硬前提检查 +
+    `blockdev --flushbufs` + `resize2fs` + 扩容后容差校验（允许不足一个块组的零头）。
+  - 新增回归测试 `scripts/tests/test-parttable-parse.sh`：从 install-emmc.sh **抽取真实解析块**
+    执行（避免测试与实现各写一份），用桩 `sgdisk` 覆盖 4 种格式，**18 项全通过**。
+- **兜底引导死路径 + 救援路径三重缺陷**（`build/make-sd-image.sh`）：
+  - **P1-1 兜底引导引用不存在的文件**：`extlinux.conf` 的 `KERNEL ../Image` 与 `boot/boot.cmd`
+    的 `/boot/Image`（mmc 0:5 分支）指向的文件**全脚本从不落盘**（只把 FIT 写 p4，而 FIT 不能当
+    `booti` 的裸 Image 用）→ 兜底引导 100% 以 `File not found: /boot/Image` 收场，而
+    `docs/debian13-partition-plan.md` 声称"两套文件均已预置"。修法：
+    新增 `--keep-boot-image`（默认关闭，与 2026-10-06「省 60+ MiB」的决定一致）；
+    **`/boot` 引导文件按真实字节计入镜像尺寸与空闲预算**（旧实现让这 60 MiB 游离在预算之外：
+    要么 `mkfs.ext4 -d` 直接 ENOSPC，要么侥幸建成却把空闲压到 errno 28 以下、实机起不来——
+    这条正是 2026-10-06「EXTRA_MB=24 只剩 2.8 MiB → 起不来」的同一类坑）；
+    `extlinux.conf` 与 `Image` **同进同退**（缺 Image 时不写该文件，不留引用空气的配置）；
+    镜像自检新增互斥断言（有 conf 无 Image 直接拒绝产出）。`extlinux.conf` 的 APPEND 补 `rw`，
+    与 `FIT_BOOTARGS` / `boot.cmd` 三处 cmdline 对齐。
+  - **P1-2 救援路径三重缺陷**（文档承诺的"防砖救援"从未实现）：
+    ① `umount /rmerged` 写死裸路径，而真实挂载点是 `/overlay/merged`（`$MERGED`）→ 每轮 umount
+    都失败、overlay/loop 引用持续累积，**反而加剧了它自己注释里那个「437 轮 → deadlocked on
+    memory」的 OOM 循环**（2026-10-06 条目还把这条错误路径当正确做法记录了下来）；
+    ② 救援 overlay 用 `lowerdir=/` + `upperdir=/rrun/upper`，upper 嵌在 lower 之内 —— 内核
+    overlayfs 自 6.5 起 `ovl_check_overlapping_layers()` 直接判 `-EINVAL`，**救援根 100% 构造
+    失败**；且 `lowerdir=/` 里只有 busybox 与本脚本、没有可用 userspace，`exec /sbin/init` 又回到
+    本脚本自身（见 ③）；③ 救援失败后 `exec /sbin/init` 构成自循环。
+    修法：挂载点一律用变量 + `umount -l` 兜底，并修正「先摘 overlay → 再摘 rescue tmpfs → 最后摘
+    /sq → `losetup -D`」的顺序（否则在用设备挡住摘除、loop 泄漏清不掉）；救援根改为
+    **`lowerdir=/sq`（只读 Debian 用户空间）+ `upperdir/workdir` 落 tmpfs（128 MiB，RAM 后备）**
+    —— 与 `docs/architecture.md` 「SquashFS 根 + tmpfs upper」的设计承诺终于一致，且 tmpfs 零落盘，
+    正好避开本场景高概率的「msdc 写挂死」；救援**只尝试 1 次**（计数器在 devtmpfs，每次开机归零），
+    其后一律转串口应急 shell，彻底去掉 `exec /sbin/init` 自循环。
+  - **P2**：`usage()` 原本 `sed -n '2,30p'` 恰在第 30 行截断，而"用法："段从第 31 行才开始 →
+    `--help` **从来不显示调用方法**（新增参数也看不见）；改为按抬头注释块动态截取。两条 `die`
+    文案在逗号/冒号处被截断（"…空闲不足，"），补齐全文。头部注释把 `--extra-mb` 默认值错写成 24
+    （实为 128）。
+  - 新增回归测试 `scripts/tests/test-boot-layer-space.sh`：抽取真实预算块 + 确定尺寸桩文件，
+    断言「引导文件入账 / 加 Image 后镜像同步增大 / 空闲量不被整张 Image 侵蚀 / 下限工况仍安全 /
+    低于下限仍 die」，**15 项全通过**。两个测试共 33 项，0 失败。
+- **硬约束遵守**：全程未触碰 U-Boot / GPT / p1-p3 / u-boot-env / factory / fip / eMMC 硬件配置，
+  分区布局与启动链保持零改动（分区分辨率相关代码只读不写）。
+- **文档同步**：`docs/debian13-partition-plan.md`（§2 distro boot 注记、§6 Kernel 与备用脚本两行、
+  §7 兜底路径，明确 `/boot/Image` 需 `--keep-boot-image` 且与 extlinux.conf 同进同退）、
+  `docs/architecture.md`（p5 内容清单）、`docs/build-guide.md`（p5 内容清单）、
+  `docs/troubleshooting.md`（救援"重试 3 次"改为"只尝试 1 次"；新增兜底引导 `File not found`
+  排查行）、`build/make-sd-image.sh` 与 `boot/boot.cmd` 注释。
+- **验证状态**：`bash -n`（外壳）+ `sh -n`（从 heredoc 抽出的引导层 init）通过；两个回归测试
+  33 项全绿；`usage()` 实际输出已核对覆盖到"用法"段。**待 CI 重建 → 重刷 p4+p5 → 实机复验**。
+  本次改动尚未推送，等用户确认与凭据。
+
 ### 2026-10-07 — 修复 RootFS 构建 shebang 扫描静默退出（不确定性失败）
 
 - **根因**（run 37551055700 / build #42）：`build-rootfs.sh` 覆盖层 shebang 扫描的循环体写的是 `head | grep -q '#!' && printf`。在 `set -Eeuo pipefail` 下 while 循环的退出码等于循环体**最后一次执行**的状态：当 `find` 枚举的最后一个文件恰好无 shebang（如普通配置文件）时整条管道返回 1，子 shell 静默退出，主脚本无消息退出 1——runner 日志表现为打印"安装固件"后 46ms 内 exit 1，无任何错误输出。

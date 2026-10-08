@@ -15,14 +15,15 @@
 #   /usr/bin/busybox            静态 busybox（Debian busybox-static arm64 提取）
 #   /squashfs/rootfs.squashfs   Debian 13 只读基础系统（SquashFS，zstd 压缩）
 #   /overlay/{upper,work,merged} OverlayFS upper/work/挂载点（p5 剩余空间 = 持久化数据）
-#   /boot/                      备用引导文件（DTB / extlinux.conf / boot.scr）
+#   /boot/                      引导文件：DTB + boot.scr（始终）；extlinux.conf + Image（仅 --keep-boot-image）
 #
 # 【启动链不变】BootROM → BL2 → FIP(U-Boot) → p4 FIT → kernel（root=PARTLABEL=rootfs）
 #             → 挂 p5 引导层 ext4 → /sbin/init 组装 OverlayFS → switch_root → Debian 13。
 #             BL2 / U-Boot / FIP / u-boot-env / factory / GPT 全程零改动。
 #
 # 【内存约束】sysupgrade 整包上传到设备 /tmp（tmpfs 占 RAM），门槛 ≤600 MiB：
-#   kernel FIT ~13 MiB + 引导层（SquashFS ~120 MiB + 引导文件）≈ 150 MiB 级。
+#   kernel FIT ~13 MiB + 引导层（SquashFS ~120 MiB + 引导文件）≈ 150 MiB 级；
+#   带 --keep-boot-image 时约 210 MiB 级（多一份解压态 Image），仍远低于门槛。
 #
 # 本脚本只生成两个可刷写文件，不创建分区表、不触碰任何块设备：
 #   out/H5000M-debian13-kernel.bin  → dd 到 p4
@@ -31,7 +32,14 @@
 # 用法：
 #   sudo bash build/make-sd-image.sh --out out \
 #     --kernel-dir out/kernel --squashfs out/rootfs/rootfs.squashfs [--boot-dir out/boot] \
-#     [--extra-mb 24] [--busybox /path/to/busybox] [--mirror https://deb.debian.org/debian]
+#     [--extra-mb 128] [--busybox /path/to/busybox] [--mirror https://deb.debian.org/debian] \
+#     [--keep-boot-image] [--force-extra-mb]
+#
+# 【--keep-boot-image】把解压态 Image 另存一份到 p5 引导层 /boot，让 distro boot /
+# extlinux 兜底引导（build/../boot/boot.cmd 的 p5 分支、/boot/extlinux/extlinux.conf）
+# 真实可用。默认**关闭**：p4 的 FIT 已含同一内核，再存一份约 +60 MiB（见 CHANGELOG
+# 2026-10-06"默认跳过 /boot/Image 冗余副本…省 60+ MiB"）。关闭时同时**不写**
+# extlinux.conf，以免留下引用不存在文件的配置（那正是 2026-10-09 修掉的 P1 缺陷）。
 #
 # 平台：仅 Linux。行尾：本文件为 LF。
 set -Eeuo pipefail
@@ -74,9 +82,14 @@ EXTRA_MB="128"
 # 就会重现 errno 28 起不来。确知自己在做什么时用 --force-extra-mb 解除拦阻。
 MIN_EXTRA_MB="96"
 MIN_BOOT_FREE_MB="64"
-# ext4 元数据 + journal + 默认 5% root 预留的经验开销（相对 payload）
+# ext4 元数据 + journal + 默认 5% root 预留的经验开销（相对 payload）。
+# 注意：/boot 下实际落盘的引导文件**不**算在这里——2026-10-09 起按真实字节单独计入
+# BOOT_FILE_BYTES（见 §3），否则 --keep-boot-image 那 60 MiB 会游离在空间预算之外。
 BOOT_FS_OVERHEAD_MB="24"
 FORCE_EXTRA_MB=0
+# 是否把解压态 Image 一并写入引导层 /boot（供 distro boot / extlinux 兜底引导）。
+# 默认 0（省空间，与 CHANGELOG 2026-10-06 的决定一致）；1 时镜像约 +60 MiB。
+KEEP_BOOT_IMAGE=0
 BUSYBOX_LOCAL=""                  # 本地 busybox（arm64 静态）路径；空则从 Debian 下载
 MIRROR="https://deb.debian.org/debian"
 # FIT 内核 load/entry 必须用 0x46000000，不能照抄官方的 0x40000000：
@@ -99,7 +112,10 @@ FIT_LOAD_ADDR="0x46000000"
 FIT_BOOTARGS="${FIT_BOOTARGS:-console=ttyS0,115200n8 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf}"
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  # 打印文件抬头注释块（第 2 行起，遇首个非注释行停止）——**不要写死行号**：
+  # 旧实现 `sed -n '2,30p'` 恰在第 30 行截断，而"用法："段落从第 31 行才开始，
+  # 于是 --help 从来不显示调用方法（新增参数在 --help 里同样看不见）。
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -110,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --boot-dir)  BOOT_DIR="$2"; shift 2 ;;
     --extra-mb)       EXTRA_MB="$2"; shift 2 ;;
     --force-extra-mb) FORCE_EXTRA_MB=1; shift ;;
+    --keep-boot-image) KEEP_BOOT_IMAGE=1; shift ;;
     --busybox)   BUSYBOX_LOCAL="$2"; shift 2 ;;
     --mirror)    MIRROR="$2"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
@@ -295,25 +312,48 @@ log "  busybox：$BB_SIZE 字节（静态 arm64）"
 # ================================================================ 3. 构建引导层 staging（p5 内容）
 STAGE="$WORK/stage"
 SQ_BYTES=$(stat -c %s "$SQUASHFS")
-IMG_SIZE_MB=$(( ( (SQ_BYTES + BB_SIZE) / 1048576 ) + EXTRA_MB ))
+IMAGE_BYTES=$(stat -c %s "$IMAGE")
+
+# /boot 兜底引导文件的**真实字节数，必须计入镜像尺寸与空闲预算**：
+# 【P1 修复 2026-10-09】旧实现只按 (SquashFS + busybox) 算尺寸，把 DTB/boot.scr 笼统
+# 算进 BOOT_FS_OVERHEAD_MB=24。而 --keep-boot-image 要往 /boot 再放一份解压态 Image
+# （本平台 ~60 MiB，见 CHANGELOG 2026-10-06"省 60+ MiB"）——既撑大镜像又不进预算，
+# 结果是 mkfs.ext4 -d 直接 ENOSPC，或侥幸建成却把空闲压到 errno 28 以下（实机起不来）。
+BOOT_FILE_BYTES=0
+if [[ -f "$DTB" ]]; then
+  BOOT_FILE_BYTES=$(( BOOT_FILE_BYTES + $(stat -c %s "$DTB") ))
+fi
+if (( KEEP_BOOT_IMAGE == 1 )); then
+  BOOT_FILE_BYTES=$(( BOOT_FILE_BYTES + IMAGE_BYTES ))
+fi
+if [[ -f "$BOOT_DIR/boot.scr" ]]; then
+  BOOT_FILE_BYTES=$(( BOOT_FILE_BYTES + $(stat -c %s "$BOOT_DIR/boot.scr") ))
+fi
+
+IMG_SIZE_MB=$(( ( (SQ_BYTES + BB_SIZE + BOOT_FILE_BYTES) / 1048576 ) + EXTRA_MB ))
 IMG_SIZE_MB=$(( (IMG_SIZE_MB + 7) / 8 * 8 ))   # 8 MiB 对齐
 
 # 引导层空间断言：算出来的镜像在 grow-rootfs 扩容之前必须还剩足够空闲。
 # 少了这一步，--extra-mb 24 一类取值会静默产出"能编译、能打包、实机起不来"的镜像。
-PAYLOAD_MB=$(( (SQ_BYTES + BB_SIZE) / 1048576 + 1 ))
+PAYLOAD_MB=$(( (SQ_BYTES + BB_SIZE + BOOT_FILE_BYTES) / 1048576 + 1 ))
 BOOT_FREE_MB=$(( IMG_SIZE_MB - PAYLOAD_MB - BOOT_FS_OVERHEAD_MB ))
 if (( FORCE_EXTRA_MB == 0 )); then
   case "$EXTRA_MB" in
     ''|*[!0-9]*) die "--extra-mb 必须是非负整数：$EXTRA_MB" ;;
   esac
   (( EXTRA_MB >= MIN_EXTRA_MB )) || \
-    die "--extra-mb=${EXTRA_MB} 低于下限 ${MIN_EXTRA_MB} MiB：grow-rootfs 扩容前引导层空闲不足，"
+    die "--extra-mb=${EXTRA_MB} 低于下限 ${MIN_EXTRA_MB} MiB：grow-rootfs 扩容接手前引导层空闲不足，journal/NetworkManager state 会写满并报 errno 28 起不来。确知后果时用 --force-extra-mb 解除拦阻。"
   (( BOOT_FREE_MB >= MIN_BOOT_FREE_MB )) || \
-    die "引导层预计空闲仅 ${BOOT_FREE_MB} MiB（需 ≥ ${MIN_BOOT_FREE_MB} MiB）："
+    die "引导层预计空闲仅 ${BOOT_FREE_MB} MiB（需 ≥ ${MIN_BOOT_FREE_MB} MiB）：请调大 --extra-mb，或去掉 --keep-boot-image（其额外占用 /boot/Image 约 $(( IMAGE_BYTES / 1024 / 1024 )) MiB）。"
 fi
 log "生成引导层 ext4 镜像：$ROOTFS_IMG"
-log "  SquashFS $(( SQ_BYTES / 1024 / 1024 )) MiB + busybox $(( BB_SIZE / 1024 / 1024 )) MiB + 余量 ${EXTRA_MB} MiB → ${IMG_SIZE_MB} MiB（8 MiB 对齐）"
+log "  SquashFS $(( SQ_BYTES / 1024 / 1024 )) MiB + busybox $(( BB_SIZE / 1024 / 1024 )) MiB + /boot 引导文件 $(( BOOT_FILE_BYTES / 1024 / 1024 )) MiB + 余量 ${EXTRA_MB} MiB → ${IMG_SIZE_MB} MiB（8 MiB 对齐）"
 log "  预计引导层空闲 ≈ ${BOOT_FREE_MB} MiB（已扣除 ext4 元数据/journal/root 预留 ${BOOT_FS_OVERHEAD_MB} MiB）"
+if (( KEEP_BOOT_IMAGE == 1 )); then
+  log "  --keep-boot-image 已启用：/boot/Image（$(( IMAGE_BYTES / 1024 / 1024 )) MiB）+ extlinux.conf 将一并落盘"
+else
+  log "  /boot/Image 未落盘（默认省空间）：p5 兜底引导（boot.scr p5 分支 / extlinux）不可用；需要时加 --keep-boot-image"
+fi
 if (( FORCE_EXTRA_MB == 1 )); then
   log "  警告：--force-extra-mb 已启用，跳过空间下限校验"
 fi
@@ -348,11 +388,11 @@ $BB mount -o remount,rw / 2>/dev/null \
 SQ=/squashfs/rootfs.squashfs
 MERGED=/overlay/merged
 overlay_fail() {
-    echo "!!! H5000M: Overlay 组装失败（$*），进入只读救援模式（无持久化）!!!" >&2
+    echo "!!! H5000M: Overlay 组装失败（$*），进入救援流程 !!!" >&2
     # 【防 OOM 修复 2026-10-06】旧实现无条件重执行 init → 失败后无限循环：
     # 实机实测 437 轮（每轮挂 squashfs 泄漏 kmalloc-4k，约 465MiB）→ t=128s
     # "Kernel panic - not syncing: System is deadlocked on memory"。
-    # 用 devtmpfs 计数器限重试 3 次；超限降级为串口应急 shell（可交互修复）。
+    # 用 devtmpfs 计数器限制：本次进入只尝试一次救援，之后一律转串口应急 shell。
     N=0
     if [ -f "$RETRY_FILE" ]; then
         N=$($BB cat "$RETRY_FILE" 2>/dev/null)
@@ -360,37 +400,75 @@ overlay_fail() {
     fi
     N=$((N + 1))
     echo "$N" > "$RETRY_FILE" 2>/dev/null
-    if [ "$N" -ge 3 ]; then
-        echo "!!! 救援已重试 $N 次，停止自动重试（防 OOM 循环）!!!" >&2
-        echo "!!! 降级为串口应急 shell：可手动 'mount -o remount,rw /' 排查后 'exec /sbin/init' !!!" >&2
-        while :; do
-            "$BB" sh </dev/console >/dev/console 2>&1
-            echo "!!! 应急 shell 退出，5 秒后重新进入（防 PID1 退出引发 panic）!!!" >&2
-            $BB sleep 5
-        done
-    fi
-    # 重试前清理上一轮挂载，减缓 loop/squashfs 缓存泄漏
-    $BB umount /rmerged 2>/dev/null || true
-    $BB umount /sq 2>/dev/null || true
+
+    # 清理上一轮残留挂载，并释放上一轮泄漏的 loop 设备。
+    # 【挂载点必须用变量，勿写死裸路径 —— P1 修复 2026-10-09】旧实现写死
+    # "umount /rmerged"，而正常路径的真实挂载点是 /overlay/merged（$MERGED）：
+    # 每轮 umount 都失败，overlay/loop 引用持续累积，反而加剧了它自己注释里那个
+    # "437 轮 → deadlocked on memory" 的 OOM 循环。
+    # 顺序：先摘 overlay（它同时持有 $MERGED 与 /rrw），再摘 rescue tmpfs，最后摘 /sq，
+    # 这样 losetup -D 才不会被"设备仍在使用"挡下。
+    for _m in "$MERGED" /rrw /sq; do
+        $BB umount "$_m" 2>/dev/null && continue
+        $BB umount -l "$_m" 2>/dev/null || true
+    done
     $BB losetup -D 2>/dev/null || true
-    $BB mkdir -p /rrun/upper /rrun/work /rmerged
-    $BB mount -t overlay overlay -o lowerdir=/,upperdir=/rrun/upper,workdir=/rrun/work /rmerged 2>/dev/null || {
-        echo "!!! 救援 overlay 失败：仅只读根，需串口 / U-Boot 重刷 !!!" >&2
-        exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
-    }
-    cd /rmerged
-    $BB mkdir -p tmpold
-    $BB pivot_root . tmpold 2>/dev/null || true
-    cd /
-    # 同上：救援路径 pivot 成功后 busybox 也要改经 /tmpold 引用；
-    # 若 pivot 本身失败（仍在引导层根）则沿用原路径。
-    if [ -x /tmpold/usr/bin/busybox ]; then
-        BB=/tmpold/usr/bin/busybox
+
+    # 重建只读 Debian 用户空间（若本轮连 squashfs 都没挂上，这一步同样失败 → 转 shell）
+    $BB mount -t squashfs -o ro "$SQ" /sq 2>/dev/null || true
+
+    # ---- 救援根：lower=/sq（只读 Debian 用户空间）+ upper/work=tmpfs（RAM 后备）----
+    # 【别改回 lowerdir=/ + upperdir=/rrun/upper —— 那个组合 100% 构造不出来】
+    #  ① 内核 overlayfs（6.5+）的 ovl_check_overlapping_layers() 直接拒绝
+    #     "upper/work 位于任一 lower 层之内"的组合，返回 -EINVAL；旧实现
+    #     upperdir=/rrun/upper 而 lowerdir=/，/ 又是一切路径的祖先 → 救援 overlay
+    #     必然失败。文档承诺的"失败进入救援模式"在实机上从未成立过。
+    #  ② lowerdir=/ 里只有 busybox + 本脚本，没有任何可用 userspace；pivot 后 exec
+    #     /sbin/init 又回到本脚本自身 —— 这正是上面 OOM 循环的燃料。
+    #  ③ upper 用 tmpfs 而非引导层 ext4：救援场景很可能正是 eMMC 写路径挂死
+    #     （本仓库长期跟踪的 "msdc 写挂死"），往 ext4 写只会一起卡死；tmpfs 零落盘。
+    #  ④ 只在 N==1 时尝试：$RETRY_FILE 位于 devtmpfs，每次开机归零 → 等价于
+    #     "每次开机最多救援一次"；对同一确定性失败重复执行没有意义。
+    if [ "$N" -eq 1 ] && $BB grep -qs ' /sq squashfs ' /proc/mounts; then
+        $BB mkdir -p /rrw
+        if $BB mount -t tmpfs -o mode=0755,size=128m tmpfs /rrw 2>/dev/null; then
+            $BB mkdir -p /rrw/upper /rrw/work "$MERGED"
+            if $BB mount -t overlay overlay \
+                 -o "lowerdir=/sq,upperdir=/rrw/upper,workdir=/rrw/work" "$MERGED"; then
+                cd "$MERGED"
+                $BB mkdir -p tmpold
+                if $BB pivot_root . tmpold; then
+                    cd /
+                    # pivot 成功后新根是 overlay 合并视图，busybox 只存在于 /tmpold 之下
+                    if [ -x /tmpold/usr/bin/busybox ]; then
+                        BB=/tmpold/usr/bin/busybox
+                    fi
+                    $BB mount --move /tmpold/dev /dev 2>/dev/null || true
+                    $BB mount --move /tmpold/proc /proc 2>/dev/null || true
+                    $BB mount --move /tmpold/sys /sys 2>/dev/null || true
+                    echo "!!! H5000M: 救援模式就绪（/ 可写，上层为 tmpfs，重启不保留）!!!" >&2
+                    exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
+                fi
+                echo "!!! 救援 pivot_root 失败，转串口应急 shell !!!" >&2
+                cd /
+            else
+                echo "!!! 救援 overlay 挂载失败（lower=/sq upper=/rrw tmpfs），转串口应急 shell !!!" >&2
+            fi
+        else
+            echo "!!! 救援 tmpfs 挂载失败，转串口应急 shell !!!" >&2
+        fi
+    else
+        echo "!!! 救援前置条件不满足（第 $N 次进入 / SquashFS 是否已挂载见上），转串口应急 shell !!!" >&2
     fi
-    $BB mount --move /tmpold/dev /dev 2>/dev/null || true
-    $BB mount --move /tmpold/proc /proc 2>/dev/null || true
-    $BB mount --move /tmpold/sys /sys 2>/dev/null || true
-    exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
+
+    # 终局兜底：串口应急 shell（/dev/console 交互，可手动修复）。
+    # 【勿改回 exec /sbin/init】那会重新走一遍整套挂载流程（旧实现即如此，构成自循环）。
+    echo "!!! 降级为串口应急 shell：可手动 'mount -o remount,rw /' 排查后 'exec /sbin/init' !!!" >&2
+    while :; do
+        "$BB" sh </dev/console >/dev/console 2>&1
+        echo "!!! 应急 shell 退出，5 秒后重新进入（防 PID1 退出引发 panic）!!!" >&2
+        $BB sleep 5
+    done
 }
 $BB mount -t squashfs -o ro "$SQ" /sq || overlay_fail "squashfs 挂载失败"
 $BB mount -t overlay overlay \
@@ -419,20 +497,39 @@ cat > "$STAGE/etc/fstab" <<'FSTAB_EOF'
 # 由引导层 /sbin/init 在内核挂载 p5 后组装；此文件仅作布局说明，无运行时挂载项。
 FSTAB_EOF
 
-# /boot 兜底引导文件（主路径为 p4 FIT；distro boot 兜底保留 DTB/extlinux/boot.scr）
+# /boot 兜底引导文件（主路径为 p4 FIT；distro boot 兜底按需保留 Image/DTB/extlinux/boot.scr）
 if [[ -f "$DTB" ]]; then
   cp -f "$DTB" "$STAGE/boot/mt7987a-hiveton-h5000m.dtb"
 fi
-cat > "$STAGE/boot/extlinux/extlinux.conf" <<EOF
+if [[ -f "$BOOT_DIR/boot.scr" ]]; then
+  cp -f "$BOOT_DIR/boot.scr" "$STAGE/boot/boot.scr"
+  log "  boot.scr 已写入 /boot（distro boot 兜底；p5 分支依赖 /boot/Image，USB 分支需手工放入）"
+fi
+
+# 【P1 修复 2026-10-09】boot.scr 的 p5 分支与 extlinux.conf 都引用 /boot/Image，但全脚本
+# 此前**从不**把 Image 放进 $STAGE（只把 FIT 写 p4，而 FIT 不能当 booti 的裸 Image 用），
+# 于是这两个"兜底引导"在实机上 100% 以 "File not found: /boot/Image" 收场——
+# 文档（docs/debian13-partition-plan.md §7"两套文件均已预置"）声称存在、实机并不存在。
+# 处置：按开关决定，**配置与实现必须一致**：
+#   开 → 落盘 /boot/Image + 写 extlinux.conf（兜底引导真实可用；镜像约 +60 MiB）
+#   关 → 既不落 Image 也不留 extlinux.conf（默认省空间，且不留引用空气的配置）
+if (( KEEP_BOOT_IMAGE == 1 )); then
+  install -m 0644 "$IMAGE" "$STAGE/boot/Image"
+  mkdir -p "$STAGE/boot/extlinux"
+  cat > "$STAGE/boot/extlinux/extlinux.conf" <<EOF
 # Hiveton H5000M Debian 13 — 备用引导（主引导为 p4 FIT，由现有 U-Boot bootm 加载）
+# 本文件仅在 /boot/Image 同时存在时有意义；二者由 make-sd-image.sh --keep-boot-image 一同落盘。
+# APPEND 带 rw：与 FIT_BOOTARGS / boot.cmd 三处 cmdline 保持一致（引导层 init 内 remount,rw 为兜底）。
 LABEL H5000M Debian 13
     KERNEL ../Image
     FDT ../mt7987a-hiveton-h5000m.dtb
-    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
+    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf console=ttyS0,115200n8
 EOF
-if [[ -f "$BOOT_DIR/boot.scr" ]]; then
-  cp -f "$BOOT_DIR/boot.scr" "$STAGE/boot/boot.scr"
-  log "  boot.scr 已写入 /boot（U-Boot distro boot 兜底）"
+  log "  /boot/Image 已写入（$(( IMAGE_BYTES / 1024 / 1024 )) MiB）+ /boot/extlinux/extlinux.conf 就位"
+else
+  # 不写 extlinux.conf：extlinux 的 KERNEL 只能是 booti 用的裸 Image，无法指向 p4 的 FIT；
+  # 留一个引用不存在文件的配置，只会把"引导失败"伪装成"文件找不到"。
+  rmdir "$STAGE/boot/extlinux" 2>/dev/null || true
 fi
 
 truncate -s "${IMG_SIZE_MB}M" "$ROOTFS_IMG"
@@ -447,6 +544,21 @@ debugfs -R 'stat /squashfs/rootfs.squashfs' "$ROOTFS_IMG" 2>/dev/null | grep -q 
   && log "  [OK] /squashfs/rootfs.squashfs 就位（$SQ_BYTES 字节）" || die "镜像内 squashfs 文件异常"
 debugfs -R 'stat /usr/bin/busybox' "$ROOTFS_IMG" 2>/dev/null | grep -q "Size: $BB_SIZE" \
   && log "  [OK] /usr/bin/busybox 就位（$BB_SIZE 字节）" || die "镜像内 busybox 异常"
+
+# /boot 兜底引导自检：Image 与 extlinux.conf 必须**同进同退**。
+# 2026-10-09 修掉的 P1 缺陷正是二者脱节（写了 extlinux.conf 却没有 Image）。
+if (( KEEP_BOOT_IMAGE == 1 )); then
+  debugfs -R 'stat /boot/Image' "$ROOTFS_IMG" 2>/dev/null | grep -q "Size: $IMAGE_BYTES" \
+    && log "  [OK] /boot/Image 就位（$IMAGE_BYTES 字节，p5 兜底引导可用）" \
+    || die "镜像内 /boot/Image 缺失或大小异常（$IMAGE_BYTES 字节）"
+  debugfs -R 'stat /boot/extlinux/extlinux.conf' "$ROOTFS_IMG" 2>/dev/null | grep -q 'Size:' \
+    && log "  [OK] /boot/extlinux/extlinux.conf 就位" || die "镜像内 extlinux.conf 缺失，兜底引导不可用"
+else
+  if debugfs -R 'stat /boot/extlinux/extlinux.conf' "$ROOTFS_IMG" 2>/dev/null | grep -q 'Size:'; then
+    die "镜像内出现 /boot/extlinux/extlinux.conf 但未落盘 /boot/Image（未加 --keep-boot-image）：该配置必然引用不存在的文件，拒绝产出。"
+  fi
+  log "  [OK] 未落盘 /boot/Image 与 extlinux.conf（默认省空间，配置与实现一致）"
+fi
 
 # ================================================================ 4. 输出
 log "=========================================="

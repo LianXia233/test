@@ -37,7 +37,7 @@ p5 引导层 ext4
 ├── /usr/bin/busybox            静态 busybox（Debian busybox-static arm64）
 ├── /squashfs/rootfs.squashfs   Debian 13 只读基础系统（zstd 压缩，~120 MiB）
 ├── /overlay/{upper,work,merged} OverlayFS upper/work/挂载点（p5 剩余空间 = 持久化数据）
-└── /boot/                      备用引导文件（DTB / extlinux.conf / boot.scr）
+└── /boot/                      引导文件：DTB + boot.scr（始终）；extlinux.conf + Image（仅 --keep-boot-image）
 ```
 
 ### 2.2 启动序列（/sbin/init）
