@@ -16,7 +16,7 @@
 | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
 | --- | --- | --- | --- |
 | Hiveton H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
-| Airpi AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑复验） | ⚠️ **未验证** |
+| Airpi AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（第 4 次：`生成刷写包` 步骤 `BB: unbound variable`，已修复待复验） | ⚠️ **未验证** |
 
 > ## ⚠️ 本项目至今没有任何一块板卡完成实机验收
 >
@@ -29,14 +29,20 @@
 
 | run id | 提交 | 事件 | 结果 | 关键 job 结论 |
 | --- | --- | --- | --- | --- |
+| [37851849934](https://github.com/LianXia233/test/actions/runs/37851849934) | `9e8f8f7` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`生成刷写包` 步骤，23 s，`BB: unbound variable`） |
+| [37851638744](https://github.com/LianXia233/test/actions/runs/37851638744) | `76edd3a` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | **未进入 job**：并发组死锁被取消（`deadlock ... between a top level workflow and 'build'`） |
+| [37851376164](https://github.com/LianXia233/test/actions/runs/37851376164) | `3054c00` | `workflow_dispatch`（AP3000M 薄壳） | ❌ startup_failure | **未进入 job**：`cache-cleanup` 需 `actions: write`，壳的上限只给了 `contents` → 降为 `none` |
 | [37843516159](https://github.com/LianXia233/test/actions/runs/37843516159) | `c3f861d` | `workflow_dispatch` | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`构建 Debian 13 RootFS` 步骤，1 min 46 s） |
 | [37841719136](https://github.com/LianXia233/test/actions/runs/37841719136) | `e9c1594` | `workflow_dispatch` | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ❌（`编译 Linux 内核` 步骤，44 s） |
 | [37840375623](https://github.com/LianXia233/test/actions/runs/37840375623) | `a8e73ce` | `workflow_dispatch` | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ❌（`编译 Linux 内核` 步骤，46 s） |
 | [37825051627](https://github.com/LianXia233/test/actions/runs/37825051627) | `c21fc66` | `workflow_dispatch` | ✅ success | H5000M 全链路（多板化改造**之前**的最后一轮） |
 
-> **scope 说明**：`37843516159` 是**部分成功** —— 内核 job 通过、RootFS job 失败。
+> **scope 说明**：`37851849934` 与 `37843516159` 都是**部分成功** —— 内核 job 通过、RootFS job 失败。
 > 不要笼统写成「AP3000M 云编译失败」，那会掩盖「内核已能编过」这个关键进展；
-> 也不要写成「失败两次」，实际是**三次失败、三个阶段各不相同**（见 §4）。
+> 也不要说「失败两次」，实际是**多次失败、每个阶段各不相同**（见 §4）。
+>
+> 另外 `37851376164` / `37851638744` 是**薄壳 workflow 自身的缺陷**（根本没进 job），
+> 与构建逻辑无关，单独归类见 §4.1。
 
 ## 3. 历史参照 Run（非当前状态依据）
 
@@ -49,16 +55,17 @@
 | [37550743057](https://github.com/LianXia233/test/actions/runs/37550743057) | `42f93ec1` | H5000M 实机迁移阶段的一次失败 run（内核可诊断性修复前） |
 | [37549966619](https://github.com/LianXia233/test/actions/runs/37549966619) | `b7df0e4b` | `clean-cache.yml` 权限事故（缺 `actions: write`，HTTP 403），修复记录见 `clean-cache.yml` 注释 |
 
-## 4. 三次失败的根因
+## 4. 失败根因（按阶段分组）
 
-**第 1、2 次症状完全相同而根因不同**；**第 3 次换了阶段、根因又是新的**。
-这是本问题最难排查之处 —— 每修完一次都必须**重新实证**，不能假设"还是老原因"。
+**每一次症状都不同、根因都不一样** —— 这是本问题最难排查之处：每修完一次都必须
+**重新实证**，不能假设"还是老原因"。截至当前共 **4 次构建阶段失败 + 2 次薄壳缺陷**。
 
 | # | run | 失败阶段 | 根因 | 修复 |
 | --- | --- | --- | --- | --- |
 | 1 | 37840375623 | 内核编译（46 s） | 只有 `Kbuild` + `drivers/hwmon/Makefile` 注册，**缺 `drivers/hwmon/Kconfig` 注册** → 符号 `CONFIG_AIRPI_GPIO_FAN` 在内核配置树中不存在 → `.config` 的 `=m` 被 `olddefconfig` **静默丢弃** | 新增 `kernel/files-boards/ap3000m/drivers/hwmon/airpi-gpio-fan/Kconfig`；`build/build-kernel.sh` 在 `endif # HWMON` 之前幂等插入 `source`，并硬校验文件存在（缺失即 `die`） |
 | 2 | 37841719136 | 内核编译（44 s） | 补了 Kconfig，但 `depends on GPIOLIB && HRTIMER` —— **`HRTIMER` 不是 Kconfig 符号**（内核里只有 `HIGH_RES_TIMERS`；hrtimer 是核心基础设施，无条件编入） → 依赖项恒为 `n` → 符号恒不可见 → `=m` **第二次被静默丢弃** | 改为 `depends on GPIOLIB`；Kconfig 内补入可复用规则注释；`scripts/tests/test-board-kconfig-registration.sh` 13 → 15 项，加入 `depends` 符号可达性双向校验 |
 | 3 | 37843516159 | **RootFS 构建**（1 min 46 s） | **MT7981 固件「路径 + 清单」双错**：① 路径写成 `mediatek/mt7981/mt7981_*.bin`（子目录），而上游与内核均用**平铺** `mediatek/mt7981_*.bin` → 上游 **404**；② 清单漏了 `mt7981_wm.bin`（**主固件**，驱动加载必需） | 路径改平铺、清单补齐 3 件（`wa` / `wm` / `rom_patch`）、`dest` 改 `mediatek`；补入真实 sha256 白名单；`build/build-rootfs.sh` 的 `REQUIRED_FIRMWARE` 同步并写明「缺一不可」 |
+| 4 | 37851849934 | **生成刷写包**（23 s） | **`build/make-sd-image.sh` heredoc 分隔符漏引号**：生成引导层 `/sbin/init` 用的是 `<<INIT_EOF`（未加引号），外层 shell 先做变量展开；而内嵌脚本含大量**外层不存在的自赋值变量**（`BB` / `SQ` / `MERGED` / `RETRY_FILE` / `N` / `_m`）→ `set -Eeuo pipefail` 下 407 行 `BB: unbound variable` 直接退出 | 分隔符改 `<<'INIT_EOF'`（内层变量一律字面保留）；板级值改 `@BOARD_NAME@` 等占位符，生成后显式替换 + **残留即 `die`** 兜底；新增 `scripts/tests/test-boot-init-heredoc.sh`（18 项） |
 
 **三次共同教训**：
 
@@ -68,21 +75,50 @@
   不是「按 SoC 建子目录」的直觉推论 —— 靠"看起来合理"猜路径必然翻车。
   且**清单可能同时不全**：修路径时若不回头核对内核头文件，仍会漏掉 `wm`（主固件）。
   正确做法是**逐个 HEAD 请求核实上游存在性**，而不是命名类推。
+- **第 4 次**：`bash -n` / shellcheck **查不出**这类缺陷 —— 语法完全合法，只在**展开期**才炸。
+  且它只在「走到生成刷写包这步」才暴露：内核 job 跑不到，H5000M 跑过但当时内嵌脚本里
+  还没有 `BB` 这类变量（后来才加）。**"修一半"更危险**：只把 `BB` 挪到外层，后面
+  `MERGED`/`N`/`RETRY_FILE` 会连环爆；若外层变量恰好为空则被**静默替换成空串**，
+  生成一个能跑但行为错误的 init —— 实机表现为莫名启动失败，比直接报错难查得多。
+
+### 4.1 薄壳 workflow 自身缺陷（未进入 job，与构建逻辑无关）
+
+`build-h5000m.yml` / `build-ap3000m.yml` 是 `workflow_call` 薄壳（板卡写死、逻辑复用 `build.yml`）。
+首次触发连续踩两个坑，**都不是构建问题**，但都让 run 在"还没开始跑"就结束：
+
+| run | 症状 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 37851376164 | `startup_failure`，**job 数 0** | `workflow_call` 的权限取「调用方 ∩ 被调用方」，**调用方权限是所有被调用 job 的硬上限**。壳顶层只声明 `contents: read`，而基座 `cache-cleanup` 需 `actions: write` → 上限为 `none` → 校验阶段即拒 | 壳顶层放开 `actions: write` + `contents: write`（基座各 job 用到的**全部**权限）；`test-workflow-board-callchain.sh` 补 7b 项，遍历基座每个 job 的 permissions 逐一校验上限 |
+| 37851638744 | 3 秒即结束，**job 数 0** | **并发组死锁**：壳 `group: ap3000m-build-${{ github.ref }}` 与基座 `${{ inputs.board }}-build-${{ github.ref }}` **求值完全相同** → 自我等待 | 删除壳的顶层 `concurrency`，**并发控制由基座统一持有**（基座 group 已含 `board`，两板天然隔离）；测试第 8 项改为「把基座模板代入壳的 board 值后做字符串相等比较」 |
+
+> **为什么原来的守卫没拦住**：两处都是"看似覆盖、实则有洞"——
+> 权限守卫只查了 `contents` 漏了 `actions`；并发守卫用"group 含板卡名即通过"，
+> 而事故里的 group 恰好含板卡名，**完全放行**。两者均已重写并**经负向验证确认能拦住**。
 
 **验证闭环**：
 
 - `scripts/tests/test-board-kconfig-registration.sh` —— 把 `HRTIMER` 加回去，测试由
   「15 通过」降为「13 通过 2 失败」，确认能真正拦住该陷阱；
+- `scripts/tests/test-boot-init-heredoc.sh` —— 把 heredoc 引号去掉还原事故写法，
+  测试由「18 通过」降为「8 通过 10 失败」，且**复现出与线上完全相同的
+  `BB: unbound variable`**；
+- `test-workflow-board-callchain.sh` —— 两处守卫各自经负向验证（去掉 `actions: write` /
+  还原死锁 group 写法），均能精确 FAIL；
 - run 37843516159 的内核 job（`编译 Linux 内核（Image / DTB / modules）` 步骤）
-  **已成功**，这是对第 1、2 次修复的端到端确认；
+  **已成功**，端点确认第 1、2 次修复；
 - 第 3 次修复后**实跑 `fetch-firmware.py --board ap3000m`**：3/3 下载成功、
-  sha256 与白名单逐项匹配（494256 / 2054688 / 9824 字节）。**待下次 CI 复验。**
+  sha256 与白名单逐项匹配（494256 / 2054688 / 9824 字节）；
+- run 37851849934 的 `构建 Debian 13 RootFS` 与 `生成只读基础系统 SquashFS（zstd）`
+  步骤**均 ✅ 通过** —— 端点确认第 3 次修复。
+- 第 4 次修复后**隔离实跑生成逻辑**：生成成功、无占位符残留、内层自赋值保持字面量、
+  板级值正确注入、权限 0755、生成物 `bash -n` 通过。**待下次 CI 复验。**
 
 ## 5. 待验证清单
 
-- [ ] **重跑 AP3000M 云编译**：确认 RootFS + 刷写包 job 转绿（第 3 次修复的效果验证）
+- [ ] **重跑 AP3000M 云编译**：确认 RootFS + 刷写包 job 转绿（第 4 次修复的效果验证）
 - [ ] RootFS job 全绿（构建 RootFS 树 / SquashFS / 引导层镜像 / sysupgrade 包 / Release）
 - [ ] `out/AP3000M-debian13-kernel.bin` 首 4 字节为 FIT 魔数且 < 30 MiB
+  （注：run 37851849934 中该文件已生成，12389511 字节，FIT 魔数校验通过 —— **待下次 run 复现确认**）
 - [ ] `out/AP3000M-debian13-rootfs.bin` 通过 `e2fsck -fn`
 - [ ] **实机**：真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
 - [ ] **实机**：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、

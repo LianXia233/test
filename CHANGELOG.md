@@ -4,6 +4,104 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 薄壳触发问题 + 第 4 次构建失败（引导层 init heredoc）修复，AP3000M 推进到「生成刷写包」
+
+**背景**：文档按实际更新并推送到远端后，首次真正触发薄壳 workflow，连续暴露
+**两个薄壳自身缺陷 + 一个构建脚本缺陷**。三者性质完全不同，逐个修复。
+
+#### 一、远端历史分叉：哈希漂移（推送前必须先核对）
+
+推送时发现远端 main（`933a8bd`）与本地同名提交 **SHA 不同**，且 `git fetch` 反复
+返回陈旧引用（git 协议经沙箱代理被缓存，与 GitHub API 结果不一致）。
+
+- 用 **API 权威查询**确认远端真实 HEAD，再按 **精确 SHA** `git fetch` 绕过缓存；
+- 逐字节比对确认：远端 `933a8bd` 与本地 `116af8f` **内容完全一致**，仅提交元信息不同
+  （此前云服务器侧以不同时间戳重推所致）；
+- 处理：以远端为基线 `git rebase --onto`，只重放本地真正新增的提交，零冲突、内容树逐字节一致。
+
+**顺手修正远端缺陷**：`933a8bd` 中 `scripts/tests/test-board-kconfig-registration.sh`
+权限为 `100644`（丢了可执行位，同级脚本均为 `100755`），已恢复。
+
+#### 二、薄壳 workflow 缺陷 1：`startup_failure`（job 数 0）
+
+```
+The nested job 'cache-cleanup' is requesting 'actions: write',
+but is only allowed 'actions: none'.
+```
+
+`workflow_call` 的权限取「调用方 ∩ 被调用方」，且**调用方权限是所有被调用 job 的硬上限** ——
+调用方没声明的权限，在被调用方一律降为 `none`，被调用 job 里写再高也没用。
+壳顶层原只声明 `contents: read`，而基座 `cache-cleanup` 需 `actions: write`。
+
+修复：壳顶层放开 `actions: write` + `contents: write`。**原注释里"job 级声明即可"的理解是错的**，一并改正。
+
+#### 三、薄壳 workflow 缺陷 2：并发组死锁（3 秒即结束）
+
+```
+Canceling since a deadlock was detected for concurrency group:
+'ap3000m-build-refs/heads/main' between a top level workflow and 'build'
+```
+
+壳 `group: ap3000m-build-${{ github.ref }}` 与基座 `${{ inputs.board }}-build-${{ github.ref }}`
+**求值完全相同** → 自我等待。修复：删除壳的顶层 `concurrency`，**由基座统一持有**
+（基座 group 已含 `board`，两板天然隔离）。
+
+#### 四、构建缺陷（第 4 次）：引导层 init 的 heredoc 漏引号
+
+```
+build/make-sd-image.sh: line 407: BB: unbound variable
+```
+
+生成引导层 `/sbin/init` 用 `cat > ... <<INIT_EOF`（**未加引号**），外层 shell 先做变量展开；
+而内嵌脚本含大量**外层不存在的自赋值变量**（`BB` / `SQ` / `MERGED` / `RETRY_FILE` / `N` / `_m`）
+→ `set -Eeuo pipefail` 下当场退出。
+
+**为什么长期潜伏**：`bash -n` / shellcheck 查不出（语法合法，只在展开期炸）；且只在走到
+「生成刷写包」才暴露（内核 job 跑不到；H5000M 跑过但当时内嵌脚本还没有 `BB`）。
+**"修一半"更危险**：只挪 `BB` 会让后面变量连环爆；若外层变量恰好为空则被静默替换成空串，
+生成能跑但行为错误的 init —— 实机表现为莫名启动失败。
+
+修复：
+
+| 项 | 内容 |
+| --- | --- |
+| 分隔符 | 改 `<<'INIT_EOF'`，内层变量一律字面保留（与同文件 `<<'FSTAB_EOF'` 的既有写法一致） |
+| 板级注入 | 改 `@BOARD_NAME@` / `@BOARD_SOC@` / `@BOARD_UPPER@` / `@BOARD@` 占位符，生成后显式替换 |
+| 兜底 | 替换后若仍有 `@XXX@` 残留即 `die`（防漏配占位符静默产出坏 init） |
+| 测试 | 新增 `scripts/tests/test-boot-init-heredoc.sh`（18 项） |
+
+#### 五、补守卫：四处"看似覆盖、实则有洞"的判定
+
+| 守卫 | 原有漏洞 | 修正 |
+| --- | --- | --- |
+| `test-workflow-board-callchain.sh` 第 7 项 | 只查 `contents: write`，**漏了 `actions`** | 新增 7b：遍历基座每个 job 的 permissions，逐一校验壳的上限 ≥ 之 |
+| 同上 第 8 项 | 「group 含板卡名即通过」——事故里的 group 恰好含板卡名，**完全放行** | 把基座模板代入壳的 board 值后做**字符串相等**比较，相等即判死锁 |
+| 同上 项数 | 23 项 | **25 项** |
+| `test-boot-init-heredoc.sh` | 全新 | 18 项：A 引号 / B 内层裸变量 / C 占位符双向一致 + 残留兜底 / D 端到端生成 |
+
+**四项负向验证全部实测可拦住**：
+- 去掉 `actions: write` → 24 通过 1 失败，报「cache-cleanup 需要 actions: write」
+- 还原死锁 group 写法 → 24 通过 1 失败，报「壳与基座并发组求值相同 → 死锁」
+- heredoc 去引号还原事故写法 → **8 通过 10 失败**，且**复现出与线上完全相同的 `BB: unbound variable`**
+
+#### 六、真源与文档同步
+
+`docs/ci-status.md`：状态表 AP3000M RootFS 列更新为第 4 次失败；Run 明细补 3 个新 run
+（10 个 run id 全部登记）；§4 重写为「按阶段分组」并补第 4 次根因；新增 §4.1 专门归类
+**薄壳自身缺陷**（未进入 job，与构建逻辑无关）；§5 待验证清单更新。
+
+**验证**：
+
+- 全量回归 **7 组全绿**（18 + 25 + 16 + 15 + 15 + 18 项 + 1 组无汇总行）；
+- `bash -n` FAIL=0；actionlint 无错误；4 个 workflow YAML 可解析；
+- 新增测试 0755、LF 行尾；
+- 真实 run 证据：`37851849934` 中 **`构建 Debian 13 RootFS` ✅ 通过、
+  `生成只读基础系统 SquashFS（zstd）` ✅ 通过、内核 job ✅ 通过**
+  —— 端点确认第 3 次（MT7981 固件路径/清单）修复**已完全生效**。
+
+**当前状态**：AP3000M 质量门 ✅ / 内核 ✅ / RootFS 构建 ✅ / **`生成刷写包` ❌（第 4 次，已修复待复验）**。
+两板实机验收仍全部未做。
+
 ### 2026-10-09 — 修复 AP3000M 第三次云编译失败（MT7981 固件路径 + 清单双错）+ docs 全面按实际更新
 
 **触发**：用户要求「docs 里所有文档，根据实际更新」。

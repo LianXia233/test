@@ -404,14 +404,14 @@ cp -f "$SQUASHFS" "$STAGE/squashfs/rootfs.squashfs"
 
 # 引导层 init：挂 SquashFS → 组装 OverlayFS → pivot_root → 交棒 systemd
 # （沙箱已验证：busybox applet 齐备；pivot_root 序列真机等价模拟通过）
-cat > "$STAGE/sbin/init" <<INIT_EOF
+cat > "$STAGE/sbin/init" <<'INIT_EOF'
 #!/usr/bin/busybox sh
-# ${BOARD_NAME} (${BOARD_SOC}) Debian 13 引导层 init —— SquashFS + OverlayFS 组装
+# @BOARD_NAME@ (@BOARD_SOC@) Debian 13 引导层 init —— SquashFS + OverlayFS 组装
 # 内核已按 cmdline root=PARTLABEL=rootfs 挂载 p5（本引导层 ext4）为 /。
 # 职责：remount rw → 挂 squashfs → 组装 overlay → pivot_root → 交棒 systemd。
 set -u
 BB=/usr/bin/busybox
-RETRY_FILE=/dev/.${BOARD}_rescue_count   # devtmpfs 恒可写：root 只读时也能做救援计数
+RETRY_FILE=/dev/.@BOARD@_rescue_count   # devtmpfs 恒可写：root 只读时也能做救援计数
 $BB mkdir -p /dev /proc /sys /tmp /sq /overlay/upper /overlay/work /overlay/merged
 $BB mount -t proc proc /proc 2>/dev/null || true
 $BB mount -t sysfs sysfs /sys 2>/dev/null || true
@@ -424,11 +424,11 @@ $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true   # 已挂载（DEVTMPFS
 $BB mount -o remount,rw / 2>/dev/null \
     || $BB mount -o remount,rw /dev/root / 2>/dev/null \
     || $BB mount -n -o remount,rw / 2>/dev/null \
-    || echo "!!! ${BOARD_UPPER}: 根文件系统 remount,rw 失败（cmdline 可能含 ro），继续尝试 overlay !!!" >&2
+    || echo "!!! @BOARD_UPPER@: 根文件系统 remount,rw 失败（cmdline 可能含 ro），继续尝试 overlay !!!" >&2
 SQ=/squashfs/rootfs.squashfs
 MERGED=/overlay/merged
 overlay_fail() {
-    echo "!!! ${BOARD_UPPER}: Overlay 组装失败（$*），进入救援流程 !!!" >&2
+    echo "!!! @BOARD_UPPER@: Overlay 组装失败（$*），进入救援流程 !!!" >&2
     # 【防 OOM 修复 2026-10-06】旧实现无条件重执行 init → 失败后无限循环：
     # 实机实测 437 轮（每轮挂 squashfs 泄漏 kmalloc-4k，约 465MiB）→ t=128s
     # "Kernel panic - not syncing: System is deadlocked on memory"。
@@ -486,7 +486,7 @@ overlay_fail() {
                     $BB mount --move /tmpold/dev /dev 2>/dev/null || true
                     $BB mount --move /tmpold/proc /proc 2>/dev/null || true
                     $BB mount --move /tmpold/sys /sys 2>/dev/null || true
-                    echo "!!! ${BOARD_UPPER}: 救援模式就绪（/ 可写，上层为 tmpfs，重启不保留）!!!" >&2
+                    echo "!!! @BOARD_UPPER@: 救援模式就绪（/ 可写，上层为 tmpfs，重启不保留）!!!" >&2
                     exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
                 fi
                 echo "!!! 救援 pivot_root 失败，转串口应急 shell !!!" >&2
@@ -529,6 +529,27 @@ $BB mount --move /tmpold/proc /proc 2>/dev/null || true
 $BB mount --move /tmpold/sys /sys 2>/dev/null || true
 exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
 INIT_EOF
+# 【占位符替换，勿删】
+# 上面的 heredoc 用的是**带引号**的分隔符（<<'INIT_EOF'），内层变量一律保持字面量，
+# 不会在生成阶段被外层 shell 展开。这是必须的：
+#   · 内层有大量自赋值变量（BB / SQ / MERGED / RETRY_FILE / N / _m），
+#     若 heredoc 不加引号，外层会先展开它们 —— 外层并没有这些变量，
+#     `set -Eeuo pipefail` 下第一个 $BB 就报 "BB: unbound variable" 直接退出
+#     （run 37851849934 实际症状：make-sd-image.sh line 407）。
+#     即便侥幸绕过，后面的变量也会连环爆；更糟的是 BOARD_NAME 之类若恰好为空，
+#     会被静默替换成空串，属于难查的假成功。
+#   · 因此板级值改为占位符 @XXX@，在生成后**显式**替换，
+#     做到「哪些值来自外层」一眼可见，而不是靠读者去推断哪几个 $ 会展开。
+# 新增板级注入值时：在 heredoc 里写 @NEW_VAR@，并在下面 REPLACE 列表补一项。
+for _p in "BOARD_NAME:${BOARD_NAME}" "BOARD_SOC:${BOARD_SOC}" \
+          "BOARD_UPPER:${BOARD_UPPER}" "BOARD:${BOARD}"; do
+  _k="${_p%%:*}"; _v="${_p#*:}"
+  sed -i "s|@${_k}@|${_v}|g" "$STAGE/sbin/init"
+done
+# 替换后不得再有 @XXX@ 残留（漏配占位符会生成带 @ 的坏 init，实机静默启动失败）
+if grep -q '@[A-Z_][A-Z0-9_]*@' "$STAGE/sbin/init"; then
+  die "引导层 init 仍有未替换的占位符：$(grep -o '@[A-Z_][A-Z0-9_]*@' "$STAGE/sbin/init" | sort -u | tr '\n' ' ')"
+fi
 chmod 0755 "$STAGE/sbin/init"
 
 cat > "$STAGE/etc/fstab" <<'FSTAB_EOF'
