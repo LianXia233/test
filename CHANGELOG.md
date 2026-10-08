@@ -4,6 +4,59 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — AP3000M 首次云编译失败修复（内核 Kconfig 符号缺失）+ unit 名一致性收尾
+
+**事故**：AP3000M 首次云编译在 **46 秒**处失败（run 37840375623），日志：
+
+```
+[build-kernel]   [OK] CONFIG_GPIOLIB_LEGACY
+[build-kernel]   [WARN] CONFIG_AIRPI_GPIO_FAN 未启用（补丁未生效或符号名不匹配）
+[build-kernel]   [OK] CONFIG_SENSORS_PWM_FAN
+[build-kernel] ERROR: 关键配置项缺失（见上方 WARN）。--strict 模式下终止构建
+```
+
+40+ 项配置全部 `[OK]`，仅 `CONFIG_AIRPI_GPIO_FAN` 一项失败。
+
+**根因**：板级内核源码层首版只提供了 `airpi-gpio-fan.c` + `Kbuild`，并在
+`drivers/hwmon/Makefile` 追加了 `obj-$(CONFIG_AIRPI_GPIO_FAN) += airpi-gpio-fan/`，
+**但 `drivers/hwmon/Kconfig` 里没有 `source` 驱动目录的 Kconfig**。
+
+后果链：
+1. `CONFIG_AIRPI_GPIO_FAN` 这个符号在内核 Kconfig 树中**根本不存在**；
+2. `.config` 片段里的 `=m` 在 `make olddefconfig` 阶段被当作**未知符号静默丢弃**
+   —— Kconfig 对未知符号不报错，这是最坑的一步；
+3. 模块不编译，`--strict` 配置核验报 WARN 并终止。
+
+关键认知：**Makefile 只回答「怎么编」，Kconfig 才决定「符号是否存在、能否被选中」**，
+两者必须同时提供。且失败信息（"补丁未生效或符号名不匹配"）指向错误方向，
+实际是符号压根没定义。
+
+**修复**：
+
+| 项 | 内容 |
+| --- | --- |
+| 新增 | `kernel/files-boards/ap3000m/drivers/hwmon/airpi-gpio-fan/Kconfig`（`tristate`，含依赖 `GPIOLIB && HRTIMER` 与完整 help） |
+| 修改 | `build/build-kernel.sh` 在 `drivers/hwmon/Kconfig` 的 `endif # HWMON` **之前**插入 `source`，保证落在 `menuconfig HWMON` 块内；幂等，且找不到结束标记时退回文件末尾追加（语法仍合法） |
+| 新增 | 注册后硬校验 `drivers/hwmon/airpi-gpio-fan/Kconfig` 存在，缺失即 `die`（把静默丢弃变成显式失败） |
+| 新增 | `scripts/tests/test-board-kconfig-registration.sh`（13 项）钉住不变量：Kbuild/Kconfig/c 三件套齐备、`config AIRPI_GPIO_FAN` 存在且为 `tristate`、help 缩进规范、**从真实脚本抽取注册块**喂 mock 内核树验证「插在 endif 之前 + 幂等」 |
+
+**同轮一并修复的 unit 名一致性缺陷**（`router-*.service` 板级无关化收尾）：
+
+| 位置 | 问题 | 影响 |
+| --- | --- | --- |
+| `build/rootfs/chroot-finalize.sh` | `enable "${BOARD_PREFIX_}-router-init.service"` 等 5 处 | **真实缺陷**：unit 已改名 `router-*.service`，旧名不存在 → enable 失败；且每行带 `\|\| true` 完全吞掉错误。后果 = 首启网络编排 / 风扇 / 首启扩容 / LED **全部不启动且无任何报错** |
+| `scripts/install-emmc.sh` | 提示语 `${BOARD}-grow-rootfs.service` | 真实缺陷：展开成 `h5000m-…`/`ap3000m-…`，两者都不存在，按此排查会走空 |
+| `build/make-sysupgrade-tar.sh` | 日志 `${BOARD_ID}-grow-rootfs.service` | 真实缺陷：打包日志里的 unit 名错误 |
+| `build/build-rootfs.sh`、`build/rootfs/packages.list` | 注释中的旧 unit 名 / 凭据文件名 | 过时注释，误导维护者 |
+
+另有 `router-fancontrol` 打通 `FAN_HWMON_MATCH` 配置项（原为硬编码字面量 `pwmfan`，
+板级 `BOARD_FAN_HWMON_MATCH` 未被消费）；`status` 子命令新增 `hwmon_match` 输出。
+
+**验证**：本地 `bash -n` FAIL=0；`shellcheck --severity=error` 无输出；
+回归测试 4 组全绿（13 + 15 + 9 + 18 项）；`test-board-kconfig-registration.sh`
+经**负向验证**（删掉 Kconfig 后由 13 通过降为 8 通过 1 失败）确认能真正捕获缺陷。
+CI 侧待重跑 AP3000M 全流程确认。
+
 ### 2026-10-09 — AP3000M 风扇控制落地（GPIO 软 PWM 驱动内置构建 + 三后端 PWM 分流 + 板级回归测试）
 
 **背景**：AP3000M 的风扇接法与 H5000M **完全不同**，且存在两款硬件版本。依据官方

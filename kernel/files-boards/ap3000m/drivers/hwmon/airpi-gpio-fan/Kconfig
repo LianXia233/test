@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# AirPi AP3000M GPIO 软 PWM 风扇驱动
+#
+# 【为什么必须有这个文件 —— 2026-10-09 CI 实测根因】
+# 首版只放了 airpi-gpio-fan.c + Kbuild，并在 drivers/hwmon/Makefile 追加了
+#   obj-$(CONFIG_AIRPI_GPIO_FAN) += airpi-gpio-fan/
+# 但 drivers/hwmon/Kconfig 里没有对应的 source —— 于是 **CONFIG_AIRPI_GPIO_FAN
+# 这个符号在内核配置树中根本不存在**。后果：
+#   - .config 片段里的 CONFIG_AIRPI_GPIO_FAN=m 在 `make olddefconfig` 阶段
+#     被当作未知符号静默丢弃（Kconfig 对未知符号不报错）；
+#   - 模块不会编译，build-kernel.sh --strict 在配置核验阶段报
+#         [WARN] CONFIG_AIRPI_GPIO_FAN 未启用（补丁未生效或符号名不匹配）
+#     CI（ap3000m）因此 46s 即终止。
+# 结论：Makefile 只负责"怎么编"，Kconfig 才负责"符号是否存在、能否被选中"，
+# 两者必须同时提供。
+
+config AIRPI_GPIO_FAN
+	tristate "AirPi AP3000M GPIO soft-PWM fan control"
+	depends on GPIOLIB && HRTIMER
+	help
+	  Software PWM fan controller for the AirPi AP3000M router (MediaTek
+	  MT7981B). Some hardware revisions of this board do not route the fan
+	  to a hardware PWM channel; instead the fan line is wired to a plain
+	  GPIO (540 on the shipped device tree).
+
+	  This driver bit-bangs that GPIO from an hrtimer to synthesize a PWM
+	  signal with 256 duty steps (driver version 4.0.0). The resulting duty
+	  cycle is exposed through a global sysfs node:
+
+	      /sys/kernel/duty_cycle      (rw, 0..255)
+
+	  which the userspace daemon /usr/local/sbin/router-fancontrol consumes
+	  through its "softpwm" backend. Module parameters fangpio / cycle /
+	  period / fanen tune the GPIO number, PWM period and master enable.
+
+	  Boards whose fan is attached to a real PWM channel (the 8 GB eMMC
+	  revision of the AP3000M, and the H5000M) do NOT need this driver and
+	  use the standard pwm-fan hwmon path instead.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called airpi-gpio-fan.

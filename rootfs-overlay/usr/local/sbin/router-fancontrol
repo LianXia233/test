@@ -115,6 +115,10 @@ load_config() {
 	# PWM 后端：auto | hwmon | pwmchip | softpwm（板级层按硬件接法指定）
 	PWM_BACKEND="$(cfg_string PWM_BACKEND auto)"
 	case "$PWM_BACKEND" in auto|hwmon|pwmchip|softpwm) ;; *) PWM_BACKEND="auto" ;; esac
+	# 硬件 PWM 的 hwmon 名（板级默认由 boards/overlay.d/<board>/etc/default/
+	# router-fancontrol 提供；缺省沿用 pwmfan）。空值视为未配置，保留内置默认。
+	HW_NAME="$(cfg_string FAN_HWMON_MATCH "${HW_NAME:-pwmfan}")"
+	[ -n "$HW_NAME" ] || HW_NAME="pwmfan"
 
 	CURVE_SILENT="$(cfg_string CURVE_SILENT '20:0,35:0,40:50,55:50,70:60,85:75,95:100')"
 	CURVE_BALANCED="$(cfg_string CURVE_BALANCED '20:0,35:0,40:50,55:60,70:75,85:90,95:100')"
@@ -151,12 +155,19 @@ EMMC_SECTORS_FILE="/sys/block/mmcblk0/size"
 SOFTPWM_NODE="/sys/kernel/duty_cycle"
 EMMC_LARGE_SECTORS=25000000
 
+# 硬件 PWM 的 hwmon 名匹配串，由配置项 FAN_HWMON_MATCH 覆盖（见 load_config）。
+# 【为什么是可配置的】pwm-fan 驱动导出的 hwmon `name` 取决于 DTS 节点名：
+# H5000M 的节点叫 pwmfan，而其它板卡/内核版本可能是 pwm-fan 或别的名字。
+# 匹配串只是**优先提示**——find_pwm_hwmon 在其失配时仍会扫描任意
+# hwmon*/pwm1 兜底，因此填错不会导致「找不到节点」，只是失去排序偏好。
+HW_NAME="pwmfan"
+
 find_pwm_hwmon() {
 	local hwmon pwm name
 	for hwmon in /sys/class/hwmon/hwmon*; do
 		[ -d "$hwmon" ] || continue
 		name="$(sysfs_read "$hwmon/name")"
-		[ "$name" = "pwmfan" ] || continue
+		[ "$name" = "$HW_NAME" ] || continue
 		pwm="$hwmon/pwm1"
 		[ -e "$pwm" ] && { echo "$pwm"; return 0; }
 	done
@@ -720,6 +731,7 @@ print_status() {
 	print_settings
 	echo "pwm_backend=$(resolve_pwm_backend "${PWM_BACKEND:-auto}")"
 	echo "pwm_backend_cfg=${PWM_BACKEND:-auto}"
+	echo "hwmon_match=${HW_NAME:-pwmfan}"
 	echo "softpwm_node=$([ -e "$SOFTPWM_NODE" ] && echo 1 || echo 0)"
 	echo "softpwm_loaded=$(softpwm_module_loaded && echo 1 || echo 0)"
 	echo "emmc_sectors=$(sysfs_read "$EMMC_SECTORS_FILE")"

@@ -308,8 +308,44 @@ if [[ "$BOARD" == "ap3000m" ]]; then
     log "drivers/hwmon/Makefile 已含 airpi-gpio-fan/，跳过"
   fi
   grep -n "airpi-gpio-fan" "$HWMON_MAKEFILE" | sed 's/^/[build-kernel]   /'
+
+  # 【Kconfig 必须同时注册 —— 2026-10-09 CI 实测 root cause】
+  # Makefile 的 obj-$(CONFIG_X) 只回答"怎么编"，**不定义符号**。若 Kconfig
+  # 树里没有 config X，`make olddefconfig` 会把 .config 里的 CONFIG_X=m
+  # 当作未知符号**静默丢弃**（Kconfig 对未知符号不报错），随后 --strict
+  # 配置核验报 "CONFIG_AIRPI_GPIO_FAN 未启用" 并终止构建（实测 46s 失败）。
+  # 因此在 drivers/hwmon/Kconfig 的 `endif # HWMON` 之前插入 source。
+  HWMON_KCONFIG="$KERNEL_SRC/drivers/hwmon/Kconfig"
+  if [[ ! -f "$HWMON_KCONFIG" ]]; then
+    die "drivers/hwmon/Kconfig 不存在（内核源码布局异常）"
+  fi
+  if ! grep -q 'airpi-gpio-fan/Kconfig' "$HWMON_KCONFIG"; then
+    # 在结束标记 `endif # HWMON` 之前插入，保证 source 位于 menuconfig HWMON 块内。
+    # 找不到结束标记时退回文件末尾追加——此时 Kconfig 语法仍合法（顶层 source），
+    # 符号照样能被 olddefconfig 识别，只是不挂在 HWMON 菜单下。
+    if grep -q '^endif # HWMON$' "$HWMON_KCONFIG"; then
+      awk '
+        { if ($0 == "endif # HWMON" && !done) {
+            print "source \"drivers/hwmon/airpi-gpio-fan/Kconfig\"";
+            print "";
+            done = 1;
+          }
+          print }
+      ' "$HWMON_KCONFIG" > "$HWMON_KCONFIG.tmp" && mv -f "$HWMON_KCONFIG.tmp" "$HWMON_KCONFIG"
+      log "已在 drivers/hwmon/Kconfig 的 'endif # HWMON' 前 source airpi-gpio-fan/Kconfig"
+    else
+      printf '\nsource "drivers/hwmon/airpi-gpio-fan/Kconfig"\n' >> "$HWMON_KCONFIG"
+      log "drivers/hwmon/Kconfig 未见 'endif # HWMON'，已追加 source 至文件末尾"
+    fi
+  else
+    log "drivers/hwmon/Kconfig 已 source airpi-gpio-fan/Kconfig，跳过"
+  fi
+  grep -n 'airpi-gpio-fan' "$HWMON_KCONFIG" | sed 's/^/[build-kernel]   /'
+
   [[ -f "$KERNEL_SRC/drivers/hwmon/airpi-gpio-fan/Kbuild" ]] \
     || die "板级源码层未落到 drivers/hwmon/airpi-gpio-fan/（检查 kernel/files-boards/$BOARD/）"
+  [[ -f "$KERNEL_SRC/drivers/hwmon/airpi-gpio-fan/Kconfig" ]] \
+    || die "驱动 Kconfig 未落到 drivers/hwmon/airpi-gpio-fan/（缺 CONFIG_AIRPI_GPIO_FAN 符号定义会导致 olddefconfig 静默丢弃 =m）"
 fi
 
 log "注册本板 DTB 到 arch/arm64/boot/dts/mediatek/Makefile：$BOARD_DTB_FILE"
