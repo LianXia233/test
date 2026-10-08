@@ -1,31 +1,67 @@
-# Hiveton H5000M Debian 13 路由器系统
+# Hiveton H5000M / Airpi AP3000M Debian 13 路由器系统
 
-将 Hiveton H5000M（MediaTek MT7987A）完整移植为 **Debian 13 (Trixie) ARM64** 开箱即用路由器系统，集成 **Linux-Router** WebUI。
+> ## ⚠️ 重要警告：本项目仍在测试中，**尚未跑通**
+>
+> **当前状态：AP3000M 云编译连续失败，未产出可用镜像；H5000M 为已通过的历史基线。**
+>
+> | 板卡 | SoC | 最后验证状态 | 说明 |
+> | --- | --- | --- | --- |
+> | Hiveton H5000M | MT7987A | ✅ 通过（`c21fc66`，2026-10-09 18:32） | 已跑通，可作参考基线 |
+> | Airpi AP3000M | MT7981B | ❌ **失败** | 首次接入 CI，内核编译阶段连续两次失败，见下 |
+>
+> AP3000M 失败记录（详细根因与修复见 [CHANGELOG.md](CHANGELOG.md)）：
+>
+> | run | 提交 | 结果 | 失败根因 |
+> | --- | --- | --- | --- |
+> | 37840375623 | `a8e73ce` | ❌ 46s | 缺 `drivers/hwmon/Kconfig` 注册 → `CONFIG_AIRPI_GPIO_FAN` 符号不存在 → `=m` 被 `olddefconfig` **静默丢弃** |
+> | 37841719136 | `e9c1594` | ❌ 46s | 补齐 Kconfig 但 `depends on ... && HRTIMER` 引用了**非 Kconfig 符号** → 符号恒不可见 → `=m` 再次被丢弃 |
+> | （进行中） | `c3f861d` | ⏳ 待验证 | 已移除 `HRTIMER` 依赖（改为 `depends on GPIOLIB`），等待 CI 结果 |
+>
+> **请勿将本仓库当前状态用于生产或刷机验收。** AP3000M 在 CI 产出 `success` 且经过实机验证前，
+> 所有 AP3000M 相关产物、`dts/`、`boards/ap3000m.board`、`build/kernel-conf/ap3000m-6.18.config`
+> 均属**未验证状态**。H5000M 相关能力不受影响，但多板化改造后的回归仍需以 H5000M 实机复核为准。
+>
+> 已知待实机确认项（即使 CI 通过也必须复核）：
+> - AP3000M 真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
+> - 风扇 16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、`fangpio=540` 是否准确
+> - 风扇 8GB 版 `pwm1` 的实际 hwmon 序号
+> - `mt7981` Wi-Fi 固件在 linux-firmware 仓中的路径
 
-- 内核：Linux 6.18.x（含 ImmortalWrt MT7987A 验证补丁 + H5000M DTB）
+将 **Hiveton H5000M（MediaTek MT7987A）** 与 **Airpi AP3000M（MediaTek MT7981B）** 移植为 **Debian 13 (Trixie) ARM64** 开箱即用路由器系统，集成 **Linux-Router** WebUI。
+
+> **多板化架构**：板级差异集中在 `boards/<board>.board`（单一真源）+ `boards/overlay.d/<board>/`（板级 rootfs 层）
+> + `kernel/files-boards/<board>/`（板级内核源码层），构建脚本与 systemd unit 全部板级无关。
+> 新增板卡只需加这三个位置的文件，不必改 `build/*.sh` 或 workflow。
+
+- 内核：Linux 6.18.x（含 ImmortalWrt MT7987A/MT7981B 验证补丁 + 板级 DTB）
 - 用户空间：Debian 13 Trixie ARM64（官方 stable，systemd）
 - 系统形态：**只读基础系统（SquashFS）+ OverlayFS 可写持久层**（系统升级只需替换 SquashFS，配置/数据全保留）
-- 网络服务：NetworkManager 管理接口与连接；`h5000m-router-init` 创建首启连接并装配 nftables；dnsmasq 提供 DHCP/DNS/RA；Linux-Router 提供 WebUI 与代理服务。无线 AP 使用 NetworkManager/wpa_supplicant，hostapd 仅为预装备用组件。
+- 网络服务：NetworkManager 管理接口与连接；`router-init` 创建首启连接并装配 nftables；dnsmasq 提供 DHCP/DNS/RA；Linux-Router 提供 WebUI 与代理服务。无线 AP 使用 NetworkManager/wpa_supplicant，hostapd 仅为预装备用组件。
 - 验收目标：开机即路由器，`http://192.168.88.1` 管理 WAN / LAN / DHCP / DNS / Wi-Fi / 防火墙 / NAT / 路由
 
 ## 硬件支持
 
-| 硬件 | 状态 |
-| --- | --- |
-| MT7987A SoC（ARM64, Cortex-A53） | ✅ 自定义 6.18 内核 |
-| 双 2.5G Ethernet（RTL8221B + 内置 PHY） | ✅ |
-| eMMC（约 14.6 GiB，含 factory NVMEM Wi-Fi EEPROM） | ✅ |
-| PCIe + MT7992 Wi-Fi（2.4G/5G） | 内核启用 mt76；构建时打包所需固件，Debian 实机运行仍需验收 |
-| USB / UART / GPIO / LED / 按键 | ✅ |
-| PWM 风扇 + 智能温控 | ✅ pwm-fan + h5000m-fancontrol（自动曲线 / 手动 / 故障保护） |
+| 硬件 | H5000M (MT7987A) | AP3000M (MT7981B) |
+| --- | --- | --- |
+| SoC / 核心 | MT7987A，4×Cortex-A53 | MT7981B，2×Cortex-A53 |
+| 自定义 6.18 内核 | ✅ 已跑通 | ⚠️ 编译中（见上方警告） |
+| 有线网口 | 双 2.5G（RTL8221B + 内置 PHY） | 千兆（内置 PHY） |
+| eMMC | ✅ 约 14.6 GiB（含 factory NVMEM Wi-Fi EEPROM） | ✅ 8GB / 16GB 两版本（容量影响风扇链路，见下） |
+| Wi-Fi | PCIe + MT7992（2.4G/5G），mt76 模块 | 内置 wmac（MT7915），`mt7915e` 模块 |
+| USB / UART / GPIO / LED / 按键 | ✅ | ✅ |
+| 风扇 | ✅ pwm-fan + `router-fancontrol`（auto 曲线 / 手动 / 故障保护） | ✅ **双路径**：16GB 版 GPIO 软 PWM（`airpi-gpio-fan` + `/sys/kernel/duty_cycle`）；8GB 版硬件 PWM（pwm-fan hwmon）。`PWM_BACKEND=auto` 按 eMMC 容量自动分流 |
+| 串口基址 | `0x11000000` | `0x11002000` |
+| 5G 模组（可选） | MT5700M（USB `eth2`） | MT5700M / FM350-GL（USB `eth2`） |
 
-**WAN / LAN 物理确认**（依据 ImmortalWrt 已验证配置 + H5000M DTS PHY 定义，非猜测）：
+**WAN / LAN 物理确认**（依据 ImmortalWrt 已验证配置 + 各板 DTS PHY 定义，非猜测）：
 
-- **LAN = eth0**（远离电源的 2.5G 口，RTL8221B），`192.168.88.1/24`
-- **WAN = eth1**（靠近电源的 2.5G 口，内置 PHY），DHCP 自动获取
+| 板卡 | LAN | WAN | 说明 |
+| --- | --- | --- | --- |
+| H5000M | `eth0`（远离电源，RTL8221B） | `eth1`（靠近电源，内置 PHY） | `192.168.88.1/24` |
+| AP3000M | `eth0` | `eth1` | `192.168.88.1/24`（两板同网段） |
 
-实机当前 MT5700M 5G 上联使用 `eth2`；Debian 启动配置将其作为 DHCP 备用 WAN（metric 高于 `eth1`）。
-Debian LAN 管理地址仍为 `192.168.88.1/24`，与当前 OpenWrt `192.168.10.1` 不同；首次迁移后，若电脑未从新 LAN 获取地址，请手动将电脑切到 `192.168.88.0/24` 再访问 WebUI。
+5G 模组 `eth2` 作为 DHCP 备用 WAN（metric 高于 `eth1`）。
+Debian LAN 管理地址为 `192.168.88.1/24`，与当前 OpenWrt `192.168.10.1` 不同；首次迁移后，若电脑未从新 LAN 获取地址，请手动将电脑切到 `192.168.88.0/24` 再访问 WebUI。
 
 详见 [docs/architecture.md](docs/architecture.md) 与 [docs/hardware.md](docs/hardware.md)。
 

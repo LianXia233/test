@@ -1,5 +1,18 @@
 # Hiveton H5000M（MT7987A + eMMC）Debian 13 分区方案
 
+> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+>
+> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
+>   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
+> - **H5000M (MT7987A)：✅ 已跑通**（历史基线 `c21fc66`），但多板化改造后的回归
+>   仍需实机复核。
+>
+> 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
+> `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
+> AP3000M 风扇链路）均为**未验证状态**，请勿据此刷机或用于生产。
+> 根因与修复记录见 [../CHANGELOG.md](../CHANGELOG.md)。
+
+
 > 原则：以设备当前正在正常运行的 **OpenWrt 分区布局 / 启动链 / DTS** 为唯一基准。
 > 不重新设计分区方案；仅将 OpenWrt 的 Kernel / RootFS / 可写空间转换为 Debian 13 所需内容。
 > **任何需要修改 BL2 / U-Boot / FIP / u-boot-env / factory 的方案均为不合格。**

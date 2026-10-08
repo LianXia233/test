@@ -1,17 +1,39 @@
 # 构建指南
 
-在 Linux 构建机上生成：
+> ## ⚠️ 警告：项目仍在测试中，**AP3000M 尚未跑通**
+>
+> 本文档描述的多板构建流程**尚未端到端验证通过**。当前状态：
+>
+> - **H5000M (MT7987A)**：✅ 已跑通（历史基线 `c21fc66`）
+> - **AP3000M (MT7981B)**：❌ **未跑通** —— 内核编译阶段连续失败两次
+>   （缺 Kconfig 注册 → 后修复但 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   最新修复 `c3f861d` 仍在等待 CI 验证。
+>
+> **请勿用本文档产出 AP3000M 镜像刷机。** 根因与修复记录见
+> [../CHANGELOG.md](../CHANGELOG.md) 的「AP3000M 首次/二次云编译失败」条目。
+>
+> 下文命令已按多板化（`--board` 参数）更新；若发现仍有旧命名单体残留，
+> 以 `scripts/build.sh --help` 与 `boards/*.board` 为准。
 
-1. Linux 6.18.x 内核（`Image` + H5000M `dtb` + `modules`）
+在 Linux 构建机上生成（每块板卡各产出一套）：
+
+1. Linux 6.18.x 内核（`Image` + 板级 `dtb` + `modules`）
 2. Debian 13 (Trixie) ARM64 RootFS 树
 3. **只读基础系统** `rootfs.squashfs`（RootFS 树瘦身 + zstd 压缩）
-4. **刷写包**：`H5000M-debian13-kernel.bin`（写入 p4 kernel 分区，FIT）+
-   `H5000M-debian13-rootfs.bin`（写入 p5 rootfs 分区，**引导层 ext4**：
+4. **刷写包**：`<BOARD_UPPER>-debian13-kernel.bin`（写入 p4 kernel 分区，FIT）+
+   `<BOARD_UPPER>-debian13-rootfs.bin`（写入 p5 rootfs 分区，**引导层 ext4**：
    `/sbin/init` + busybox + `rootfs.squashfs` + `/overlay` 可写层 + `/boot` 兜底）
 
-> **分区原则**：完全复用 H5000M 现有 OpenWrt 的 eMMC 分区布局与启动链
+**已支持板卡**（见 `boards/*.board`）：
+
+| board ID | 机型 | SoC | DTB | 内核配置 |
+| --- | --- | --- | --- | --- |
+| `h5000m` | Hiveton H5000M | MT7987A (4 核) | `mt7987a-hiveton-h5000m.dtb` | `h5000m-6.18.config` |
+| `ap3000m` | Airpi AP3000M | MT7981B (2 核) | `mt7981b-airpi-ap3000m.dtb` | `ap3000m-6.18.config` |
+
+> **分区原则**：完全复用各板现有 OpenWrt 的 eMMC 分区布局与启动链
 > （BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置一律不动）。
-> 完整方案见 [docs/debian13-partition-plan.md](debian13-partition-plan.md)。
+> 完整方案见 [debian13-partition-plan.md](debian13-partition-plan.md)。
 
 ## 1. 构建机要求
 
@@ -37,13 +59,17 @@ sudo apt-get install -y \
 ```bash
 git clone <本项目> && cd <本项目>
 sudo bash scripts/build.sh \
+  --board h5000m \                 # 或 ap3000m（⚠️ 尚未跑通）
   --kernel-version 6.18.54 \
-  --out /path/to/out \
-  --hostname h5000m-debian
+  --out /path/to/out
 ```
 
-> LAN 网段固定为 192.168.88.1/24（见 `rootfs-overlay/etc/default/h5000m-router`），
-> 无需在命令行指定。
+> `--board` 为**必填**。省略时脚本报错并列出 `boards/*.board` 中的可选板卡。
+> hostname 默认取板级的 `BOARD_HOSTNAME`（`h5000m-debian` / `ap3000m-debian`），
+> 可用 `--hostname` 覆盖。
+>
+> LAN 网段固定为 192.168.88.1/24（见 `boards/overlay.d/<board>/etc/default/router.conf`
+> 与通用层 `rootfs-overlay/etc/default/router.conf`），无需在命令行指定。
 >
 > **初始口令**：不指定 `--admin-password` / `--root-password` 时，两者都为出厂默认值
 > `password`（不是随机生成）。这是公开已知值，**首次登录后必须立即修改**：
@@ -54,7 +80,7 @@ sudo bash scripts/build.sh \
 > passwd root
 > ```
 >
-> 凭据同时落盘在设备上的 `/etc/h5000m-initial-credentials`（chmod 600）。
+> 凭据同时落盘在设备上的 `/etc/<board>-initial-credentials`（chmod 600）。
 > 该文件的**副本不再进入构建产物与 GitHub Release**，避免公开分发默认口令。
 > 生产环境请用 `--root-password` / `--admin-password` 指定自己的初始值。
 
@@ -63,17 +89,19 @@ sudo bash scripts/build.sh \
 ```
 kernel/
   Image
-  mt7987a-hiveton-h5000m.dtb
+  <BOARD_DTB>.dtb              # h5000m: mt7987a-hiveton-h5000m.dtb
+                               # ap3000m: mt7981b-airpi-ap3000m.dtb
   modules.tar.zst
+  kernel-<board>-soc-options.txt   # SoC 选项快照（按板隔离，避免 artifact 互相覆盖）
 rootfs/
   rootfs/                     # RootFS 树（build-rootfs.sh 产出，SquashFS 直接消费）
   rootfs.squashfs             # 只读基础系统（zstd，~120 MiB；瘦身由 make-squashfs.sh 完成）
   initial-credentials.txt     # 首次登录凭据（chmod 600）
 boot/
   boot.scr                    # 备用引导脚本（distro boot 兜底）
-H5000M-debian13-kernel.bin             # → 刷入 p4（kernel 分区，U-Boot bootm 直接加载）
-H5000M-debian13-rootfs.bin        # → 刷入 p5（rootfs 分区，引导层 ext4）
-H5000M-debian13-sysupgrade.bin         # sysupgrade 自校验包（CONTROL+kernel+root，≈164 MiB）
+<BOARD_UPPER>-debian13-kernel.bin      # → 刷入 p4（kernel 分区，U-Boot bootm 直接加载）
+<BOARD_UPPER>-debian13-rootfs.bin      # → 刷入 p5（rootfs 分区，引导层 ext4）
+<BOARD_UPPER>-debian13-sysupgrade.bin  # sysupgrade 自校验包（CONTROL+kernel+root，≈164 MiB）
 ```
 
 ## 3. 分步构建
@@ -82,6 +110,7 @@ H5000M-debian13-sysupgrade.bin         # sysupgrade 自校验包（CONTROL+kerne
 
 ```bash
 bash build/build-kernel.sh \
+  --board h5000m \
   --kernel-version 6.18.54 \
   --config build/kernel-conf/h5000m-6.18.config \
   --out /path/to/out/kernel
@@ -91,10 +120,12 @@ bash build/build-kernel.sh \
 
 1. 从 kernel.org 下载 `linux-6.18.54.tar.xz`；
 2. 按序应用 `kernel/patches/` 中的 ImmortalWrt 补丁（`git apply --check` 逐个验证）；
-3. 复制 `dts/` 与配套 dtsi 到 `arch/arm64/boot/dts/mediatek/`，并修改该目录 `Makefile` 注册 H5000M DTB；
+3. 复制 `dts/` 与配套 dtsi 到 `arch/arm64/boot/dts/mediatek/`，并注册板级 DTB；
 4. 复制 defconfig，`make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig`；
 5. 编译 `Image`、`dtbs`、`modules_install`；
-6. 输出 `Image` / `mt7987a-hiveton-h5000m.dtb` / `modules.tar.zst`。
+6. 叠加板级内核源码层 `kernel/files-boards/<board>/`（ap3000m 含 `airpi-gpio-fan` 风扇驱动，
+   并在 `drivers/hwmon/{Makefile,Kconfig}` 双注册）；
+7. 输出 `Image` / `<BOARD_DTB>.dtb` / `modules.tar.zst`。
 
 > 补丁来源：ImmortalWrt master `target/linux/mediatek/patches-6.18/`。
 > 若 `--kernel-version` 与补丁上下文不匹配导致某个补丁失败，脚本会打印失败补丁名并退出，
@@ -104,8 +135,8 @@ bash build/build-kernel.sh \
 
 ```bash
 sudo bash build/build-rootfs.sh \
+  --board h5000m \
   --out /path/to/out \
-  --hostname h5000m \
   --kernel-dir /path/to/out/kernel
 ```
 
@@ -173,7 +204,7 @@ out/H5000M-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 镜像�
     并提取，支持 `--busybox` 指定本地文件，构建机缓存于 `out/rootfs/.cache/busybox`）；
   - `/squashfs/rootfs.squashfs`：只读基础系统；
   - `/overlay/{upper,work,merged}`：OverlayFS 可写层（p5 剩余空间 = 持久化数据，首启由
-    `h5000m-grow-rootfs` 在线扩容至 ~7.2 GiB）；
+    `router-grow-rootfs` 在线扩容至 ~7.2 GiB）；
   - `/boot`：引导文件。`boot.scr` 与 DTB 始终落盘；`extlinux.conf` 与其引用的 `Image`
     仅在加 `--keep-boot-image` 时落盘（默认省空间不生成 ~60 MiB 的重复内核，二者同进同退）。
 
@@ -264,10 +295,11 @@ sudo bash scripts/install-emmc.sh \
 
 > 安全提示：旧版本 Release 曾附带 `initial-credentials.txt`（明文出厂口令）。当前
 > `build.yml` 已不再把该文件放入 Release，出厂凭据只存在于设备内
-> `/etc/h5000m-initial-credentials`（0600）。仓库为 public，历史上传过的凭据文件任何人
+> `/etc/<board>-initial-credentials`（0600）。仓库为 public，历史上传过的凭据文件任何人
 > 都可下载，若曾使用过非默认口令应立即轮换。
 
-产物从 Actions 页面「Artifacts」下载：`h5000m-debian13-release`
+产物从 Actions 页面「Artifacts」下载：`<BOARD_UPPER>-debian13-release`（触发时用
+`workflow_dispatch` 的 `board` 输入选择板卡，缺省 `h5000m`）
 （kernel.bin、rootfs.bin、rootfs.squashfs、sysupgrade.bin、boot.scr、初始凭据）。
 
 ### 3.7.1 编译提速设计（实测基线 → 优化）
@@ -333,5 +365,7 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware
 - [ ] `H5000M-debian13-rootfs.bin` 可 `e2fsck -fn` 通过；debugfs 确认含
       `/sbin/init`、`/usr/bin/busybox`、`/squashfs/rootfs.squashfs`、`/overlay/{upper,work,merged}`
 - [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 的 6 个 MT7992 文件与 `mt7987/` 的 2 个 PHY 文件齐全且非空（构建脚本会强制检查）
-- [ ] rootfs 内 Linux-Router 服务已 enable；`/usr/local/sbin/h5000m-grow-rootfs` 存在
+- [ ] rootfs 内 Linux-Router 服务已 enable；`/usr/local/sbin/router-grow-rootfs` 存在
+- [ ] 首启相关服务已 enable：`router-init` / `router-fancontrol` / `router-grow-rootfs` /
+      `router-led-boot` / `router-led`（unit 名**不带板级前缀**，板级差异走同名内容覆盖）
 - [ ] `H5000M-debian13-sysupgrade.bin` 体积 ≤ 600 MiB（当前 ≈164 MiB）

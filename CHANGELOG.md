@@ -4,7 +4,64 @@
 
 ## [Unreleased]
 
-### 2026-10-09 — AP3000M 首次云编译失败修复（内核 Kconfig 符号缺失）+ unit 名一致性收尾
+### 2026-10-09 — 文档同步：全面加注「未跑通」警告 + 多板化改写
+
+**背景**：AP3000M 云编译连续两次失败（详见下条），当前**无任何 AP3000M 可用产物**。
+文档此前仍以「H5000M 单体」视角描述，且未标注板卡验证状态，存在被误用于刷机的风险。
+本轮做两件事：**加警告**、**板级化**。
+
+**加警告**（醒目 blockquote，置于各文档标题正下方）：
+
+- `README.md` —— 警告块含**失败记录表**（run / 提交 / 结果 / 根因三行），
+  并明确"请勿将本仓库当前状态用于生产或刷机验收"，列出即使 CI 通过也必须实机复核的 4 项。
+- `docs/build-guide.md` —— 警告块 + 声明"本文档描述的多板构建流程尚未端到端验证通过"。
+- `docs/architecture.md`、`docs/first-boot.md`、`docs/troubleshooting.md`、
+  `docs/hardware.md`、`docs/debian13-partition-plan.md` —— 统一警告块，
+  点名 AP3000M 相关资产（`boards/ap3000m.board`、`dts/mt7981b*`、
+  `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
+  AP3000M 风扇链路）为**未验证状态**。
+
+**多板化改写**：
+
+| 文档 | 改动 |
+| --- | --- |
+| `README.md` | 标题改为双板；硬件支持表由「状态」单列改为 **H5000M / AP3000M 双列对照**；WAN/LAN 改为双板表格；风扇行说明 16GB/8GB 双路径；补多板化架构说明（`.board` + `overlay.d` + `files-boards` 三处真源） |
+| `docs/build-guide.md` | 加已支持板卡表（board ID / 机型 / SoC / DTB / 内核配置）；**所有命令补 `--board`**（`scripts/build.sh`、`build-kernel.sh`、`build-rootfs.sh`）；产物名改为 `<BOARD_UPPER>` / `<BOARD_DTB>` 占位；凭据路径改 `/etc/<board>-initial-credentials`；`h5000m-grow-rootfs` → `router-grow-rootfs`；验收清单补「首启服务已 enable」5 项（含 unit 名不带板级前缀的约定） |
+
+**验证**：`grep` 复检确认 `docs/build-guide.md` 已无 `h5000m-fancontrol` /
+`h5000m-grow-rootfs` / `h5000m-router-init` / `h5000m-led` / `/etc/h5000m-` /
+`h5000m-debian13` 等旧命名单体残留。
+
+### 2026-10-09 — AP3000M 云编译二次失败修复（Kconfig `depends` 引用了非 Kconfig 符号 `HRTIMER`）
+
+**症状**（run 37841719136，`e9c1594`）：补齐 Kconfig 后**仍 46s 失败**，报**完全相同的**
+`[WARN] CONFIG_AIRPI_GPIO_FAN 未启用（补丁未生效或符号名不匹配）`。
+
+**真根因**：新增的 Kconfig 写了 `depends on GPIOLIB && HRTIMER`，而
+**`HRTIMER` 在内核里不是一个 Kconfig 符号** —— hrtimer 是核心基础设施，无条件编入；
+Kconfig 里只有 `config HIGH_RES_TIMERS`（可选的 tickless 高精度模式）。
+
+后果链与首次失败**一模一样**：
+1. `depends on ... && HRTIMER` 中 `HRTIMER` 恒求值为 `n`；
+2. `config AIRPI_GPIO_FAN` 被 Kconfig 判为**不可见**；
+3. `.config` 里的 `=m` **第二次被 `olddefconfig` 静默丢弃**。
+
+**这是本问题最难排查之处：两次原因不同、报错信息完全相同。** 上一轮修复（补 Kconfig
+文件）看起来"应该已经解决了"，实际只是把第二个陷阱暴露出来。
+
+**修复**：
+
+| 项 | 内容 |
+| --- | --- |
+| 修改 | `depends on GPIOLIB`（`GPIOLIB` 是真实符号，`drivers/gpio/Kconfig` 中 `menuconfig GPIOLIB`）。hrtimer API 的可用性由源码 include 与 export 保证，不需要也不应写进 `depends` |
+| 新增 | Kconfig 内补入完整根因注释，含可复用规则：「写 `depends` 前必须 `grep -r '^config <SYM>' --include=Kconfig` 确认每个符号都真实存在，尤其别把**宏 / 内部函数名**当成 CONFIG 符号」 |
+| 增强 | `scripts/tests/test-board-kconfig-registration.sh` **13 → 15 项**，新增 `depends` 符号可达性双向校验：<br>• **陷阱清单命中即 FAIL**（宏 / 内部 API 名，恒不可能是 Kconfig 符号）：`HRTIMER`、`GPIO_LOOKUP_IDX_OF`、`GPIOLIB_LEGACY`、`HRTIMER_MODE_REL`、`IS_ENABLED`、`LINUX_VERSION_CODE`、`OF_GPIO`、`HWMON_DEVICE_ATTR`<br>• **合法白名单外 FAIL**（`GPIOLIB`/`HWMON`/`OF`/`PWM`/`THERMAL`/...），提示人工核对 |
+
+**验证**：负向验证闭环 —— 把 `HRTIMER` 加回去，测试由 15 通过降为 **13 通过 2 失败**，
+确认能真正拦住该陷阱。回归测试 4 组全绿（15 + 15 + 9 + 18 项）。
+CI 侧 `c3f861d` 验证构建进行中。
+
+### 2026-10-09 — AP3000M 首次云编译失败修复（缺 `drivers/hwmon/Kconfig` 注册，符号被静默丢弃）+ unit 名一致性收尾
 
 **事故**：AP3000M 首次云编译在 **46 秒**处失败（run 37840375623），日志：
 
