@@ -4,6 +4,45 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — ✅ AP3000M 云编译全链路首绿（run 37855852616）
+
+第 5 次修复推送后触发复验，run `37855852616`（提交 `2d9fe9f`）
+**`completed / success`** —— AP3000M 首次三个 job 全绿：
+
+| job | 结论 |
+| --- | --- |
+| 质量门（语法 / 静态检查 / 单元测试） | ✅ success |
+| 内核 6.18 (ap3000m) | ✅ success |
+| RootFS + 刷写包 (ap3000m) | ✅ success（含 `封装 sysupgrade-tar`） |
+
+**产物实证**（job 日志原文）：
+
+```
+[make-sysupgrade-tar] 板级：Airpi AP3000M（MT7981B）→ CONTROL BOARD=airpi_ap3000m
+[make-sysupgrade-tar] 成员：kernel 12377751 B + root 268435456 B ≈ 总包 267 MiB
+[make-sysupgrade-tar] sysupgrade-tar 单文件固件生成完成：
+    out/AP3000M-debian13-sysupgrade.bin（280821760 字节）
+```
+
+| 产物 | 大小 |
+| --- | --- |
+| `AP3000M-debian13-kernel.bin`（FIT 内核） | 12,377,751 B ≈ 12 MiB |
+| `AP3000M-debian13-rootfs.bin`（引导层 ext4） | 268,435,456 B = 256 MiB |
+| `AP3000M-debian13-sysupgrade.bin`（sysupgrade-tar） | 280,821,760 B ≈ 267 MiB |
+
+**第 5 次修复的关键确认点通过**：CONTROL 内**仍是** `BOARD=airpi_ap3000m` ——
+该值由脚本自行从 `BOARD_SYSUPGRADE_BOARD` 读取，不受 `--board` 影响。
+若误变成 `ap3000m`，设备侧 sysupgrade 会因板名不匹配拒绝刷写。
+总包 267 MiB < 600 MiB 约束（整包需进设备 `/tmp` tmpfs）。
+
+**未覆盖**：本轮用 `skip_release=true`，Release 创建 / tag / 旧 Release 清理链路未验证。
+
+> **⚠️ 云编译成功 ≠ 可用**：只证明能构建出镜像，**实机刷写 / 启动 / 联网全部未验证**，
+> 两板产物均请勿刷机。
+
+同步：`docs/ci-status.md` 状态表 AP3000M RootFS 列转 ✅、Run 明细补 `37855852616`、
+新增 §2.1 产物实证段、§5 勾选已完成的 4 项并补 2 项待办（不带 skip_release 重跑、`e2fsck`）。
+
 ### 2026-10-09 — 第 5 次构建失败修复（`--board` 误传 sysupgrade 板名），AP3000M 推进到「封装 sysupgrade-tar」
 
 **背景**：继第 4 次修复（引导层 init heredoc）后触发复验 run `37853148758`（提交 `6ce92f8`），

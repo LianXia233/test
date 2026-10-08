@@ -16,7 +16,7 @@
 | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
 | --- | --- | --- | --- |
 | Hiveton H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
-| Airpi AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（第 5 次：`封装 sysupgrade-tar` 步骤 `--board` 误传 sysupgrade 板名，已修复待复验） | ⚠️ **未验证** |
+| Airpi AP3000M (MT7981B) | ✅ 成功 | ✅ **成功**（run `37855852616` 全链路首绿） | ⚠️ **未验证** |
 
 > ## ⚠️ 本项目至今没有任何一块板卡完成实机验收
 >
@@ -29,6 +29,7 @@
 
 | run id | 提交 | 事件 | 结果 | 关键 job 结论 |
 | --- | --- | --- | --- | --- |
+| [37855852616](https://github.com/LianXia233/test/actions/runs/37855852616) | `2d9fe9f` | `workflow_dispatch`（AP3000M 薄壳，`skip_release=true`） | ✅ **success** | **AP3000M 首次全链路首绿**：质量门 ✅ / 内核 6.18 (ap3000m) ✅ / RootFS + 刷写包 (ap3000m) ✅（含 `封装 sysupgrade-tar`） |
 | [37853148758](https://github.com/LianXia233/test/actions/runs/37853148758) | `6ce92f8` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`封装 sysupgrade-tar 单文件固件` 步骤，`未知板级 "airpi_ap3000m"`） |
 | [37851849934](https://github.com/LianXia233/test/actions/runs/37851849934) | `9e8f8f7` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`生成刷写包` 步骤，23 s，`BB: unbound variable`） |
 | [37851638744](https://github.com/LianXia233/test/actions/runs/37851638744) | `76edd3a` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | **未进入 job**：并发组死锁被取消（`deadlock ... between a top level workflow and 'build'`） |
@@ -45,11 +46,42 @@
 >
 > **进展链条**（每修一次，失败点就往下推一步，这是判断修复是否生效的唯一依据）：
 > `37843516159` 挂在 `构建 RootFS` → `37851849934` 挂在 `生成刷写包` →
-> `37853148758` 挂在 `封装 sysupgrade-tar`。前三步（`构建 RootFS`、`生成 SquashFS`、
-> `生成刷写包`）在 `37853148758` 中**均已转绿**，证明第 3、4 次修复真实生效。
+> `37853148758` 挂在 `封装 sysupgrade-tar` → **`37855852616` 全绿**。
+> 五次修复逐段生效，AP3000M 云编译链路至此打通。
+>
+> **注意 `37855852616` 是 `skip_release=true`**：产物仅上传 Artifact，
+> **未创建 GitHub Release**（预发布前先验证产物结构）。
 >
 > 另外 `37851376164` / `37851638744` 是**薄壳 workflow 自身的缺陷**（根本没进 job），
 > 与构建逻辑无关，单独归类见 §4.1。
+
+### 2.1 AP3000M 首绿产物实证（run 37855852616）
+
+job 日志原文摘录（`/actions/jobs/113580584866/logs`）：
+
+```
+[make-sysupgrade-tar] 板级：Airpi AP3000M（MT7981B）→ CONTROL BOARD=airpi_ap3000m
+[make-sysupgrade-tar] 成员：kernel 12377751 B + root 268435456 B ≈ 总包 267 MiB
+[make-sysupgrade-tar] sysupgrade-tar 单文件固件生成完成：
+    out/AP3000M-debian13-sysupgrade.bin（280821760 字节）
+```
+
+| 产物 | 大小 |
+| --- | --- |
+| `out/AP3000M-debian13-kernel.bin`（FIT 内核） | 12,377,751 B ≈ 12 MiB |
+| `out/AP3000M-debian13-rootfs.bin`（引导层 ext4） | 268,435,456 B = 256 MiB |
+| `out/AP3000M-debian13-sysupgrade.bin`（sysupgrade-tar） | 280,821,760 B ≈ 267 MiB |
+
+Artifact：`kernel-artifacts`（41,132,596 B）、`ap3000m-debian13-release`（457,427,641 B）。
+
+> **第 5 次修复的关键确认点已通过**：`--board` 改传板级 ID `ap3000m` 后，
+> CONTROL 内 **仍然**是 `BOARD=airpi_ap3000m` —— 因为该值由脚本自行从
+> `BOARD_SYSUPGRADE_BOARD` 读取，不由 `--board` 决定。
+> 若这里变成 `ap3000m`，设备侧 `sysupgrade` 会因板名不匹配拒绝刷写。
+>
+> 总包 267 MiB < 600 MiB 内存约束门槛（sysupgrade 需整包进设备 `/tmp` tmpfs）。
+
+**⚠️ 云编译成功 ≠ 可用**：以上只证明**能构建出镜像**，实机刷写/启动/联网**全部未验证**。
 
 ## 3. 历史参照 Run（非当前状态依据）
 
@@ -129,13 +161,15 @@
 
 ## 5. 待验证清单
 
-- [ ] **重跑 AP3000M 云编译**：确认 `封装 sysupgrade-tar` 步骤转绿（第 5 次修复的效果验证）
-- [ ] RootFS job 全绿（构建 RootFS 树 / SquashFS / 引导层镜像 / sysupgrade 包 / Release）
-- [ ] `out/AP3000M-debian13-kernel.bin` 首 4 字节为 FIT 魔数且 < 30 MiB
-  （注：run 37851849934 中该文件已生成，12389511 字节，FIT 魔数校验通过 —— **待下次 run 复现确认**）
-- [ ] `out/AP3000M-debian13-sysupgrade.bin` 产出且 CONTROL 内 `BOARD=airpi_ap3000m`
-  （**这是第 5 次修复的直接确认点**：CONTROL 值必须仍是 `airpi_ap3000m`，
-  不能因为 `--board` 改传 `ap3000m` 就变成 `ap3000m` —— 后者会让设备侧 sysupgrade 拒绝刷写）
+- [x] ~~**重跑 AP3000M 云编译**~~：**已完成**（run `37855852616` 全绿）
+- [x] ~~RootFS job 全绿~~：**已完成**（构建 RootFS / SquashFS / 引导层 / sysupgrade 包全部 ✅；
+      Release 未建，因本次 `skip_release=true`）
+- [x] ~~`out/AP3000M-debian13-kernel.bin` FIT 魔数且 < 30 MiB~~：
+      **已完成**（12,377,751 B ≈ 12 MiB，脚本内 FIT 魔数预检通过）
+- [x] ~~`out/AP3000M-debian13-sysupgrade.bin` CONTROL 内 `BOARD=airpi_ap3000m`~~：
+      **已确认通过**（日志原文见 §2.1）
+- [ ] **不带 `skip_release` 重跑一次**：验证 Release 创建 / 清理 / tag 链路（本轮未覆盖）
+- [ ] `out/AP3000M-debian13-rootfs.bin` 通过 `e2fsck -fn`（引导层 ext4 完整性）
 - [ ] `out/AP3000M-debian13-rootfs.bin` 通过 `e2fsck -fn`
 - [ ] **实机**：真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
 - [ ] **实机**：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、
