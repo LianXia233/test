@@ -1,0 +1,68 @@
+name: 构建 H5000M 固件（Debian 13 / MT7987A）
+
+# ============================================================================
+# Hiveton H5000M 专用构建入口（板卡已写死在调用里，无需选择）
+#
+# 【为什么单独开一个文件，而不是在 build.yml 里选下拉框】
+#   1. Actions 侧边栏直接显示「构建 H5000M 固件」与「构建 AP3000M 固件」两条，
+#      一眼可见要跑哪个板，不必先点 Run workflow 再在下拉框里挑；
+#   2. 并发组、Release tag、Artifact 名天然按板卡隔离，两板可同时构建互不排队；
+#   3. 误选板卡的可能性归零 —— 这是真实风险：两板 SoC 不同（MT7987A / MT7981B），
+#      内核配置与 DTB 都不同，选错会产出一块砖。
+#
+# 【实现只有一份】本文件不含任何 job 定义，只是对 build.yml（workflow_call）的
+# 薄封装。全部构建逻辑、板级解析、产物打包都在 build.yml 中，改一处两板同时生效。
+#
+# 【本板状态】⚠️ 云编译通过（c21fc66），但**实机尚未验证** —— 产物能构建出来不代表
+# 能启动/联网/功能正常。本项目至今没有任何一块板卡完成实机验收，**请勿刷机**。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_x86_runner:
+        description: '回退选项：ARM64 runner 不可用/排队时勾选，改用 x86_64 runner（交叉编译 + qemu 第二阶段，构建显著变慢）'
+        required: false
+        default: false
+        type: boolean
+      skip_release:
+        description: '只构建不发布：产物仅上传 Artifact，不创建/覆盖 GitHub Release'
+        required: false
+        default: false
+        type: boolean
+      keep_releases:
+        description: '本板历史 Release 保留数量：发布新固件后自动删除更旧的（连同资产与 tag），0 = 不自动清理'
+        required: false
+        default: '3'
+        type: string
+      clear_cache:
+        description: '缓存维护：勾选后先清空本仓库全部 Actions 缓存（注意：会同时清掉 AP3000M 的缓存，两板共用缓存池）'
+        required: false
+        default: false
+        type: boolean
+
+# 【最小权限】调用方声明只读，写权限由被调用的 build.yml 内各 job 单独声明
+# （GitHub 要求：workflow_call 时权限只能收窄不能放大，故这里保持只读）。
+permissions:
+  contents: read
+
+concurrency:
+  # 板卡写死在 group 里，与 AP3000M 入口并发独立；同一板重复点击则排队保护。
+  group: h5000m-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # 全部实现来自 build.yml；这里只负责把 board 钉死为 h5000m 并透传用户输入。
+    uses: ./.github/workflows/build.yml
+    with:
+      board: h5000m
+      force_x86_runner: ${{ inputs.force_x86_runner }}
+      skip_release: ${{ inputs.skip_release }}
+      keep_releases: ${{ inputs.keep_releases }}
+      clear_cache: ${{ inputs.clear_cache }}
+    # 【为什么必须显式提权】被调用的 build.yml 里 build-image job 需要 contents: write
+    # 才能创建 Release。workflow_call 的权限取「调用方 ∩ 被调用方」，调用方若只给 read，
+    # 被调用方即使声明 write 也会被收窄 → Release 会失败。
+    permissions:
+      contents: write

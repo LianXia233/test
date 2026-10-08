@@ -1,13 +1,16 @@
 # Hiveton H5000M / Airpi AP3000M Debian 13 路由器系统
 
-> ## ⚠️ 重要警告：本项目仍在测试中，**尚未跑通**
+> ## ⚠️ 重要警告：本项目仍在测试中，**两板实机均未通过**
 >
-> **当前状态：AP3000M 云编译连续失败，未产出可用镜像；H5000M 为已通过的历史基线。**
+> **当前状态：AP3000M 云编译连续失败、未产出可用镜像；H5000M 云编译虽成功，但实机尚未验证。**
 >
-> | 板卡 | SoC | 最后验证状态 | 说明 |
-> | --- | --- | --- | --- |
-> | Hiveton H5000M | MT7987A | ✅ 通过（`c21fc66`，2026-10-09 18:32） | 已跑通，可作参考基线 |
-> | Airpi AP3000M | MT7981B | ❌ **失败** | 首次接入 CI，内核编译阶段连续两次失败，见下 |
+> | 板卡 | SoC | 云编译 | **实机验证** | 说明 |
+> | --- | --- | --- | --- | --- |
+> | Hiveton H5000M | MT7987A | ✅ 成功（`c21fc66`） | ⚠️ **尚未通过** | 产物可构建，但**未在真机刷写验收**；多板化改造后的回归同样未做 |
+> | Airpi AP3000M | MT7981B | ❌ **失败** | — | 内核编译阶段连续两次失败，无可用产物，见下 |
+>
+> **⚠️ 云编译成功不等于实机可用。** H5000M 的 `success` 只说明"能构建出镜像"，
+> 不代表"镜像能启动、网络能通、功能正常"。本项目**至今没有任何一块板卡完成实机验收**。
 >
 > AP3000M 失败记录（详细根因与修复见 [CHANGELOG.md](CHANGELOG.md)）：
 >
@@ -17,15 +20,15 @@
 > | 37841719136 | `e9c1594` | ❌ 46s | 补齐 Kconfig 但 `depends on ... && HRTIMER` 引用了**非 Kconfig 符号** → 符号恒不可见 → `=m` 再次被丢弃 |
 > | （进行中） | `c3f861d` | ⏳ 待验证 | 已移除 `HRTIMER` 依赖（改为 `depends on GPIOLIB`），等待 CI 结果 |
 >
-> **请勿将本仓库当前状态用于生产或刷机验收。** AP3000M 在 CI 产出 `success` 且经过实机验证前，
-> 所有 AP3000M 相关产物、`dts/`、`boards/ap3000m.board`、`build/kernel-conf/ap3000m-6.18.config`
-> 均属**未验证状态**。H5000M 相关能力不受影响，但多板化改造后的回归仍需以 H5000M 实机复核为准。
+> **请勿将本仓库当前状态用于生产或刷机验收。**
 >
-> 已知待实机确认项（即使 CI 通过也必须复核）：
-> - AP3000M 真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
-> - 风扇 16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、`fangpio=540` 是否准确
-> - 风扇 8GB 版 `pwm1` 的实际 hwmon 序号
-> - `mt7981` Wi-Fi 固件在 linux-firmware 仓中的路径
+> **两板共同待办（实机复核清单）**：
+> - ⚠️ **H5000M**：刷写后能否正常启动、LAN 口 `192.168.88.1` 是否可达、Wi-Fi 是否 probe 成功、
+>   风扇是否按曲线转动、eMMC 首启扩容是否生效 —— **以上全部未验证**
+> - ⚠️ **AP3000M**：真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
+> - ⚠️ **AP3000M 风扇**：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、
+>   `fangpio=540` 是否准确；8GB 版 `pwm1` 的实际 hwmon 序号
+> - ⚠️ **AP3000M**：`mt7981` Wi-Fi 固件在 linux-firmware 仓中的路径
 
 将 **Hiveton H5000M（MediaTek MT7987A）** 与 **Airpi AP3000M（MediaTek MT7981B）** 移植为 **Debian 13 (Trixie) ARM64** 开箱即用路由器系统，集成 **Linux-Router** WebUI。
 
@@ -44,7 +47,7 @@
 | 硬件 | H5000M (MT7987A) | AP3000M (MT7981B) |
 | --- | --- | --- |
 | SoC / 核心 | MT7987A，4×Cortex-A53 | MT7981B，2×Cortex-A53 |
-| 自定义 6.18 内核 | ✅ 已跑通 | ⚠️ 编译中（见上方警告） |
+| 自定义 6.18 内核 | ⚠️ 云编译通过，实机未验证 | ⚠️ 云编译失败（见上方警告） |
 | 有线网口 | 双 2.5G（RTL8221B + 内置 PHY） | 千兆（内置 PHY） |
 | eMMC | ✅ 约 14.6 GiB（含 factory NVMEM Wi-Fi EEPROM） | ✅ 8GB / 16GB 两版本（容量影响风扇链路，见下） |
 | Wi-Fi | PCIe + MT7992（2.4G/5G），mt76 模块 | 内置 wmac（MT7915），`mt7915e` 模块 |

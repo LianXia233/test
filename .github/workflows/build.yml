@@ -1,10 +1,22 @@
 name: 多板 Debian 13 CI 云编译（H5000M / AP3000M）
 
-# 仅手动触发：避免每次提交都占用 runner 时长（每次都是完整固件产出）。
-# 需要出包时到 Actions 页面 Run workflow 手动启动，或命令行：
-#   gh workflow run build.yml -f board=ap3000m
+# 【触发方式 —— 三层入口】
+#   1. 板卡专用入口（推荐日常使用）：
+#        H5000M  → actions/workflows/build-h5000m.yml
+#        AP3000M → actions/workflows/build-ap3000m.yml
+#      两个薄壳各自**写死 board**，Actions 侧边栏一眼可见是哪个板卡，
+#      不用在下拉框里选；并发组与 Release tag 也按板卡天然隔离。
+#   2. 本文件手动触发（保留，用于一次性覆盖全部输入，含 clear_cache / keep_releases）：
+#        gh workflow run build.yml -f board=ap3000m
+#   3. 未来如需按分支/路径自动触发，可再加 on.push，复用同一套 job 定义。
 #
-# 【多板化】板卡由 workflow_dispatch 输入 board 选择，其全部机型差异（内核配置 / DTB 名 /
+# 【为什么不把 852 行 job 定义复制三份】
+# 复制会让「改一处要改三处」必然漂移。因此本文件同时声明 workflow_dispatch 与
+# workflow_call：薄壳用 `uses: ./.github/workflows/build.yml` 调用它并传 board，
+# 全部实现只有一份。workflow_call 同样支持 `inputs` 上下文，故 job 内的
+# ${{ inputs.board }} 等引用无需改动。
+#
+# 【多板化】板卡由输入 board 选择，其全部机型差异（内核配置 / DTB 名 /
 # 产物文件名 / hostname / sysupgrade CONTROL 板名）统一来自 boards/<board>.board —— 单一真源。
 # job 内"解析板级"step 调 boards/board-lib.sh 把字段写入 $GITHUB_OUTPUT，后续步骤只引用
 # steps.<id>.outputs.*，workflow 里不再出现任何机型字面量。
@@ -50,11 +62,44 @@ on:
         default: '3'
         type: string
 
+  # 供板卡专用薄壳（build-h5000m.yml / build-ap3000m.yml）调用。
+  # 【inputs 必须逐个声明】workflow_call 不会继承 workflow_dispatch 的 inputs 定义，
+  # 漏一个就会在壳里报 "Invalid input"。
+  workflow_call:
+    inputs:
+      board:
+        description: '目标板卡（boards/<board>.board）'
+        required: true
+        type: string
+      force_x86_runner:
+        description: '回退到 x86_64 runner（交叉编译）'
+        required: false
+        default: false
+        type: boolean
+      clear_cache:
+        description: '先清空 Actions 缓存'
+        required: false
+        default: false
+        type: boolean
+      skip_release:
+        description: '只构建不发布（仅上传 Artifact）'
+        required: false
+        default: false
+        type: boolean
+      keep_releases:
+        description: '历史 Release 保留数量，0 = 不清理'
+        required: false
+        default: '3'
+        type: string
+
 # 【最小权限】默认只读；需要写权限的 job（发布 Release、清理缓存）各自单独声明。
 permissions:
   contents: read
 
 concurrency:
+  # 【板卡维度必须进 group】否则 H5000M 与 AP3000M 会互相排队：两板构建各约 30-40 min，
+  # 串行会让「同时出两板包」变成一小时。带上 board 后二者并发独立。
+  # 注意：从 workflow_call 进来时 inputs.board 也有效（壳传的），故 group 仍按板卡隔离。
   group: ${{ inputs.board || 'h5000m' }}-build-${{ github.ref }}
   # 手动触发也可能重复点击启动；排队（cancel-in-progress: false）保护正在跑的
   # 长构建不被新 run 杀掉，配合下方 timeout-minutes 防止无限占用 runner。
@@ -705,7 +750,10 @@ jobs:
           retention-days: 14
 
       - name: 上传固件到 GitHub Releases（参考 OpenWrt 惯例：日期版本 + sha256sums）
-        if: github.event_name != 'pull_request' && !inputs.skip_release
+        # 【为什么两个事件都要放行】workflow_call（板卡薄壳调用）的 event_name 是
+        # 'workflow_call'，若只判 != 'pull_request' 虽也能通过，但语义不明确；
+        # 这里显式列出允许发布的两个来源，PR 触发（未来若加 on.pull_request）自动被挡。
+        if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && !inputs.skip_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -806,7 +854,10 @@ jobs:
         #   4. 先删 Release 再删 tag：tag 是 Release 的引用来源，顺序反了会留下
         #      孤儿 tag（GitHub 删除 Release 不会自动清理 tag）。
         #   5. 每次删除都打 ::warning 日志，Actions 页面可见删了什么。
-        if: github.event_name != 'pull_request' && !inputs.skip_release
+        # 【为什么两个事件都要放行】workflow_call（板卡薄壳调用）的 event_name 是
+        # 'workflow_call'，若只判 != 'pull_request' 虽也能通过，但语义不明确；
+        # 这里显式列出允许发布的两个来源，PR 触发（未来若加 on.pull_request）自动被挡。
+        if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && !inputs.skip_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
