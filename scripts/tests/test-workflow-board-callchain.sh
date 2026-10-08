@@ -213,12 +213,33 @@ for path, d, job in caller_shells:
     else:
         ok(f"{name}: 调用方权限覆盖全部被调 job 所需（无收窄风险）")
 
-    # 8. 并发组须按板卡隔离（两板不应互相排队）
-    grp = str((d.get("concurrency") or {}).get("group") or "")
-    if b and b in grp:
-        ok(f"{name}: 并发组含板卡维度（group={grp}）")
+    # 8. 【真实事故】壳不得声明与基座求值相同的并发组 —— 否则死锁被取消。
+    #
+    # 事故现场（run 37851638744）：壳写 group: ap3000m-build-${{ github.ref }}，
+    # 基座写 group: ${{ inputs.board }}-build-${{ github.ref }}，
+    # 两者都求值为 ap3000m-build-refs/heads/main → GitHub 报：
+    #   Canceling since a deadlock was detected for concurrency group:
+    #   'ap3000m-build-refs/heads/main' between a top level workflow and 'build'
+    #
+    # 判定方式：把基座 group 里的 ${{ inputs.board }} 用壳的 board 值代入，得到
+    # 「基座在本壳场景下的实际 group」，再与壳自己的 group 比字符串。相等即死锁风险。
+    #
+    # 注意这里**不能用"含板卡名就通过"**的弱判定：事故里的 group 恰好含板卡名，
+    # 那种写法会放行 —— 这也是原第 8 项没拦住本次事故的原因。
+    shell_grp = str((d.get("concurrency") or {}).get("group") or "")
+    base_grp_tpl = str((base.get("concurrency") or {}).get("group") or "")
+    if not shell_grp:
+        ok(f"{name}: 壳未声明并发组（由基座统一按 board 隔离，无死锁风险）")
     else:
-        bad(f"{name}: 并发组未含板卡维度（group={grp!r}）—— 两板会互相排队")
+        # 把基座模板里的 ${{ inputs.board || 'xxx' }} 整体替换成壳的 board 值，
+        # 得到「基座在本壳场景下的实际 group」，再与壳自己的 group 比字符串。
+        import re as _re
+        base_grp = _re.sub(r"\$\{\{\s*inputs\.board[^}]*\}\}", str(b or ""), base_grp_tpl)
+        if shell_grp == base_grp:
+            bad(f"{name}: 壳与基座并发组求值相同（{shell_grp!r}）→ 死锁，workflow 会被取消。"
+                f"并发控制应由基座统一持有，壳不要再声明 concurrency")
+        else:
+            ok(f"{name}: 壳并发组与基座不冲突（shell={shell_grp!r}）")
 
     # 9. skip_release 的透传不能丢（丢了会意外发布）
     if "skip_release" in passed:

@@ -59,10 +59,16 @@ permissions:
   actions: write
   contents: write
 
-concurrency:
-  # 板卡写死在 group 里，与 AP3000M 入口并发独立；同一板重复点击则排队保护。
-  group: h5000m-build-${{ github.ref }}
-  cancel-in-progress: false
+# 【并发 —— 这里也是真实踩过的坑】
+# ⚠️ 壳**不要**再声明自己的顶层 concurrency：被调用的 build.yml 顶层已经有
+#       group: ${{ inputs.board }}-build-${{ github.ref }}
+#   与本壳原来写的 h5000m-build-${{ github.ref }} 求值完全相同，
+#   于是「调用方等在途的被调用方、被调用方等调用方」→ GitHub 判定死锁并取消：
+#       Canceling since a deadlock was detected for concurrency group
+#       between a top level workflow and 'build'
+#
+# 结论：**并发控制由基座统一持有**（它已经按 board 隔离，两板互不排队），
+# 壳只做 board 钉死与输入透传，不再掺和并发组。
 
 jobs:
   build:
