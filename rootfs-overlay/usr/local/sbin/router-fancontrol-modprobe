@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# <board> — 风扇驱动模块预加载钩子（被 router-fancontrol.service 的
+# ExecStartPre 调用，在守护进程启动前执行一次）
+#
+# 【为什么要有这个钩子】
+# 部分板卡的风扇驱动是内核模块，必须在 fancontrol 读取 PWM sysfs 节点之前加载：
+#   AP3000M 16GB 版 → airpi-gpio-fan（GPIO 软 PWM，导出 /sys/kernel/duty_cycle）
+# 通用层这里保持**空操作**；板级层用同名文件整体覆盖（boards/overlay.d/<board>/）。
+#
+# 【为什么用模块参数而非设备树】
+# airpi-gpio-fan 通过模块参数 fangpio / period 指定引脚与周期，不占用 DT 节点，
+# 因此必须在此显式传参。
+#
+# 约定：本脚本失败必须返回非 0 —— 让 systemd 把"风扇驱动加载失败"暴露为服务
+# 启动失败，而不是让守护进程空转、风扇不转却无任何报错。
+#
+# 行尾：本文件为 LF。
+
+exit 0

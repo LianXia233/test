@@ -1,0 +1,15 @@
+[Unit]
+# <board> — 系统就绪后 LED 收尾（参考官方 OpenWrt diag.sh done）
+# 关闭 boot 阶段闪烁的蓝色状态灯并恢复默认 trigger（官方无默认 → 熄灭）。
+Description=<board> LED finalize (done state)
+Documentation=file:/usr/local/sbin/router-led.sh
+After=router-led-boot.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/router-led.sh done
+
+[Install]
+WantedBy=multi-user.target

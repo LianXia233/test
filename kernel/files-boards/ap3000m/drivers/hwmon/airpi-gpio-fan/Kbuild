@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# AirPi AP3000M GPIO 软 PWM 风扇驱动（vendored from
+# LianXia233/luci-app-airpi3000m-fancontrol，GPL-2.0-only）
+#
+# 【为什么在本仓库内构建（而不是拿上游现成 .ko）】
+# 上游 README 记录了实机踩坑：即使 vermagic 完全一致，外部 .ko 仍可能因
+# struct module 大小/偏移不匹配被内核拒绝加载，报
+#   ".gnu.linkonce.this_module section size must match the kernel's
+#    built struct module size at run time"
+# 根因是 CONFIG_MODULES_TREE_LOOKUP / EVENT_TRACING /
+# DEBUG_INFO_BTF_MODULES / BPF_EVENTS 这些**配置项**改变了 struct module 的
+# 布局；上游 .ko 是在官方 SDK 配置下编的，与目标固件配置不同。
+#
+# 本仓库自行编译内核，模块与 vmlinux 出自**同一次 make**，配置天然一致，
+# 上述 ABI 风险归零。因此这里用 =m：既能按需 insmod/rmmod 调试，
+# 又不依赖上游预编译产物。
+obj-$(CONFIG_AIRPI_GPIO_FAN) += airpi-gpio-fan.o

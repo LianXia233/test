@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+#include "mt7981b.dtsi"
+
+/ {
+	model = "Airpi AP3000M";
+	compatible = "airpi,ap3000m", "mediatek,mt7981";
+
+	aliases {
+		ethernet0 = &gmac0;
+		ethernet1 = &gmac1;
+		serial0 = &uart0;
+
+		led-boot = &led_sys_blue;
+		led-failsafe = &led_sys_blue;
+		led-running = &led_sys_blue;
+		led-upgrade = &led_sys_blue;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/*
+		 * 与 H5000M 保持一致的自包含 cmdline：
+		 *   - console=ttyS0：earlycon 交接后串口仍要有输出
+		 *   - earlycon：uart0 基址 0x11002000（与 dtsi serial@11002000 一致，
+		 *     注意 MT7987 侧的 0x11000000 不能照抄到这里）
+		 *   - root=PARTLABEL=rootfs：p5 引导层（SquashFS + OverlayFS）
+		 *   - rw：p5 挂载即可写，init 的 remount 兜底不必每次触发
+		 * 打包期 build/make-sd-image.sh 会用 fdtput 覆写为同一套
+		 * FIT_BOOTARGS，这里的值用于 U-Boot 直读 DTB 的备用路径。
+		 */
+		bootargs = "console=ttyS0,115200n8 earlycon=uart8250,mmio32,0x11002000 root=PARTLABEL=rootfs rootwait rw";
+	};
+
+	memory {
+		reg = <0 0x40000000 0 0x40000000>;
+		device_type = "memory";
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+		};
+
+		wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	gpio-leds {
+		compatible = "gpio-leds";
+
+		led_sys_blue: led-0 {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_BLUE>;
+			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+		};
+
+		led-1 {
+			function = LED_FUNCTION_WLAN_2GHZ;
+			color = <LED_COLOR_ID_ORANGE>;
+			gpios = <&pio 34 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "phy0tpt";
+		};
+
+		led-2 {
+			function = LED_FUNCTION_WLAN_5GHZ;
+			color = <LED_COLOR_ID_WHITE>;
+			gpios = <&pio 35 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "phy1tpt";
+		};
+	};
+
+	/*
+	 * 3.3V 已在 SoC dtsi 中定义（reg_3p3v，供 eMMC vmmc 与 xhci vusb33 共用），
+	 * 这里只补板上 USB 对外供电的 5V。
+	 */
+	reg_5v: regulator-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "fixed-5V";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+};
+
+/*
+ * 风扇策略同 H5000M：PWM 完全交给用户空间 fancontrol service 独占，
+ * 删除内核 thermal 的 fan cooling-maps，避免内核与用户空间抢同一个 PWM 输出。
+ * 关键的 critical / hot trip（125℃ / 120℃）保留在 dtsi，由内核兜底。
+ */
+&{/thermal-zones/cpu-thermal/cooling-maps} {
+	/delete-node/ cpu-active-high;
+	/delete-node/ cpu-active-med;
+	/delete-node/ cpu-active-low;
+};
+
+&eth {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio_pins>;
+	status = "okay";
+
+	gmac0: mac@0 {
+		compatible = "mediatek,eth-mac";
+		reg = <0>;
+		phy-mode = "2500base-x";
+		phy-handle = <&phy1>;
+		/*
+		 * 不写死 mac-address：多台同固件设备会 MAC 冲突。
+		 * 用户空间按 eMMC CID 派生（见 rootfs-overlay 的 router-init
+		 * derive_board_macs()），再用 NetworkManager cloned-mac-address 持久化。
+		 */
+	};
+
+	gmac1: mac@1 {
+		compatible = "mediatek,eth-mac";
+		reg = <1>;
+		phy-mode = "gmii";
+		phy-handle = <&int_gbe_phy>;
+	};
+};
+
+&mdio_bus {
+	/* 外置 2.5G PHY（Realtek RTL8221B 系列），gmac0/eth0 */
+	phy1: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <1>;
+		reset-assert-us = <100000>;
+		reset-deassert-us = <100000>;
+		reset-gpios = <&pio 39 GPIO_ACTIVE_LOW>;
+		interrupts = <38 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-parent = <&pio>;
+		realtek,aldps-enable;
+	};
+};
+
+&mmc0 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+	bus-width = <8>;
+	cap-mmc-highspeed;
+	max-frequency = <52000000>;
+	vmmc-supply = <&reg_3p3v>;
+	no-sd;
+	no-sdio;
+	non-removable;
+	status = "okay";
+
+	card@0 {
+		compatible = "mmc-card";
+		reg = <0>;
+
+		block {
+			compatible = "block-device";
+
+			partitions {
+				block-partition-factory {
+					partname = "factory";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						eeprom_factory_0: eeprom@0 {
+							reg = <0x0 0x1000>;
+						};
+					};
+				};
+			};
+		};
+	};
+};
+
+&pio {
+	mmc0_pins_default: mmc0-pins-default {
+		mux {
+			function = "flash";
+			groups = "emmc_45";
+		};
+	};
+
+	mmc0_pins_uhs: mmc0-pins-uhs {
+		mux {
+			function = "flash";
+			groups = "emmc_45";
+		};
+	};
+
+	pwm2_pins: pwm2-pins {
+		mux {
+			function = "pwm";
+			groups = "pwm2";
+		};
+	};
+};
+
+&pwm {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm2_pins>;
+	status = "okay";
+};
+
+&fan {
+	pwms = <&pwm 2 40000 0>;
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pins>;
+	status = "okay";
+};
+
+&watchdog {
+	status = "okay";
+};
+
+&usb_phy {
+	status = "okay";
+};
+
+&xhci {
+	vbus-supply = <&reg_5v>;
+	vusb33-supply = <&reg_3p3v>;
+	status = "okay";
+};
+
+&wifi {
+	nvmem-cells = <&eeprom_factory_0>;
+	nvmem-cell-names = "eeprom";
+	status = "okay";
+};

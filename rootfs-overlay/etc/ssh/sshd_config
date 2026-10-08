@@ -1,4 +1,4 @@
-# Hiveton H5000M — SSH 服务端主配置
+# <board> — SSH 服务端主配置
 #
 # 【为什么这个文件必须显式存在于 overlay 中 —— 实机 SSH 完全不可用，勿删】
 # OpenSSH ≥ 9.9 / Debian 13(trixie) 起，sshd_config 不再由 dpkg 直接铺设为
@@ -12,7 +12,7 @@
 # 因此这里直接提供确定性主配置，不依赖任何 maintainer script 的副作用。
 #
 # 注意：OpenSSH 采用「先出现者优先」语义，Include 置于文首，
-# 以便 /etc/ssh/sshd_config.d/*.conf（含 90-h5000m.conf 的 PermitRootLogin yes）
+# 以便 /etc/ssh/sshd_config.d/*.conf（含 90-router.conf 的 PermitRootLogin yes）
 # 能正确覆盖下文同名默认值。
 #
 # 行尾：本文件为 LF。
@@ -29,8 +29,8 @@ HostKey /etc/ssh/ssh_host_ecdsa_key
 HostKey /etc/ssh/ssh_host_ed25519_key
 
 # ---- 认证 ----
-# 默认值由 sshd_config.d/90-h5000m.conf 放宽为 yes（首次启动需 root 密码登录，
-# 交付时附 h5000m-initial-credentials）。此处保留保守默认，二者冲突时以 .d 优先。
+# 默认值由 sshd_config.d/90-router.conf 放宽为 yes（首次启动需 root 密码登录，
+# 交付时附 router-initial-credentials）。此处保留保守默认，二者冲突时以 .d 优先。
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 PasswordAuthentication yes

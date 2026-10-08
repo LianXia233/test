@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Hiveton H5000M (MT7987A) — Debian 13 刷入脚本（复用现有 OpenWrt 分区布局）
+# 多板 Debian 13 刷入脚本（复用现有 OpenWrt 分区布局）
+#
+# 支持板卡见 boards/*.board（当前：h5000m=MT7987A、ap3000m=MT7981B）。
+# 用 --board 选择板级；**GPT 布局校验值（p1~p5 的 label / 起始扇区 / p4 大小）
+# 全部来自板级卡片**，与实机不符即拒绝刷写（fail-safe，绝不盲刷）。
 #
 # 【核心原则】以设备当前正常运行的 OpenWrt 分区布局 / 启动链为唯一基准：
 #   p1 u-boot-env  1 MiB   ← 绝对不动
@@ -22,17 +26,17 @@
 #
 # 用法（目标设备：OpenWrt initramfs / Debian live / 已启动的 Debian）：
 #   方式一：全新刷写（p4 + p5 整层重写；需在 p4/p5 未挂载的环境执行，如 initramfs/live）：
-#     sudo bash scripts/install-emmc.sh \
-#       --kernel-fit out/H5000M-debian13-kernel.bin \
+#     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
+#       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
 #       --rootfs out/rootfs/debian13-arm64-rootfs.tar.zst [--dev /dev/mmcblk0] [--yes]
-#     sudo bash scripts/install-emmc.sh \
-#       --kernel-fit out/H5000M-debian13-kernel.bin \
-#       --rootfs-img out/H5000M-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes] [--no-grow]
+#     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
+#       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
+#       --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes] [--no-grow]
 #     （--rootfs-img 路径默认在写盘后**离线扩容** p5 到分区实际大小，见下方"离线扩容"说明；
-#       加 --no-grow 可跳过，改由首启 h5000m-grow-rootfs.service 兜底。）
+#       加 --no-grow 可跳过，改由首启 router-grow-rootfs.service 兜底。）
 #   方式二：运行中在线升级（SquashFS + OverlayFS 架构；保留 /etc /var 等全部持久化数据）：
-#     sudo bash scripts/install-emmc.sh \
-#       --kernel-fit out/H5000M-debian13-kernel.bin \
+#     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
+#       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
 #       --rootfs-squashfs out/rootfs/rootfs.squashfs [--dev /dev/mmcblk0] [--yes]
 #     仅替换 p5 上的 /squashfs/rootfs.squashfs（引导层 / overlay 数据不动）+ 刷新 p4 FIT，
 #     旧版自动备份为 rootfs.squashfs.bak（重启前 mv 回去即可回退）。
@@ -57,6 +61,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ---------------------------------------------------------------- 板级加载
+# shellcheck source=../boards/board-lib.sh
+source "$PROJECT_ROOT/boards/board-lib.sh"
+
+BOARD=""
 DEVICE="/dev/mmcblk0"
 KERNEL_FIT=""                 # p4 内容：FIT 镜像（.fit / .itb）
 ROOTFS_TAR=""                 # p5 内容（全新刷写方式一）：rootfs tar.zst
@@ -73,6 +82,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --board)            BOARD="$2"; shift 2 ;;
     --dev)              DEVICE="$2"; shift 2 ;;
     --kernel-fit)       KERNEL_FIT="$2"; shift 2 ;;
     --rootfs)           ROOTFS_TAR="$2"; shift 2 ;;
@@ -86,6 +96,25 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知参数：$1" >&2; exit 1 ;;
   esac
 done
+
+# ---------------------------------------------------------------- 板级解析
+# --board 未给时从 --kernel-fit 的文件名反推（<BOARD_UPPER>-debian13-kernel.bin）。
+# 刷写是破坏性操作，**推断失败一律拒绝**，绝不"猜一个板级继续跑"。
+if [[ -z "$BOARD" && -n "$KERNEL_FIT" ]]; then
+  kf_base="$(basename "$KERNEL_FIT")"
+  for b in $(board_list); do
+    board_load "$b" >/dev/null 2>&1 || continue
+    if [[ "$kf_base" == "$BOARD_FIT_OUT" ]]; then BOARD="$b"; break; fi
+  done
+fi
+[[ -n "$BOARD" ]] || {
+  echo "[install-emmc] 必须用 --board 指定板级（可用：$(board_list | tr '\n' ' '))。" >&2
+  echo "[install-emmc] 板级决定 GPT 布局校验值与 DTB 名，刷写属破坏性操作，不做推断。" >&2
+  exit 1
+}
+board_load "$BOARD" || exit 1
+# 恢复默认：若未显式传 --kernel-fit，用板级默认产物名
+: "${KERNEL_FIT:=$PROJECT_ROOT/out/$BOARD_FIT_OUT}"
 
 # ---------------------------------------------------------------- 输入校验
 [[ -n "$KERNEL_FIT" ]] || { echo "[install-emmc] 必须指定 --kernel-fit（p4 的 FIT 镜像）" >&2; exit 1; }
@@ -180,32 +209,42 @@ if (( N_PART == 0 )); then
   die "无法从 'sgdisk -p $DEVICE' 解析出任何分区行。请人工确认分区表输出格式后再刷写。"
 fi
 
-# 校验 H5000M 原厂 GPT 布局。只检查存在 p4/p5 不够安全：任何带 5 个分区的
+# 校验 $BOARD_NAME 原厂 GPT 布局。只检查存在 p4/p5 不够安全：任何带 5 个分区的
 # 磁盘都可能被误当成目标设备，后续 dd/mkfs 会造成不可逆数据破坏。
-(( N_PART >= 5 )) || die "分区数量不足 5（当前 $N_PART）。拒绝在非 H5000M 原厂布局上刷写。"
+#
+# 【多板化】p1~p3 是所有板卡共用的 u-boot-env/factory/fip 布局（ImmortalWrt Filogic
+# 标准），p4/p5 的 label 与起始扇区取自板级卡片（BOARD_P4_LABEL / BOARD_P4_SECTORS_START /
+# BOARD_P5_SECTORS_START）；p4 大小断言用 BOARD_P4_SIZE_MIB。换板卡只需改 .board 卡，
+# 本脚本不含任何机型常量。
+(( N_PART >= BOARD_PART_COUNT )) || \
+  die "分区数量不足 $BOARD_PART_COUNT（当前 $N_PART）。拒绝在非 $BOARD_NAME 原厂布局上刷写。"
 expect_part() {
   local num="$1" label="$2" start="$3" end="$4"
   [[ "${PART_LABEL[$num]:-}" == "$label" ]] || \
-    die "p$num PARTLABEL 应为 '$label'，实际为 '${PART_LABEL[$num]:-（空）}'。拒绝刷写。"
+    die "p$num PARTLABEL 应为 '$label'，实际为 '${PART_LABEL[$num]:-（空）}'（板级 $BOARD）。拒绝刷写。"
   [[ "${PART_START[$num]:-}" == "$start" ]] || \
-    die "p$num 起始扇区应为 $start，实际为 '${PART_START[$num]:-（空）}'。拒绝刷写。"
+    die "p$num 起始扇区应为 $start，实际为 '${PART_START[$num]:-（空）}'（板级 $BOARD）。拒绝刷写。"
   if [[ -n "$end" && "${PART_END[$num]:-}" != "$end" ]]; then
-    die "p$num 结束扇区应为 $end，实际为 '${PART_END[$num]:-（空）}'。拒绝刷写。"
+    die "p$num 结束扇区应为 $end，实际为 '${PART_END[$num]:-（空）}'（板级 $BOARD）。拒绝刷写。"
   fi
 }
+# p1~p3：与板卡无关的共性布局（ImmortalWrt Filogic 标准），保持硬编码。
 expect_part 1 "u-boot-env" 8192 10239
 expect_part 2 "factory"   10240 14335
 expect_part 3 "fip"       14336 22527
-expect_part 4 "kernel"    22528 83967
-expect_part 5 "rootfs"    83968 ""
+# p4/p5：板级布局
+expect_part 4 "$BOARD_P4_LABEL" "$BOARD_P4_SECTORS_START" "$BOARD_P4_SECTORS_END"
+expect_part 5 "${BOARD_P5_LABEL:-rootfs}" "$BOARD_P5_SECTORS_START" ""
 
-# 校验关键分区大小符合预期（p4 kernel 30MiB，p5 rootfs 至少 1GiB）
+# 校验关键分区大小符合预期（p4 = BOARD_P4_SIZE_MIB，p5 至少 1GiB）
 P4_SIZE_BYTES=$(( ${PART_SIZE[4]:-0} * 512 ))
 P5_SIZE_BYTES=$(( ${PART_SIZE[5]:-0} * 512 ))
-(( P4_SIZE_BYTES == 30 * 1024 * 1024 )) || die "p4 大小不是预期的 30 MiB（实际 $(( P4_SIZE_BYTES / 1024 / 1024 )) MiB）。拒绝刷写。"
+(( P4_SIZE_BYTES == BOARD_P4_SIZE_MIB * 1024 * 1024 )) || \
+  die "p4 大小不是预期的 ${BOARD_P4_SIZE_MIB} MiB（实际 $(( P4_SIZE_BYTES / 1024 / 1024 )) MiB）。拒绝刷写。"
 (( P5_SIZE_BYTES >= 1024 * 1024 * 1024 )) || die "p5 小于 1 GiB（实际 $(( P5_SIZE_BYTES / 1024 / 1024 )) MiB）。拒绝刷写。"
-log "p4 kernel 分区大小：$(( P4_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[4]} END=${PART_END[4]}）"
-log "p5 rootfs 分区大小：$(( P5_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[5]} END=${PART_END[5]}）"
+log "板级：$BOARD / $BOARD_NAME（$BOARD_SOC）"
+log "p4 $BOARD_P4_LABEL 分区大小：$(( P4_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[4]} END=${PART_END[4]}）"
+log "p5 ${BOARD_P5_LABEL:-rootfs} 分区大小：$(( P5_SIZE_BYTES / 1024 / 1024 )) MiB（START=${PART_START[5]} END=${PART_END[5]}）"
 
 FIT_SIZE_BYTES=$(stat -c %s "$KERNEL_FIT")
 (( FIT_SIZE_BYTES <= P4_SIZE_BYTES )) || \
@@ -308,7 +347,7 @@ else
     log "格式化 p5（$P5_DEV）：mkfs.ext4（不修改 GPT，PARTLABEL=rootfs 保留）"
     mkfs.ext4 -q -F -L rootfs "$P5_DEV"
     log "挂载并解压 rootfs tar.zst → $P5_DEV"
-    WORK="$(mktemp -d "${TMPDIR:-/tmp}/h5000m-emmc.XXXXXX")"
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/${BOARD}-emmc.XXXXXX")"
     MNT_ROOT="$WORK/root"
     mkdir -p "$MNT_ROOT"
     cleanup() {
@@ -351,7 +390,7 @@ if [[ "$MODE_ONLINE" -eq 1 ]]; then
 elif [[ -z "$ROOTFS_IMG" ]]; then
   log "p5 扩容：mkfs.ext4 已按分区全尺寸创建文件系统，无需扩容"
 elif (( NO_GROW == 1 )); then
-  log "p5 扩容：已按 --no-grow 跳过。首启将由 h5000m-grow-rootfs.service 兜底扩容"
+  log "p5 扩容：已按 --no-grow 跳过。首启将由 ${BOARD}-grow-rootfs.service 兜底扩容"
   log "          （注意：该路径会在运行中的根文件系统上做全区 resize，本设备有 msdc 写挂死风险）"
 else
   command -v resize2fs >/dev/null 2>&1 || \

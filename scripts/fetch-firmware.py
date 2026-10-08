@@ -55,18 +55,38 @@ MIRRORS = (
 )
 
 # 固件清单: 仓库相对路径 -> {"dest": 目标子目录, "required": 是否必需}
-FIRMWARE = {
-    # ---- MT7992 Wi-Fi（mt76/mt7996 驱动加载路径为 mediatek/mt7996/）----
-    "mediatek/mt7996/mt7992_dsp_23.bin": {"dest": "mediatek/mt7996", "required": True},
-    "mediatek/mt7996/mt7992_eeprom_23.bin": {"dest": "mediatek/mt7996", "required": True},
-    "mediatek/mt7996/mt7992_eeprom_23_2i5i.bin": {"dest": "mediatek/mt7996", "required": True},
-    "mediatek/mt7996/mt7992_rom_patch_23.bin": {"dest": "mediatek/mt7996", "required": True},
-    "mediatek/mt7996/mt7992_wa_23.bin": {"dest": "mediatek/mt7996", "required": True},
-    "mediatek/mt7996/mt7992_wm_23.bin": {"dest": "mediatek/mt7996", "required": True},
-    # ---- MT7987 内置 2.5G PHY（mtk_2p5ge 驱动加载路径为 mediatek/mt7987/）----
-    "mediatek/mt7987/i2p5ge-phy-DSPBitTb.bin": {"dest": "mediatek/mt7987", "required": True},
-    "mediatek/mt7987/i2p5ge-phy-pmb.bin": {"dest": "mediatek/mt7987", "required": True},
+#
+# 【多板化】清单按 board 分组（--board 选择），不再无条件拉全部固件：
+#   * 少拉无用固件（AP3000M 不需要 MT7992 的 6 个 bin，H5000M 不需要 MT7981 的 3 个）；
+#   * 必填性也按板判定 —— 只有该板真正要用的文件标 required=True，
+#     否则一块板的固件源抖动会挂掉另一块板完全无关的构建。
+FIRMWARE_SETS = {
+    # ---- Hiveton H5000M（MT7987A）----
+    "h5000m": {
+        # MT7992 Wi-Fi（PCIe 端点，mt76/mt7996 驱动加载路径为 mediatek/mt7996/）
+        "mediatek/mt7996/mt7992_dsp_23.bin": {"dest": "mediatek/mt7996", "required": True},
+        "mediatek/mt7996/mt7992_eeprom_23.bin": {"dest": "mediatek/mt7996", "required": True},
+        "mediatek/mt7996/mt7992_eeprom_23_2i5i.bin": {"dest": "mediatek/mt7996", "required": True},
+        "mediatek/mt7996/mt7992_rom_patch_23.bin": {"dest": "mediatek/mt7996", "required": True},
+        "mediatek/mt7996/mt7992_wa_23.bin": {"dest": "mediatek/mt7996", "required": True},
+        "mediatek/mt7996/mt7992_wm_23.bin": {"dest": "mediatek/mt7996", "required": True},
+        # MT7987 内置 2.5G PHY（mtk_2p5ge 驱动加载路径为 mediatek/mt7987/）
+        "mediatek/mt7987/i2p5ge-phy-DSPBitTb.bin": {"dest": "mediatek/mt7987", "required": True},
+        "mediatek/mt7987/i2p5ge-phy-pmb.bin": {"dest": "mediatek/mt7987", "required": True},
+    },
+    # ---- Airpi AP3000M（MT7981B）----
+    "ap3000m": {
+        # MT7981B 内置 wmac（MT7915 IP，mt7915e 驱动）：WA / ROM patch 双件套。
+        # 驱动在 /lib/firmware/mediatek/mt7981/ 下按 SOC 名查找（mt7981_wa.bin /
+        # mt7981_rom_patch.bin）；EEPROM 不走固件文件，由 DTS 的 nvmem-cells
+        # 从 eMMC factory 分区（eeprom@0）读取（见 dts/mt7981b-airpi-ap3000m.dts）。
+        "mediatek/mt7981/mt7981_wa.bin": {"dest": "mediatek/mt7981", "required": True},
+        "mediatek/mt7981/mt7981_rom_patch.bin": {"dest": "mediatek/mt7981", "required": True},
+    },
 }
+
+# 向后兼容别名：旧代码/文档里引用的 FIRMWARE 指向 H5000M 集
+FIRMWARE = FIRMWARE_SETS["h5000m"]
 
 # ------------------------------------------------- 供应链基线（sha256 白名单）
 # 取自 linux-firmware tag 20260916。任何一处不匹配都会让构建失败，
@@ -178,7 +198,7 @@ def fetch_one(rel_path: str, dest_subdir: str, out_dir: Path, ref: str,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Hiveton H5000M — Debian 13 固件获取脚本",
+        description="多板 Debian 13 固件获取脚本（--board 选择板级固件集）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     script_dir = Path(__file__).resolve().parent
@@ -189,10 +209,15 @@ def main() -> int:
                         help="linux-firmware 的 tag / 分支 / commit")
     parser.add_argument("--skip-verify", action="store_true",
                         help="跳过已存在文件的校验")
+    parser.add_argument("--board", default="h5000m",
+                        choices=sorted(FIRMWARE_SETS),
+                        help="板级：决定拉取哪一组固件（见 FIRMWARE_SETS）")
     args = parser.parse_args()
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    firmware_set = FIRMWARE_SETS[args.board]
+    print(f"[fetch-firmware] 板级    : {args.board}（{len(firmware_set)} 个固件项）")
     print(f"[fetch-firmware] 输出目录: {out_dir}")
     print(f"[fetch-firmware] 镜像 ref : {args.ref}")
     if args.ref != PINNED_REF:
@@ -200,7 +225,7 @@ def main() -> int:
               f"sha256 基线可能不匹配，请同步更新 EXPECTED_SHA256")
 
     results = {"ok": [], "skip": [], "fail": []}
-    for rel_path, meta in FIRMWARE.items():
+    for rel_path, meta in firmware_set.items():
         status, digest = fetch_one(
             rel_path, meta["dest"], out_dir, args.ref,
             meta["required"], args.skip_verify,
@@ -215,6 +240,7 @@ def main() -> int:
     manifest = out_dir / "firmware-manifest.json"
     manifest.write_text(
         json.dumps({
+            "board": args.board,
             "ref": args.ref,
             "source": "linux-firmware",
             "downloaded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

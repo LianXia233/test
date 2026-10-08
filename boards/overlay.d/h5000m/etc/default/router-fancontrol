@@ -1,0 +1,55 @@
+# Hiveton H5000M (MT7987A) — 风扇控制默认配置（板级层）
+#
+# 【层次说明】本文件叠加在 rootfs-overlay/etc/default/router-fancontrol（通用骨架）之上，
+# 整体覆盖。风扇曲线对两板一致（同为被动散热 MIPS/ARM 路由器级热负载），
+# 差异仅在 PWM 硬件通道（由 DTS/板级决定，统一经 PWM_BACKEND 选择后端），
+# 运行时由 router-fancontrol 自动发现，无需在此硬编码节点路径。
+#
+# 由 /usr/local/sbin/router-fancontrol 读取（source 方式，等价于 OpenWrt UCI 配置）
+# 修改后执行：systemctl restart router-fancontrol
+
+BOARD_ID=h5000m
+
+# ---------- PWM 后端 ----------
+# H5000M 的 dts &fan 节点挂在 SoC PWM 通道，由内核 pwm-fan 驱动导出
+# hwmon pwm1（/sys/class/hwmon/hwmonN/pwm1），**没有** GPIO 软 PWM 通道。
+# 显式钉死 hwmon：避免 auto 判定在极端情形（如 mmcblk0 容量读取异常）下
+# 误走 softpwm 分支，而本板根本没有 /sys/kernel/duty_cycle。
+PWM_BACKEND=hwmon
+
+# 总开关（1=启用用户空间控制，0=仅内核保护）
+ENABLED=1
+
+# 运行模式：auto（自动曲线）| manual（手动 PWM）| kernel（仅内核保护）
+MODE=auto
+
+# 曲线档位：silent | balanced | performance | custom
+CURVE=balanced
+
+# 温度来源：max（CPU/PHY/WiFi/5G 取最高）| cpu（仅 CPU）
+TEMP_SOURCE=max
+
+# 手动模式 PWM（0~255）
+MANUAL_PWM=160
+
+# 控制周期（秒，2~60）
+INTERVAL=5
+
+# 滞回（℃，降温时以 temp+HYSTERESIS 重新计算，减少风扇频繁波动，0~10）
+HYSTERESIS=2
+
+# 降速延迟（秒：请求降速时保持当前 PWM 至少这么久，0~300）
+DOWN_DELAY=30
+
+# 启动助推：风扇从停转启动时的 PWM（0~255）与保持时长（毫秒）
+START_PWM=192
+START_BOOST_MS=700
+
+# 故障保护：无有效温度传感器或曲线异常时的 PWM（192~255）
+FAIL_PWM=255
+
+# 自定义曲线（格式：温度:百分比,温度:百分比，升序；0~100 表示目标 PWM 百分比）
+CURVE_SILENT='20:0,35:0,40:50,55:50,70:60,85:75,95:100'
+CURVE_BALANCED='20:0,35:0,40:50,55:60,70:75,85:90,95:100'
+CURVE_PERFORMANCE='20:0,30:60,45:70,60:82,75:92,85:100'
+CURVE_CUSTOM='20:0,40:50,55:60,70:75,85:90,95:100'

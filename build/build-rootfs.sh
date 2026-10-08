@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Hiveton H5000M (MT7987A) — Debian 13 (Trixie) ARM64 RootFS 构建脚本
+# 多板 Debian 13 (Trixie) ARM64 RootFS 构建脚本
+#
+# 支持板卡见 boards/*.board（当前：h5000m=MT7987A、ap3000m=MT7981B）。
+# 板级差异（hostname / DTB 名 / Wi-Fi 驱动与固件目录 / 覆盖层板级参数）由
+# boards/<board>.board 驱动。
 #
 # 功能：
-#   1. 执行 scripts/fetch-firmware.py 拉取 MT7992 / MT7987 PHY 固件
+#   1. 执行 scripts/fetch-firmware.py --board <board> 拉取本板所需 Wi-Fi / PHY 固件
 #   2. debootstrap trixie：arm64 宿主走 native 一次完成；x86 宿主走 --foreign + qemu 第二阶段
 #   3. 安装 build/rootfs/packages.list 全部软件包（Debian 13 稳定版，不使用 Testing/Unstable）
 #   4. 应用 rootfs-overlay/ 覆盖层（网络、systemd 服务、Linux-Router 集成）
@@ -14,9 +18,9 @@
 #   8. 输出 debian13-arm64-rootfs.tar.zst
 #
 # 用法：
-#   sudo bash build/build-rootfs.sh \
+#   sudo bash build/build-rootfs.sh --board h5000m|ap3000m \
 #     --out /path/to/out \
-#     --hostname h5000m-debian \
+#     [--hostname <默认取板级>] \
 #     [--kernel-dir /path/to/out/kernel] \
 #     [--admin-password 初始WebUI密码] [--root-password root密码] \
 #     [--mirror https://deb.debian.org/debian] [--timezone Asia/Shanghai] \
@@ -55,9 +59,14 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ---------------------------------------------------------------- 板级加载
+# shellcheck source=../boards/board-lib.sh
+source "$PROJECT_ROOT/boards/board-lib.sh"
+
+BOARD=""
 OUT_DIR="$PROJECT_ROOT/out"
 KERNEL_DIR="$OUT_DIR/kernel"
-HOSTNAME="h5000m-debian"
+HOSTNAME=""                          # 空 → 取板级 BOARD_HOSTNAME
 SUITE="trixie"                       # Debian 13 稳定版（固定，不允许 Testing/Unstable）
 ARCH="arm64"
 MIRROR="https://deb.debian.org/debian"
@@ -85,6 +94,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --board)          BOARD="$2"; shift 2 ;;
     --out)            OUT_DIR="$2"; shift 2 ;;
     --hostname)       HOSTNAME="$2"; shift 2 ;;
     --kernel-dir)     KERNEL_DIR="$2"; shift 2 ;;
@@ -99,6 +109,28 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
 done
+
+# 板级解析：--hostname 或 --kernel-dir 可反推板级（hostname 前缀 / DTB 名）
+if [[ -z "$BOARD" ]]; then
+  if [[ -n "$HOSTNAME" ]]; then
+    for b in $(board_list); do
+      board_load "$b" >/dev/null 2>&1 || continue
+      [[ "$HOSTNAME" == "$BOARD_HOSTNAME" ]] && { BOARD="$b"; break; }
+    done
+  fi
+fi
+if [[ -z "$BOARD" && -d "$KERNEL_DIR" ]]; then
+  for b in $(board_list); do
+    board_load "$b" >/dev/null 2>&1 || continue
+    [[ -f "$KERNEL_DIR/$BOARD_DTB_FILE" ]] && { BOARD="$b"; break; }
+  done
+fi
+[[ -n "$BOARD" ]] || {
+  echo "[build-rootfs] 必须用 --board 指定板级（可用：$(board_list | tr '\n' ' ')）。" >&2
+  exit 1
+}
+board_load "$BOARD" || exit 1
+: "${HOSTNAME:=$BOARD_HOSTNAME}"
 
 ROOTFS_DIR="$OUT_DIR/rootfs/rootfs"
 BOOT_DIR="$OUT_DIR/rootfs/boot"
@@ -144,8 +176,8 @@ fi
 }
 
 # ---------------------------------------------------------------- 1. 固件
-log "第 1 步：拉取 MT7992 / MT7987 PHY 固件"
-python3 "$PROJECT_ROOT/scripts/fetch-firmware.py" --out "$FIRMWARE_DIR"
+log "第 1 步：拉取本板固件（$BOARD / $BOARD_WIFI_PHY_DESC）"
+python3 "$PROJECT_ROOT/scripts/fetch-firmware.py" --board "$BOARD" --out "$FIRMWARE_DIR"
 [[ -d "$FIRMWARE_DIR/mediatek" ]] || die "固件拉取失败：$FIRMWARE_DIR/mediatek 不存在"
 
 # ---------------------------------------------------------------- 2. debootstrap
@@ -231,23 +263,74 @@ log "第 6 步：应用 rootfs-overlay 覆盖层"
 # （git 对这些文件记录的 mode 本来就不一致），事后只能靠 shebang 扫描补回。
 rsync -a --chmod=Du=rwx,Dg=rx,Do=rx "$OVERLAY_DIR/" "$ROOTFS_DIR/"
 
+# ---------------------------------------------------------------- 6.5 板级覆盖层
+# 【为什么需要第二层】rootfs-overlay/ 是**板级无关**的公共层（27 个文件，
+# 覆盖网络/服务/防火墙/LED/风扇/Linux-Router 集成）。板级差异只有少数几项
+# （路由器默认参数、Wi-Fi 驱动模块名、nftables/风扇参数），若为每块板复制一整套
+# overlay，会产生"改一处漏三处"的同步债。
+# 因此：公共层打底 → boards/overlay.d/<board>/ 叠加覆盖（同名文件整体替换）。
+# 新增板卡 = 新增 boards/overlay.d/<board>/ 目录，公共层零改动。
+BOARD_OVERLAY_DIR="$PROJECT_ROOT/boards/overlay.d/$BOARD"
+if [[ -d "$BOARD_OVERLAY_DIR" ]]; then
+  log "第 6.5 步：叠加板级覆盖层 boards/overlay.d/$BOARD/"
+  rsync -a --chmod=Du=rwx,Dg=rx,Do=rx "$BOARD_OVERLAY_DIR/" "$ROOTFS_DIR/"
+  # 叠加结果自检：板级层里每个文件都必须真的落到 rootfs（rsync 静默失败很难发现）
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    [[ -f "$ROOTFS_DIR/${rel#./}" ]] || \
+      die "板级覆盖层文件未落到 rootfs：boards/overlay.d/$BOARD/${rel#./}"
+  done < <(cd "$BOARD_OVERLAY_DIR" && find . -type f -print)
+  log "  [OK] 板级覆盖层已叠加（$(cd "$BOARD_OVERLAY_DIR" && find . -type f | wc -l) 个文件）"
+else
+  log "第 6.5 步：板级覆盖层 boards/overlay.d/$BOARD/ 不存在，沿用通用层默认值"
+fi
+
+# Wi-Fi 模块清单必须在叠加后非空且已按板定制
+WIFI_MODCONF="$ROOTFS_DIR/etc/modules-load.d/router-wifi.conf"
+if [[ -f "$WIFI_MODCONF" ]] && ! grep -qE "^[[:space:]]*[a-z0-9_]+[[:space:]]*$" "$WIFI_MODCONF"; then
+  log "  [WARN] $WIFI_MODCONF 内无有效模块名（板级层缺失？）——Wi-Fi 将依赖 udev modalias 兜底"
+  log "         本板应由 boards/overlay.d/$BOARD/etc/modules-load.d/router-wifi.conf 提供 $BOARD_WIFI_MODULES_LOAD"
+else
+  log "  [OK] Wi-Fi 模块清单：$(grep -vE '^[[:space:]]*(#|$)' "$WIFI_MODCONF" | tr '\n' ' ')"
+fi
+
 # 固件下载在构建树中，不会随 overlay 自动进入 Debian rootfs。
-# MT7992 与 MT7987 内置 2.5G PHY 都在运行时从 /usr/lib/firmware 加载。
-log "  安装 MT7992 / MT7987 固件到 Debian rootfs"
+# Wi-Fi（MT7992 PCIe / MT7981B 内置 wmac）与 MT7987 内置 2.5G PHY 都在运行时
+# 从 /usr/lib/firmware 加载。
+log "  安装本板固件到 Debian rootfs（$BOARD_WIFI_PHY_DESC）"
 install -d -m 0755 "$ROOTFS_DIR/usr/lib/firmware/mediatek"
 cp -a "$FIRMWARE_DIR/mediatek/." "$ROOTFS_DIR/usr/lib/firmware/mediatek/"
-for firmware in \
-  mt7996/mt7992_dsp_23.bin \
-  mt7996/mt7992_eeprom_23.bin \
-  mt7996/mt7992_eeprom_23_2i5i.bin \
-  mt7996/mt7992_rom_patch_23.bin \
-  mt7996/mt7992_wa_23.bin \
-  mt7996/mt7992_wm_23.bin \
-  mt7987/i2p5ge-phy-DSPBitTb.bin \
-  mt7987/i2p5ge-phy-pmb.bin; do
+
+# 必装清单按板判定：与 fetch-firmware.py 的 FIRMWARE_SETS 一一对应。
+# 【为什么必须逐项校验】cp -a 会静默跳过缺失文件；不校验就会产出"编译能过、
+# 实机 Wi-Fi probe 报 -ENOENT"的镜像（H5000M 历史事故，见 CHANGELOG 2026-10-09）。
+case "$BOARD" in
+  h5000m)
+    REQUIRED_FIRMWARE=(
+      mt7996/mt7992_dsp_23.bin
+      mt7996/mt7992_eeprom_23.bin
+      mt7996/mt7992_eeprom_23_2i5i.bin
+      mt7996/mt7992_rom_patch_23.bin
+      mt7996/mt7992_wa_23.bin
+      mt7996/mt7992_wm_23.bin
+      mt7987/i2p5ge-phy-DSPBitTb.bin
+      mt7987/i2p5ge-phy-pmb.bin
+    ) ;;
+  ap3000m)
+    # MT7981B 内置 wmac：驱动按 SOC 名在 mediatek/mt7981/ 下查找 WA 与 ROM patch。
+    # EEPROM（MAC / 校准数据）不经固件文件，由 DTS nvmem-cells 从 eMMC factory
+    # 分区读取（dts/mt7981b-airpi-ap3000m.dts 的 &wifi nvmem-cells）。
+    REQUIRED_FIRMWARE=(
+      mt7981/mt7981_wa.bin
+      mt7981/mt7981_rom_patch.bin
+    ) ;;
+  *) die "板级 $BOARD 缺少固件白名单，请在 build-rootfs.sh 的 case 中补充" ;;
+esac
+for firmware in "${REQUIRED_FIRMWARE[@]}"; do
   [[ -s "$ROOTFS_DIR/usr/lib/firmware/mediatek/$firmware" ]] || \
-    die "固件未进入 rootfs 或为空：/usr/lib/firmware/mediatek/$firmware"
+    die "固件未进入 rootfs 或为空：/usr/lib/firmware/mediatek/$firmware（板级 $BOARD）"
 done
+log "  [OK] 固件校验通过（${#REQUIRED_FIRMWARE[@]} 项）"
 
 # 【为什么还要「扫描」——h5000m-led.sh 曾因漏列变成不可执行】
 # 原先依赖硬编码白名单逐条 chmod 0755，恰好漏了 h5000m-led.sh，于是 systemd 直接报：
@@ -270,15 +353,18 @@ OVERLAY_SCRIPT_LIST="$(mktemp)"
 # CI run 37551055700 即此因：runner 的文件枚举序把一个普通配置文件排在最后，
 # 构建 46ms 内静默失败且无任何错误输出。是否炸取决于文件枚举顺序，属不确定性行为。
 # 修复：把判定搬进 if 语境（if 条件失败不影响循环退出码），并加结果兜底。
-( cd "$OVERLAY_DIR" && find . -type f -print0 2>/dev/null |
-  while IFS= read -r -d '' f; do
-    if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
-      printf '%s\n' "$f"
-    fi
+( for _od in "$OVERLAY_DIR" "$PROJECT_ROOT/boards/overlay.d/$BOARD"; do
+    [[ -d "$_od" ]] || continue
+    cd "$_od" && find . -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        printf '%s\n' "$f"
+      fi
+    done
   done ) > "$OVERLAY_SCRIPT_LIST"
 # 兜底：扫描结果为空 = 覆盖层异常（任何覆盖层都至少有启动脚本），显式报错而非静默放过
 [[ -s "$OVERLAY_SCRIPT_LIST" ]] || \
-  die "覆盖层 shebang 扫描无结果（$OVERLAY_DIR 为空或扫描失败）"
+  die "覆盖层 shebang 扫描无结果（$OVERLAY_DIR 与 boards/overlay.d/$BOARD 均为空，或扫描失败）"
 
 log "  按 shebang 扫描并修复覆盖层脚本可执行位（范围：整个覆盖层）"
 while IFS= read -r rel; do
@@ -391,8 +477,8 @@ chmod 0644 "$ROOTFS_DIR$LINUX_ROUTER_DIR"/router-panel.service \
 if [[ -n "$KERNEL_DIR" ]]; then
   log "第 9 步：安装内核产物"
   [[ -f "$KERNEL_DIR/Image" ]] && install -m 0644 "$KERNEL_DIR/Image" "$ROOTFS_DIR/boot/Image"
-  [[ -f "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" ]] && \
-    install -m 0644 "$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb" "$ROOTFS_DIR/boot/mt7987a-hiveton-h5000m.dtb"
+  [[ -f "$KERNEL_DIR/$BOARD_DTB_FILE" ]] && \
+    install -m 0644 "$KERNEL_DIR/$BOARD_DTB_FILE" "$ROOTFS_DIR/boot/$BOARD_DTB_FILE"
   if [[ -f "$KERNEL_DIR/modules.tar.zst" ]]; then
     mkdir -p "$ROOTFS_DIR/lib/modules"
     # Debian 13 为 usrmerge 布局（/lib 是指向 /usr/lib 的符号链接）。
@@ -405,11 +491,11 @@ if [[ -n "$KERNEL_DIR" ]]; then
   # distro boot（U-Boot 支持 extlinux 时的备用入口）
   mkdir -p "$ROOTFS_DIR/boot/extlinux"
   cat > "$ROOTFS_DIR/boot/extlinux/extlinux.conf" <<EOF
-DEFAULT h5000m
-LABEL h5000m
+DEFAULT $BOARD
+LABEL $BOARD
     LINUX /Image
-    FDT /mt7987a-hiveton-h5000m.dtb
-    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf console=ttyS0,115200n8
+    FDT /$BOARD_DTB_FILE
+    APPEND $BOARD_BOOTARGS
 EOF
 fi
 
@@ -426,9 +512,15 @@ HOSTNAME="$HOSTNAME" awk '
 # heredoc 字符串，shellcheck 完全看不到，语法错误要等真机构建才暴露。
 # 现在它进入 CI 的 bash -n 与 shellcheck 覆盖范围。
 install -m 0755 "$CHROOT_FINALIZE_SCRIPT" "$ROOTFS_DIR/tmp/chroot-finalize.sh"
+# 后四个位置参数为多板化新增：板级 ID / 机型名 / 大写机型 / drop-in 前缀。
+# 【命名约定】$10(BOARD_DROPIN_PREFIX) 只影响**文件名带前缀**的资产
+# （sshd drop-in、/etc/<prefix>-initial-credentials）。systemd unit 与
+# 主脚本统一叫 router-*.service / router-*.sh，板级差异走
+# boards/overlay.d/<board>/ 同名覆盖，因此 enable 的是字面量 "router-*"。
 chroot "$ROOTFS_DIR" /bin/bash /tmp/chroot-finalize.sh \
   "$HOSTNAME" "$TIMEZONE" "$ADMIN_PASSWORD" "$ROOT_PASSWORD" \
-  "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA"
+  "$LINUX_ROUTER_DIR" "$LINUX_ROUTER_DATA" \
+  "$BOARD" "$BOARD_NAME" "$BOARD_UPPER" "$BOARD"
 rm -f "$ROOTFS_DIR/tmp/chroot-finalize.sh"
 
 # 清理构建期文件
@@ -452,4 +544,4 @@ else
   log "完成。RootFS: $ROOTFS_TAR"
   ls -lh "$ROOTFS_TAR"
 fi
-log "初始凭据已写入 $OUT_DIR/rootfs/initial-credentials.txt"
+log "初始凭据已写入 $OUT_DIR/rootfs/initial-credentials.txt（设备内为 /etc/$BOARD-initial-credentials）"

@@ -1,6 +1,6 @@
 [Unit]
-Description=Linux Router Privileged Agent (H5000M)
-After=network-online.target NetworkManager.service h5000m-router-init.service
+Description=Linux Router Privileged Agent (<board>)
+After=network-online.target NetworkManager.service router-init.service
 Wants=network-online.target
 StartLimitIntervalSec=0
 
@@ -13,7 +13,7 @@ Environment="LINUX_ROUTER_DATA_DIR=/var/lib/linux-router"
 Environment="LINUX_ROUTER_AGENT_SOCKET=/run/linux-router/agent.sock"
 Environment="LINUX_ROUTER_AGENT_GROUP=router-panel"
 Environment="LINUX_ROUTER_LAN_BRIDGE=br-lan"
-Environment="LINUX_ROUTER_BRIDGED_AP_PROFILES=H5000M-AP-2G,H5000M-AP-5G"
+Environment="LINUX_ROUTER_BRIDGED_AP_PROFILES=ROUTER-AP-2G,ROUTER-AP-5G"
 Environment="LINUX_ROUTER_DHCP_LEASE_FILE=/var/lib/misc/dnsmasq.leases"
 ExecStart=/usr/bin/python3 /opt/linux-router/agent.py
 Restart=always

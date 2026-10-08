@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Hiveton H5000M (MT7987A) — Debian 13 内核构建脚本
+# 多板 Debian 13 内核构建脚本（MediaTek Filogic）
 #
 # 基于 ImmortalWrt master（target/linux/mediatek）已验证的 6.18 内核补丁与配置，
 # 生成适用于 Debian 13 ARM64 的 Linux 6.18.x 内核：
-#   Image / mt7987a-hiveton-h5000m.dtb / modules.tar.zst
+#   Image / <board>.dtb / modules.tar.zst
+#
+# 支持板卡见 boards/*.board（当前：h5000m=MT7987A、ap3000m=MT7981B）。
+# 板级差异（DTS / DTB / 内核配置片段 / 串口基址 / 关键符号）全部由 boards/<board>.board
+# 驱动，本脚本不含任何机型字面量。
 #
 # 用法：
-#   bash build-kernel.sh [--kernel-version 6.18.54] [--config 文件]
-#                        [--out 目录] [--jobs N]
+#   bash build-kernel.sh --board h5000m|ap3000m [--kernel-version 6.18.54]
+#                        [--config 文件] [--out 目录] [--jobs N]
 #                        [--skip-failed-patches] [--strict]
 #                        [--native | --cross] [--no-ccache]
 #
@@ -43,8 +47,13 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DTS_DIR="$PROJECT_ROOT/dts"
 PATCH_DIR="$PROJECT_ROOT/kernel/patches"
 
+# ---------------------------------------------------------------- 板级加载
+# shellcheck source=../boards/board-lib.sh
+source "$PROJECT_ROOT/boards/board-lib.sh"
+
 KERNEL_VERSION="6.18.54"
-CONFIG_FILE="$PROJECT_ROOT/build/kernel-conf/h5000m-6.18.config"
+BOARD=""                                   # 必填（--board 或 --config 推导）
+CONFIG_FILE=""                             # 缺省 = build/kernel-conf/$BOARD_KERNEL_CONFIG
 OUT_DIR="$PROJECT_ROOT/out/kernel"
 JOBS="$(nproc 2>/dev/null || echo 2)"
 SKIP_FAILED=0
@@ -58,11 +67,12 @@ GENERIC_PATCH_DIR="$PROJECT_ROOT/kernel/patches/generic"
 PATCH_DIR="$PROJECT_ROOT/kernel/patches"
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --board)          BOARD="$2"; shift 2 ;;
     --kernel-version) KERNEL_VERSION="$2"; shift 2 ;;
     --config)         CONFIG_FILE="$2"; shift 2 ;;
     --out)            OUT_DIR="$2"; shift 2 ;;
@@ -76,6 +86,26 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知参数：$1" >&2; usage; exit 1 ;;
   esac
 done
+
+# --config 兼容旧用法：未给 --board 时从配置文件名反推板级
+# （h5000m-6.18.config → h5000m）。两者都不给则直接报错并列出可选板卡。
+if [[ -z "$BOARD" && -n "$CONFIG_FILE" ]]; then
+  cfg_base="$(basename "$CONFIG_FILE")"
+  cand="${cfg_base%%-*}"
+  board_exists "$cand" && BOARD="$cand"
+fi
+if [[ -z "$BOARD" ]]; then
+  echo "[build-kernel] ERROR: 必须用 --board 指定板级。可用：$(board_list | tr '\n' ' ')" >&2
+  exit 1
+fi
+board_load "$BOARD" || exit 1
+
+# 板级源码存在性预检：早失败优于下载内核后再报缺 DTS
+[[ -f "$DTS_DIR/$BOARD_DTS" ]] || { echo "[build-kernel] ERROR: 缺少板级 DTS：$DTS_DIR/$BOARD_DTS" >&2; exit 1; }
+[[ -f "$DTS_DIR/$BOARD_SOC_DTSI" ]] || { echo "[build-kernel] ERROR: 缺少 SoC dtsi：$DTS_DIR/$BOARD_SOC_DTSI" >&2; exit 1; }
+
+: "${CONFIG_FILE:=$PROJECT_ROOT/build/kernel-conf/$BOARD_KERNEL_CONFIG}"
+[[ -f "$CONFIG_FILE" ]] || { echo "[build-kernel] ERROR: 缺少内核配置片段：$CONFIG_FILE" >&2; exit 1; }
 
 # 规范化 OUT_DIR 为绝对路径：
 # 下文 modules_install 使用 make -C "$KERNEL_SRC"，make 的工作目录会切换到内核
@@ -241,7 +271,10 @@ if [[ "$PATCH_FAILED" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------- 3. 复制 DTS 并注册 DTB
-log "复制 H5000M DTS / dtsi 到内核源码"
+# dts/ 下同时存在多块板卡的 DTS/dtsi（mt7987a-hiveton-h5000m.dts + mt7987.dtsi、
+# mt7981b-airpi-ap3000m.dts + mt7981b.dtsi）。**全部复制**：DTS 之间不互相 include，
+# 复制多余的 dtsi/dts 不产生副作用，却省掉了"新增板卡忘记在此加白名单"的坑。
+log "复制 DTS / dtsi 到内核源码（板级：$BOARD → $BOARD_DTS）"
 DTS_TARGET="$KERNEL_SRC/arch/arm64/boot/dts/mediatek"
 mkdir -p "$DTS_TARGET"
 cp -v "$DTS_DIR"/*.dts "$DTS_DIR"/*.dtsi "$DTS_TARGET/" >/dev/null
@@ -251,10 +284,40 @@ log "复制 OpenWrt files（generic + mediatek）到内核源码"
 cp -a "$PROJECT_ROOT/kernel/files-generic/." "$KERNEL_SRC/"
 cp -a "$PROJECT_ROOT/kernel/files-mediatek/." "$KERNEL_SRC/"
 
-log "注册 H5000M DTB 到 arch/arm64/boot/dts/mediatek/Makefile"
-if ! grep -q "mt7987a-hiveton-h5000m.dtb" "$DTS_TARGET/Makefile"; then
-  printf '\n# Hiveton H5000M (Debian 13 port)\ndtb-$(CONFIG_ARCH_MEDIATEK) += mt7987a-hiveton-h5000m.dtb\n' >> "$DTS_TARGET/Makefile"
+# 板级内核源码文件层（kernel/files-boards/<board>/）——只对所属板卡生效。
+# 用于放置"只有这块板子需要、且不适合作补丁"的驱动源码：
+#   ap3000m → drivers/hwmon/airpi-gpio-fan/（GPIO 软 PWM 风扇，见该目录 Kbuild 注释）
+BOARD_FILES_DIR="$PROJECT_ROOT/kernel/files-boards/$BOARD"
+if [[ -d "$BOARD_FILES_DIR" ]]; then
+  log "叠加板级内核源码层 kernel/files-boards/$BOARD/"
+  cp -a "$BOARD_FILES_DIR/." "$KERNEL_SRC/"
+else
+  log "板级内核源码层 kernel/files-boards/$BOARD/ 不存在，跳过"
 fi
+
+# airpi-gpio-fan 是新增目录，drivers/hwmon/Makefile 不会自动递归进来，必须显式
+# 追加 obj 行。放在这里而不是 patch：patch 会随内核版本漂移（Makefile 上下文行
+# 变动即失配），而一行追加对上下文零依赖，幂等且可重复执行。
+HWMON_MAKEFILE="$KERNEL_SRC/drivers/hwmon/Makefile"
+if [[ "$BOARD" == "ap3000m" ]]; then
+  if ! grep -q "airpi-gpio-fan" "$HWMON_MAKEFILE" 2>/dev/null; then
+    printf '\n# AirPi AP3000M GPIO soft-PWM fan (Debian 13 port)\nobj-$(CONFIG_AIRPI_GPIO_FAN) += airpi-gpio-fan/\n' \
+      >> "$HWMON_MAKEFILE"
+    log "已在 drivers/hwmon/Makefile 注册 airpi-gpio-fan/"
+  else
+    log "drivers/hwmon/Makefile 已含 airpi-gpio-fan/，跳过"
+  fi
+  grep -n "airpi-gpio-fan" "$HWMON_MAKEFILE" | sed 's/^/[build-kernel]   /'
+  [[ -f "$KERNEL_SRC/drivers/hwmon/airpi-gpio-fan/Kbuild" ]] \
+    || die "板级源码层未落到 drivers/hwmon/airpi-gpio-fan/（检查 kernel/files-boards/$BOARD/）"
+fi
+
+log "注册本板 DTB 到 arch/arm64/boot/dts/mediatek/Makefile：$BOARD_DTB_FILE"
+if ! grep -q "${BOARD_DTB_FILE}\b" "$DTS_TARGET/Makefile"; then
+  printf '\n# %s (Debian 13 port)\ndtb-$(CONFIG_ARCH_MEDIATEK) += %s\n' \
+    "$BOARD_NAME" "$BOARD_DTB_FILE" >> "$DTS_TARGET/Makefile"
+fi
+grep -n "$BOARD_DTB_FILE" "$DTS_TARGET/Makefile" | sed 's/^/[build-kernel]   /'
 
 # ---------------------------------------------------------------- 4. 内核配置
 log "生成 .config（arm64 defconfig + 增量片段）"
@@ -262,25 +325,48 @@ make -C "$KERNEL_SRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" defconfig >/dev/
 cat "$CONFIG_FILE" >> "$KERNEL_SRC/.config"
 make -C "$KERNEL_SRC" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig >/dev/null
 
-log "核验关键配置项："
+log "核验关键配置项（板级：$BOARD / $BOARD_SOC）："
+# 通用集：与 SoC 无关的路由器基础能力 + 存储栈 + GPT 分区名 + 挂死可诊断性。
+# 说明：
+#   root=PARTLABEL=rootfs 依赖 EFI_PARTITION；OVERLAY_FS/SQUASHFS/DEVTMPFS_MOUNT/
+#   BLK_DEV_LOOP 是 SquashFS+OverlayFS 引导层的四条腿；ARM64_PSEUDO_NMI 是
+#   「CPU 关中断自旋时仍能拿到 per-CPU 回栈」的唯一途径（2026-10-09 静默冻结实测教训）。
 REQUIRED_SYMBOLS=(
-  CONFIG_ARCH_MEDIATEK CONFIG_PINCTRL_MT7987 CONFIG_COMMON_CLK_MT7987
-  CONFIG_COMMON_CLK_MT7987_ETHSYS CONFIG_NET_MEDIATEK_SOC CONFIG_MEDIATEK_GE_PHY
-  CONFIG_REALTEK_PHY CONFIG_PCS_MTK_LYNXI CONFIG_MT76_CORE CONFIG_MT7996E
-  CONFIG_MMC_MTK CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_PWM_MEDIATEK CONFIG_SENSORS_PWM_FAN
-  CONFIG_MTK_LVTS_THERMAL CONFIG_USB_XHCI_MTK CONFIG_BRIDGE CONFIG_NF_TABLES
-  CONFIG_NFT_MASQ CONFIG_IPV6 CONFIG_EXT4_FS
-  # ---- WAN 拨号 / 硬件流卸载 / 2.5G PHY / 5G 模组（回归校验，防换环境重编丢符号）----
+  CONFIG_ARCH_MEDIATEK CONFIG_NET_MEDIATEK_SOC CONFIG_MEDIATEK_GE_PHY
+  CONFIG_REALTEK_PHY CONFIG_MMC_MTK CONFIG_PWM_MEDIATEK CONFIG_SENSORS_PWM_FAN
+  CONFIG_USB_XHCI_MTK CONFIG_BRIDGE CONFIG_NF_TABLES CONFIG_NFT_MASQ
+  CONFIG_IPV6 CONFIG_EXT4_FS
+  # ---- WAN 拨号 / 硬件流卸载 / 5G 模组（回归校验，防换环境重编丢符号）----
   CONFIG_PPPOE CONFIG_NF_FLOW_TABLE_INET CONFIG_NFT_FLOW_OFFLOAD
-  CONFIG_MEDIATEK_2P5GE_PHY CONFIG_MTK_NET_PHYLIB
+  CONFIG_MTK_NET_PHYLIB
   CONFIG_WWAN CONFIG_USB_NET_QMI_WWAN CONFIG_USB_NET_CDC_MBIM CONFIG_USB_SERIAL_OPTION
-  # ---- 存储栈 / GPT 分区名 / 挂死可诊断性（回归校验，防换环境重编静默降级）----
-  # root=PARTLABEL=rootfs 依赖 EFI_PARTITION；OVERLAY_FS/SQUASHFS/DEVTMPFS_MOUNT/
-  # BLK_DEV_LOOP 是 SquashFS+OverlayFS 引导层的四条腿；ARM64_PSEUDO_NMI 是
-  # 「CPU 关中断自旋时仍能拿到 per-CPU 回栈」的唯一途径（2026-10-09 静默冻结实测教训）。
+  # ---- 存储栈 / GPT 分区名 / 挂死可诊断性 / Wi-Fi 模块化 ----
   CONFIG_EFI_PARTITION CONFIG_OVERLAY_FS CONFIG_SQUASHFS CONFIG_DEVTMPFS_MOUNT
   CONFIG_BLK_DEV_LOOP CONFIG_ARM64_PSEUDO_NMI CONFIG_CFG80211 CONFIG_MAC80211
 )
+
+# 板级附加符号：从 boards/<board>.board 的 BOARD_KERNEL_CONFIG 对应 SoC 推导。
+# 这些符号名随 SoC 而变（PINCTRL_MT7987 vs PINCTRL_MT7981），故必须板级化，
+# 否则换板卡后 build-kernel.sh --strict 会把正确配置误判为缺失而终止构建。
+case "$BOARD_SYSUPGRADE_BOARD" in
+  hiveton_h5000m)
+    REQUIRED_SYMBOLS+=(
+      CONFIG_PINCTRL_MT7987 CONFIG_COMMON_CLK_MT7987 CONFIG_COMMON_CLK_MT7987_ETHSYS
+      CONFIG_PCS_MTK_LYNXI CONFIG_MEDIATEK_2P5GE_PHY
+      CONFIG_MT7996E CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_MTK_LVTS_THERMAL
+    ) ;;
+  airpi_ap3000m)
+    REQUIRED_SYMBOLS+=(
+      CONFIG_PINCTRL_MT7981 CONFIG_COMMON_CLK_MT7981 CONFIG_COMMON_CLK_MT7981_ETHSYS
+      CONFIG_MT7915E
+      # 风扇：软 PWM 走 GPIO 整数接口（GPIOLIB_LEGACY=y 钉死分支），
+      # 硬 PWM 走 pwm-fan hwmon。两版硬件都在，缺任一项都会导致风扇不可控。
+      CONFIG_GPIOLIB_LEGACY CONFIG_AIRPI_GPIO_FAN CONFIG_SENSORS_PWM_FAN
+    ) ;;
+  *)
+    log "  [WARN] 板级 $BOARD_SYSUPGRADE_BOARD 无专属符号清单，仅校验通用集" ;;
+esac
+
 CONFIG_MISSING=0
 for sym in "${REQUIRED_SYMBOLS[@]}"; do
   if grep -q "^${sym}=y\|^${sym}=m" "$KERNEL_SRC/.config"; then
@@ -317,14 +403,14 @@ if [[ ! -d "$MODULES_ROOT/lib/modules" ]]; then
 fi
 
 # ---------------------------------------------------------------- 6. 收集产物
-log "收集产物"
+log "收集产物（板级：$BOARD / $BOARD_SOC）"
 IMAGE="$KERNEL_SRC/arch/arm64/boot/Image"
-DTB="$KERNEL_SRC/arch/arm64/boot/dts/mediatek/mt7987a-hiveton-h5000m.dtb"
+DTB="$KERNEL_SRC/arch/arm64/boot/dts/mediatek/$BOARD_DTB_FILE"
 [[ -f "$IMAGE" ]] || die "Image 未生成"
-[[ -f "$DTB" ]]   || die "H5000M DTB 未生成"
+[[ -f "$DTB" ]]   || die "$BOARD_NAME DTB 未生成（$BOARD_DTB_FILE）"
 
 install -Dm644 "$IMAGE" "$OUT_DIR/Image"
-install -Dm644 "$DTB"   "$OUT_DIR/mt7987a-hiveton-h5000m.dtb"
+install -Dm644 "$DTB"   "$OUT_DIR/$BOARD_DTB_FILE"
 # 真 zstd 压缩（扩展名 .zst 名实相符；RootFS 侧以 tar -I zstd -xf 解压）。
 # 走管道 + zstd -T0 多线程：-c -f - 输出到 stdout 由 zstd 并行压缩，
 # 相比 tar --zstd（单线程）在百 MB 级 lib/ 上明显更快。
@@ -334,11 +420,16 @@ tar -C "$MODULES_ROOT" -cf - lib | zstd -q -T0 -o "$OUT_DIR/modules.tar.zst"
 # 导出内核真实生成的 .config（olddefconfig 展开后的完整配置）。
 # 此前错误地导出了输入片段本身，导致 artifact 中的 config 无法反映真实构建配置。
 cp "$KERNEL_SRC/.config" "$OUT_DIR/kernel-config-exported.config"
-grep -E '^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT7987|COMMON_CLK_MT7987)' "$KERNEL_SRC/.config" \
-  > "$OUT_DIR/kernel-mt7987-options.txt" || true
+# SoC 选项快照：文件名带板级，避免两块板卡的产物在 artifact 里互相覆盖
+grep -E "^(# )?CONFIG_(ARCH_MEDIATEK|PINCTRL_MT798[17]|COMMON_CLK_MT798[17]|MT79[0-9]+E|MEDIATEK_2P5GE_PHY)" \
+  "$KERNEL_SRC/.config" > "$OUT_DIR/kernel-${BOARD}-soc-options.txt" || true
+# 兼容旧产物名（H5000M 历史 artifact 名）：同内容再落一份，避免下游脚本改名断裂
+if [[ "$BOARD" == "h5000m" ]]; then
+  cp -f "$OUT_DIR/kernel-${BOARD}-soc-options.txt" "$OUT_DIR/kernel-mt7987-options.txt"
+fi
 
 log "完成。产物："
-ls -lh "$OUT_DIR/Image" "$OUT_DIR/mt7987a-hiveton-h5000m.dtb" "$OUT_DIR/modules.tar.zst"
+ls -lh "$OUT_DIR/Image" "$OUT_DIR/$BOARD_DTB_FILE" "$OUT_DIR/modules.tar.zst"
 
 # ccache 统计（便于在 CI 日志里确认命中率，判断缓存是否生效）
 if [[ -n "$CCACHE_BIN" ]]; then

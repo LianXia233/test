@@ -12,14 +12,21 @@
 
 ## 2. 风扇控制
 
+> 脚本名自 2026-10-09 起为 **`router-fancontrol`**（原 `h5000m-fancontrol`）；
+> 配置为 `/etc/default/router-fancontrol`，服务为 `router-fancontrol.service`。
+> 关键前置：`/usr/local/sbin/router-fancontrol-modprobe` 由 unit 的 `ExecStartPre` 调用。
+
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| 风扇不转 | `/usr/local/sbin/h5000m-fancontrol status`；`cat /sys/class/hwmon/hwmon*/pwm1` | 温度低于曲线启动点属正常（如 35°C 以下曲线为 0）；确认 `h5000m-fancontrol.service` 已运行（`systemctl status h5000m-fancontrol`） |
-| 风扇满转不停 | `status` 中 `result=failsafe` / `reason=*-failsafe` | 传感器/曲线校验失败进入保护；查 `journalctl -u h5000m-fancontrol`，确认温度源（`control_sensor`）可读 |
-| PWM 节点不存在 | `ls /sys/class/hwmon/`；`dmesg \| grep -i pwm` | 内核未启用 `CONFIG_PWM_FAN` 或 DTS 风扇节点未生效（`&fan` status=okay）；重编内核 |
-| 温度读取为 -40/150 边界 | `find /sys/class/thermal -name temp` | LVTS 未初始化或传感器失效；确认 `CONFIG_MTK_LVTS_THERMAL=y` |
+| 风扇不转 | `/usr/local/sbin/router-fancontrol status` | 先看 `pwm_backend` 与 `pwm` 两行：`pwm=` 为空说明后端没找到节点（见下方两条）；温度低于曲线启动点（35°C 以下曲线为 0）属正常 |
+| **`status` 显示 `pwm=` 为空** | `status` 的 `pwm_backend` / `pwm_backend_cfg` | 后端选错。AP3000M 16GB 版应为 `softpwm`，8GB 版为 `hwmon`；H5000M 板级已钉死 `hwmon` |
+| **AP3000M 16GB 版软 PWM 不工作** | `cat /sys/block/mmcblk0/size`（应 > 25000000）；`lsmod \| grep airpi_gpio_fan`；`ls -l /sys/kernel/duty_cycle` | ① 模块未加载 → `systemctl status router-fancontrol` 看 `ExecStartPre` 是否失败；② 手工验证：`modprobe airpi_gpio_fan fangpio=540 cycle=255 period=15000 fanen=1`，再 `echo 128 > /sys/kernel/duty_cycle` 看风扇是否转；③ 若模块不存在 → 内核未编入 `CONFIG_AIRPI_GPIO_FAN`（重编内核） |
+| **AP3000M 8GB 版硬件 PWM 不工作** | `ls /sys/class/hwmon/*/pwm1`；`dmesg \| grep -i pwm` | 内核未启用 `CONFIG_SENSORS_PWM_FAN` 或 DTS `&fan` 未 okay；确认 `dts/mt7981b-airpi-ap3000m.dts` 的 `&fan { pwms = <&pwm 2 40000 0>; status = "okay"; }` 已生效 |
+| 风扇满转不停 | `status` 中 `result=failsafe` / `reason=*-failsafe` | 传感器/曲线校验失败进入保护；查 `journalctl -u router-fancontrol`，确认温度源（`control_sensor`）可读 |
+| 温度读取为 -40/150 边界 | `find /sys/class/thermal -name temp` | LVTS 未初始化或传感器失效；确认 `CONFIG_MTK_LVTS_THERMAL=y`（H5000M）/ `CONFIG_MTK_THERMAL=y`（AP3000M） |
 | 与内核策略争抢 PWM | `cat /sys/class/thermal/thermal_zone*/policy` | 本项目 DTS 已删除风扇 cooling-maps；若升级旧 DTB，需同步新 DTS 或确认策略为用户空间接管后恢复 |
-| 修改配置不生效 | `cat /etc/default/h5000m-fancontrol` | 修改后执行 `systemctl restart h5000m-fancontrol` |
+| 修改配置不生效 | `cat /etc/default/router-fancontrol`（注意板级层可能整体覆盖） | 修改后执行 `systemctl restart router-fancontrol` |
+| 日志刷屏「PWM control node not found」 | `journalctl -u router-fancontrol \| grep pwm-missing` | 该消息带 `pwm-missing-soft` 后缀 = 软 PWM 节点缺失（查模块）；无后缀 = 通用找不到节点（查后端配置） |
 
 ## 3. U-Boot 引导 / eMMC 刷入
 

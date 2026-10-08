@@ -147,31 +147,88 @@ CONFIG_WIREGUARD=m（可选）
   固定值会让所有刷了同一固件的设备共用同一组 MAC，接进同一个二层网络就冲突。
 - 接口命名：eth0 = LAN，eth1 = WAN（内核按 gmac 顺序命名，U-Boot 传入 DTB 时 eth0/eth1 即对应 gmac0/gmac1）
 
-## 6. 风扇控制（h5000m-fancontrol）
+## 6. 风扇控制（router-fancontrol，多板）
 
-硬件链路：
+通用层脚本名为 `router-fancontrol`（2026-10-09 由 `h5000m-fancontrol` 更名，见 CHANGELOG），
+所有板卡共用一套控制策略；**差异只在 PWM 后端**，由板级的 `PWM_BACKEND` 选择。
+
+### 6.1 后端选型（三选一）
+
+| 后端 | PWM 节点 | 用于 |
+| --- | --- | --- |
+| `hwmon` | `/sys/class/hwmon/hwmon*/pwm1` | H5000M（`pwm-fan` 驱动）；AP3000M **8GB 版** |
+| `pwmchip` | `/sys/class/pwm/pwmchip*/pwm*/duty_cycle` | PWM 控制器直接导出的板卡（备选路径） |
+| `softpwm` | `/sys/kernel/duty_cycle` | AP3000M **16GB 版**（GPIO 位翻转软 PWM） |
+
+`PWM_BACKEND=auto`（缺省）时按硬件自动判定，规则与官方 AP3000M 插件一致：
+
+```
+读 /sys/block/mmcblk0/size（512B 扇区）
+  > 25 000 000（≈12.8 GiB）→ 16GB 版 → softpwm
+  否则                      → 依次尝试 hwmon → pwmchip → 回退 softpwm
+读不到容量                   → 有硬件 PWM 节点就走硬件，否则按 16GB 版尝试 softpwm
+```
+
+### 6.2 H5000M 硬件链路
 
 ```
 MT7987 PWM1 (50kHz) -> pwm-fan 驱动 -> /sys/class/hwmon/hwmon*/pwm1（0~255）
                                     -> thermal cooling_device（type=pwm-fan）
+PWM_BACKEND=hwmon（板级钉死）
 温度源：CPU（thermal_zone / lvts）、PHY、Wi-Fi（mt7992 hwmon）、5G 模组（/run/mt5700m/temperature）
 ```
 
-软件栈（Debian systemd 服务）：
+### 6.3 AP3000M 硬件链路（两版本差异）
 
-- `/usr/local/sbin/h5000m-fancontrol`：控制器脚本（POSIX sh，无额外依赖）
+依据官方 `LianXia233/luci-app-airpi3000m-fancontrol`（专为 `airpi,ap3000m` 定制）：
+
+| eMMC | 驱动 | PWM 节点 | 说明 |
+| --- | --- | --- | --- |
+| **16GB** | `airpi-gpio-fan`（GPIO 540 位翻转软 PWM） | `/sys/kernel/duty_cycle` | 主板**未引出**硬件 PWM 引脚；约 66.7 Hz（`period=15000` μs），256 级 |
+| **8GB** | 内核 `pwm-fan` | `hwmon/*/pwm1` | 上游 DTS `&fan { pwms = <&pwm 2 40000 0>; }` |
+
+> **为什么软 PWM 驱动要在本仓库编译**
+> 上游 `kmod-airpi-gpio-fan` 的 README 记录了实机踩坑：即使 vermagic 完全一致，外部 `.ko`
+> 仍可能因 `struct module` 大小/偏移不匹配被内核拒载，报
+> `.gnu.linkonce.this_module section size must match ...`，根因是
+> `CONFIG_MODULES_TREE_LOOKUP` / `EVENT_TRACING` / `DEBUG_INFO_BTF_MODULES` / `BPF_EVENTS`
+> 这四个**配置项**改变了结构体布局（上游 .ko 按官方 SDK 配置编译）。
+> 本仓库自行编译内核，模块与 vmlinux 出自同一次 `make`，配置天然一致，该风险归零 —— 因此
+> 驱动源码直接 vendored 到 `kernel/files-boards/ap3000m/drivers/hwmon/airpi-gpio-fan/`
+> （板级内核源码层），以 `CONFIG_AIRPI_GPIO_FAN=m` 随内核构建。
+
+### 6.4 软件栈（Debian systemd 服务）
+
+- `/usr/local/sbin/router-fancontrol`：控制器脚本（POSIX sh，无额外依赖）
   - 自动曲线（silent/balanced/performance/custom）、手动 PWM、kernel 仅内核保护模式
   - 温度滞回（HYSTERESIS）、降速延迟（DOWN_DELAY）、启动助推（START_PWM/START_BOOST_MS）
   - 传感器 / 曲线校验失败进入故障保护（FAIL_PWM，默认 255）
   - 温度来源 max（CPU/PHY/WiFi/5G 取最高）或 cpu
   - 接管 CPU thermal zone 策略（user_space）前先保存原策略，退出/崩溃时恢复（step_wise 等）
-- `/etc/default/h5000m-fancontrol`：配置文件（等价 OpenWrt UCI `h5000m_fancontrol`）
-- `/etc/systemd/system/h5000m-fancontrol.service`：开机自启（sysinit.target），失败自动重启
+- `/usr/local/sbin/router-fancontrol-modprobe`：**驱动模块预加载钩子**
+  - 通用层为空操作；AP3000M 板级层覆盖为「按 eMMC 容量决定是否 modprobe `airpi_gpio_fan`」
+  - 由 unit 的 `ExecStartPre` 调用；加载失败返回非 0 → 服务显式失败（而非风扇静默不转）
+- `/etc/default/router-fancontrol`：配置文件（等价 OpenWrt UCI；板级层覆盖差异项）
+  - 通用项：`ENABLED` / `MODE` / `CURVE*` / `TEMP_SOURCE` / `MANUAL_PWM` / `INTERVAL` 等
+  - 后端项：`PWM_BACKEND`（auto/hwmon/pwmchip/softpwm）
+  - 软 PWM 项：`AIRPI_FAN_GPIO`（缺省 540）、`AIRPI_FAN_PERIOD`（缺省 15000 μs）、
+    `AIRPI_FAN_FORCE`（留空=自动，调试用强制 softpwm/pwm）
+- `/etc/systemd/system/router-fancontrol.service`：开机自启（sysinit.target），失败自动重启
 
-常用命令：
+### 6.5 常用命令
 
 ```bash
-systemctl status h5000m-fancontrol     # 服务状态
-/usr/local/sbin/h5000m-fancontrol status   # 实时状态（PWM/温度/曲线/故障保护）
-systemctl restart h5000m-fancontrol    # 修改 /etc/default 后生效
+systemctl status router-fancontrol              # 服务状态
+/usr/local/sbin/router-fancontrol status        # 实时状态（含 pwm_backend / softpwm_loaded 等）
+systemctl restart router-fancontrol             # 修改 /etc/default 后生效
+
+# AP3000M 16GB 版诊断：确认软 PWM 链路
+cat /sys/block/mmcblk0/size                     # > 25000000 判为 16GB 版
+lsmod | grep airpi_gpio_fan                     # 模块是否加载
+cat /sys/kernel/duty_cycle                      # 当前占空比（0~255）
+echo 128 > /sys/kernel/duty_cycle               # 手动置 50%（应急验证风扇会转）
+
+# 强制覆盖后端（怀疑容量判定有误时）
+echo 'AIRPI_FAN_FORCE=softpwm' >> /etc/default/router-fancontrol
+systemctl restart router-fancontrol
 ```

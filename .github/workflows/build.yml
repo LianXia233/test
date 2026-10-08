@@ -1,7 +1,13 @@
-name: H5000M Debian 13 CI 云编译
+name: 多板 Debian 13 CI 云编译（H5000M / AP3000M）
 
 # 仅手动触发：避免每次提交都占用 runner 时长（每次都是完整固件产出）。
-# 需要出包时到 Actions 页面 Run workflow 手动启动，或命令行：gh workflow run build.yml
+# 需要出包时到 Actions 页面 Run workflow 手动启动，或命令行：
+#   gh workflow run build.yml -f board=ap3000m
+#
+# 【多板化】板卡由 workflow_dispatch 输入 board 选择，其全部机型差异（内核配置 / DTB 名 /
+# 产物文件名 / hostname / sysupgrade CONTROL 板名）统一来自 boards/<board>.board —— 单一真源。
+# job 内"解析板级"step 调 boards/board-lib.sh 把字段写入 $GITHUB_OUTPUT，后续步骤只引用
+# steps.<id>.outputs.*，workflow 里不再出现任何机型字面量。
 #
 # 【编译提速要点】（详见 docs/build-guide.md §3.7）
 #   1. runner 默认 ubuntu-24.04-arm：宿主就是 arm64/aarch64，
@@ -15,6 +21,14 @@ name: H5000M Debian 13 CI 云编译
 on:
   workflow_dispatch:
     inputs:
+      board:
+        description: '目标板卡（boards/<board>.board）'
+        required: true
+        default: h5000m
+        type: choice
+        options:
+          - h5000m
+          - ap3000m
       force_x86_runner:
         description: '回退选项：ARM64 runner 不可用/排队时勾选，改用 x86_64 runner（交叉编译 + qemu 第二阶段，构建显著变慢）'
         required: false
@@ -41,7 +55,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: h5000m-build-${{ github.ref }}
+  group: ${{ inputs.board || 'h5000m' }}-build-${{ github.ref }}
   # 手动触发也可能重复点击启动；排队（cancel-in-progress: false）保护正在跑的
   # 长构建不被新 run 杀掉，配合下方 timeout-minutes 防止无限占用 runner。
   cancel-in-progress: false
@@ -265,7 +279,7 @@ jobs:
 
   # ============================================================ 1. 内核编译
   build-kernel:
-    name: 内核 6.18 (MT7987A)
+    name: 内核 6.18 (${{ inputs.board || 'h5000m' }})
     # 原生 arm64 runner（仓库为 public，GitHub 免费额度内）
     needs: quality-gate
     runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
@@ -273,6 +287,33 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
+
+      - name: 解析板级参数（boards/<board>.board → outputs）
+        id: board
+        # 板级差异的唯一真源是 boards/<board>.board。这里把它展开成 step outputs，
+        # 后续步骤只引用 ${{ steps.board.outputs.* }}，workflow 里不再出现机型字面量。
+        # 这样新增板卡只需加一个 .board 文件 + 在内核配置目录放一个 config，无需改本文件。
+        run: |
+          set -euo pipefail
+          BOARD="${{ inputs.board || 'h5000m' }}"
+          # shellcheck source=/dev/null
+          source boards/board-lib.sh
+          board_load "$BOARD"
+          {
+            echo "id=$BOARD"
+            echo "name=$BOARD_NAME"
+            echo "upper=$BOARD_UPPER"
+            echo "soc=$BOARD_SOC"
+            echo "dtb_file=$BOARD_DTB_FILE"
+            echo "kernel_config=$BOARD_KERNEL_CONFIG"
+            echo "hostname=$BOARD_HOSTNAME"
+            echo "sysupgrade_board=$BOARD_SYSUPGRADE_BOARD"
+            echo "fit_out=$BOARD_FIT_OUT"
+            echo "rootfs_out=$BOARD_ROOTFS_OUT"
+            echo "sysupgrade_out=$BOARD_SYSUPGRADE_OUT"
+            echo "build_mt5700=$BOARD_BUILD_MT5700"
+          } >> "$GITHUB_OUTPUT"
+          echo "板级：$BOARD_NAME（$BOARD_SOC）DTB=$BOARD_DTB_FILE config=$BOARD_KERNEL_CONFIG"
 
       - name: 安装构建依赖
         run: |
@@ -295,13 +336,18 @@ jobs:
           key: kernel-tar-${{ env.KERNEL_VERSION }}
 
       - name: 恢复 ccache（内核编译结果跨运行复用）
-        # key 组成：内核版本 + 补丁集/dts/配置/脚本 hash + runner 架构。
-        # 任一输入变化即重建缓存，保证不会出现"配置变了但复用旧目标文件"的脏命中。
-        # restore-keys 提供"同版本不同配置"的部分命中（编译大部分目标文件可复用）。
+        # key 组成：runner 架构 + 板卡 + 内核版本 + 源码/补丁/配置 hash。
+        # 【板卡必须进 key】h5000m 与 ap3000m 编的是不同 SoC、不同 DTS、不同
+        # 内核源码层（kernel/files-boards/<board>/，如 airpi-gpio-fan），
+        # 共用缓存会跨板脏命中。
+        # 【files-* 必须进 key】kernel/files-generic / files-mediatek /
+        # files-boards 是直接覆盖内核源码树的文件层，改一个字节就应重建缓存，
+        # 早期版本漏掉它们 → 改了驱动源码仍复用旧 .o 的静默错误。
+        # restore-keys 提供"同架构同板不同版本/配置"的部分命中。
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'dts/**', 'build/kernel-conf/**', 'build/build-kernel.sh') }}
+          key: ccache-${{ runner.arch }}-${{ inputs.board || 'h5000m' }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel/patches/**', 'kernel/files-generic/**', 'kernel/files-mediatek/**', 'kernel/files-boards/**', 'dts/**', 'boards/**', 'build/kernel-conf/**', 'build/build-kernel.sh') }}
           restore-keys: |
             ccache-${{ runner.arch }}-${{ env.KERNEL_VERSION }}-
             ccache-${{ runner.arch }}-
@@ -323,19 +369,21 @@ jobs:
           # 首次失败时打印日志尾部，便于定位是补丁/配置/编译哪一类问题
           set -o pipefail
           bash build/build-kernel.sh \
+            --board "${{ steps.board.outputs.id }}" \
             --kernel-version "$KERNEL_VERSION" \
-            --config build/kernel-conf/h5000m-6.18.config \
+            --config "build/kernel-conf/${{ steps.board.outputs.kernel_config }}" \
             --out out/kernel \
             --strict 2>&1 | tail -n 200
           # pipefail 下 tail 成功不代表 make 成功：显式确认关键产物存在
-          for f in Image mt7987a-hiveton-h5000m.dtb modules.tar.zst; do
+          DTB_FILE="${{ steps.board.outputs.dtb_file }}"
+          for f in Image "$DTB_FILE" modules.tar.zst; do
             [[ -s "out/kernel/$f" ]] || { echo "错误：内核产物缺失 $f"; exit 1; }
           done
           echo "内核产物校验通过："
-          ls -lh out/kernel/Image out/kernel/mt7987a-hiveton-h5000m.dtb out/kernel/modules.tar.zst
+          ls -lh out/kernel/Image "out/kernel/$DTB_FILE" out/kernel/modules.tar.zst
 
       - name: 生成 U-Boot 启动脚本 boot.scr
-        run: bash build/make-boot.sh --out out/boot
+        run: bash build/make-boot.sh --board "${{ steps.board.outputs.id }}" --out out/boot
 
       - name: 整理内核产物为扁平目录
         # upload-artifact@v4 以所有上传路径的公共根为基准保留相对路径：
@@ -344,12 +392,14 @@ jobs:
         # 先集中到同一目录再上传，产物在 artifact 内即为扁平文件名。
         run: |
           mkdir -p out/kernel-artifacts
+          DTB_FILE="${{ steps.board.outputs.dtb_file }}"
+          BOARD_ID="${{ steps.board.outputs.id }}"
           cp -f \
             out/kernel/Image \
-            out/kernel/mt7987a-hiveton-h5000m.dtb \
+            "out/kernel/$DTB_FILE" \
             out/kernel/modules.tar.zst \
             out/kernel/kernel-config-exported.config \
-            out/kernel/kernel-mt7987-options.txt \
+            "out/kernel/kernel-${BOARD_ID}-soc-options.txt" \
             out/boot/boot.scr \
             out/boot/boot.cmd \
             out/kernel-artifacts/
@@ -364,7 +414,7 @@ jobs:
 
   # ============================================================ 2. RootFS + 刷写包
   build-image:
-    name: RootFS + 刷写包（FIT / 引导层 ext4 = init + busybox + SquashFS + OverlayFS）
+    name: RootFS + 刷写包（${{ inputs.board || 'h5000m' }}）
     needs: [quality-gate, build-kernel]
     runs-on: ${{ inputs.force_x86_runner && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 150
@@ -373,6 +423,33 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
+
+      - name: 解析板级参数（boards/<board>.board → outputs）
+        id: board
+        # 板级差异的唯一真源是 boards/<board>.board。这里把它展开成 step outputs，
+        # 后续步骤只引用 ${{ steps.board.outputs.* }}，workflow 里不再出现机型字面量。
+        # 这样新增板卡只需加一个 .board 文件 + 在内核配置目录放一个 config，无需改本文件。
+        run: |
+          set -euo pipefail
+          BOARD="${{ inputs.board || 'h5000m' }}"
+          # shellcheck source=/dev/null
+          source boards/board-lib.sh
+          board_load "$BOARD"
+          {
+            echo "id=$BOARD"
+            echo "name=$BOARD_NAME"
+            echo "upper=$BOARD_UPPER"
+            echo "soc=$BOARD_SOC"
+            echo "dtb_file=$BOARD_DTB_FILE"
+            echo "kernel_config=$BOARD_KERNEL_CONFIG"
+            echo "hostname=$BOARD_HOSTNAME"
+            echo "sysupgrade_board=$BOARD_SYSUPGRADE_BOARD"
+            echo "fit_out=$BOARD_FIT_OUT"
+            echo "rootfs_out=$BOARD_ROOTFS_OUT"
+            echo "sysupgrade_out=$BOARD_SYSUPGRADE_OUT"
+            echo "build_mt5700=$BOARD_BUILD_MT5700"
+          } >> "$GITHUB_OUTPUT"
+          echo "板级：$BOARD_NAME（$BOARD_SOC）DTB=$BOARD_DTB_FILE config=$BOARD_KERNEL_CONFIG"
 
       - name: 安装构建依赖
         run: |
@@ -459,16 +536,18 @@ jobs:
             echo "扁平结构未命中，回退到：$KART"
           fi
           [[ -n "$KART" ]] || { echo "错误：artifacts/kernel 下未找到 Image"; exit 1; }
+          DTB_FILE="${{ steps.board.outputs.dtb_file }}"
+          BOARD_ID="${{ steps.board.outputs.id }}"
           cp -f "$KART/Image" out/kernel/Image
-          cp -f "$KART/mt7987a-hiveton-h5000m.dtb" out/kernel/mt7987a-hiveton-h5000m.dtb
+          cp -f "$KART/$DTB_FILE" "out/kernel/$DTB_FILE"
           cp -f "$KART/modules.tar.zst" out/kernel/modules.tar.zst
           cp -f "$KART/boot.scr" out/boot/boot.scr
           cp -f "$KART/boot.cmd" out/boot/boot.cmd
           # 附加产物（配置导出），存在才复制
           [[ -f "$KART/kernel-config-exported.config" ]] && \
             cp -f "$KART/kernel-config-exported.config" out/kernel/kernel-config-exported.config || true
-          [[ -f "$KART/kernel-mt7987-options.txt" ]] && \
-            cp -f "$KART/kernel-mt7987-options.txt" out/kernel/kernel-mt7987-options.txt || true
+          [[ -f "$KART/kernel-${BOARD_ID}-soc-options.txt" ]] && \
+            cp -f "$KART/kernel-${BOARD_ID}-soc-options.txt" "out/kernel/kernel-${BOARD_ID}-soc-options.txt" || true
           ls -l out/kernel out/boot
 
       - name: 校验关键内核模块已产出
@@ -499,6 +578,8 @@ jobs:
         # 单一 Rust 后端（HTTP API + WebSocket + WebUI 托管，:9000）。
         # 源码固定 commit 保证可复现（见 build/build-mt5700.sh 头注释）。
         # arm64 runner 上为宿主原生目标，无需 --target 与交叉 linker。
+        # 仅带 MT5700 模组的板卡需要（板级 BOARD_BUILD_MT5700=1）。
+        if: ${{ steps.board.outputs.build_mt5700 == '1' }}
         run: |
           command -v cargo >/dev/null 2>&1 || { echo "错误：cargo 未安装"; exit 1; }
           bash build/build-mt5700.sh --out out
@@ -510,13 +591,19 @@ jobs:
         # --apt-cache-dir 命中时跳过全部 .deb 下载，install 仍真实执行。
         run: |
           sudo mkdir -p "$APT_CACHE_DIR"
-          sudo bash build/build-rootfs.sh \
-            --out out \
-            --hostname h5000m-debian \
-            --kernel-dir out/kernel \
-            --mt5700-dir out/mt5700 \
-            --skip-tar \
+          ROOTFS_ARGS=(
+            --board "${{ steps.board.outputs.id }}"
+            --out out
+            --hostname "${{ steps.board.outputs.hostname }}"
+            --kernel-dir out/kernel
+            --skip-tar
             --apt-cache-dir "$APT_CACHE_DIR"
+          )
+          # 仅带 MT5700 的板卡才传 --mt5700-dir（否则会去校验不存在的产物）
+          if [[ "${{ steps.board.outputs.build_mt5700 }}" == "1" ]]; then
+            ROOTFS_ARGS+=(--mt5700-dir out/mt5700)
+          fi
+          sudo bash build/build-rootfs.sh "${ROOTFS_ARGS[@]}"
 
       - name: 生成只读基础系统 SquashFS（zstd）
         # RootFS 树 → 硬链接副本瘦身（零数据拷贝）→ mksquashfs zstd -19 -b 256K（多核）。
@@ -531,6 +618,7 @@ jobs:
         # sysupgrade 单文件 ≈ 150 MiB 级（远低于 600 MiB /tmp 内存约束）。
         run: |
           sudo bash build/make-sd-image.sh \
+            --board "${{ steps.board.outputs.id }}" \
             --out out \
             --kernel-dir out/kernel \
             --squashfs out/rootfs/rootfs.squashfs \
@@ -541,11 +629,11 @@ jobs:
         # 与官方 sysupgrade.bin 同构：目标设备 sysupgrade -n 一条命令完成 p4/p5 写入。
         run: |
           bash build/make-sysupgrade-tar.sh \
-            --kernel out/H5000M-debian13-kernel.bin \
-            --root out/H5000M-debian13-rootfs.bin \
-            --board hiveton_h5000m \
-            --out out/H5000M-debian13-sysupgrade.bin
-          ls -lh out/H5000M-debian13-sysupgrade.bin
+            --kernel "out/${{ steps.board.outputs.fit_out }}" \
+            --root "out/${{ steps.board.outputs.rootfs_out }}" \
+            --board "${{ steps.board.outputs.sysupgrade_board }}" \
+            --out "out/${{ steps.board.outputs.sysupgrade_out }}"
+          ls -lh "out/${{ steps.board.outputs.sysupgrade_out }}"
 
       - name: 构建后缓存维护（.deb 下载层瘦身 + apt 清理）
         # 缓存只保留"近期仍在被复用"的 .deb：既避免缓存无限膨胀吃掉 Actions 配额，
@@ -593,25 +681,25 @@ jobs:
         run: |
           sudo chown -R "$(id -u):$(id -g)" out
           chmod -R u+rwX out
-          ls -l out/H5000M-debian13-sysupgrade.bin
+          ls -l "out/${{ steps.board.outputs.sysupgrade_out }}"
 
       - name: 上传发布产物
         # 【安全】不再上传 initial-credentials.txt：公开仓库的 Artifact 与 Release
         # 对任何人可下载，出厂凭据不应出现在分发物中（凭据仍存在于设备
-        # /etc/h5000m-initial-credentials，权限 0600，首启后应立即修改）。
+        # /etc/<board>-initial-credentials，权限 0600，首启后应立即修改）。
         uses: actions/upload-artifact@v6
         with:
-          name: h5000m-debian13-release
+          name: ${{ steps.board.outputs.id }}-debian13-release
           path: |
-            out/H5000M-debian13-sysupgrade.bin
+            out/${{ steps.board.outputs.sysupgrade_out }}
             out/rootfs/rootfs.squashfs
-            out/H5000M-debian13-kernel.bin
-            out/H5000M-debian13-rootfs.bin
+            out/${{ steps.board.outputs.fit_out }}
+            out/${{ steps.board.outputs.rootfs_out }}
             out/kernel/Image
-            out/kernel/mt7987a-hiveton-h5000m.dtb
+            out/kernel/${{ steps.board.outputs.dtb_file }}
             out/kernel/modules.tar.zst
             out/kernel/kernel-config-exported.config
-            out/kernel/kernel-mt7987-options.txt
+            out/kernel/kernel-${{ steps.board.outputs.id }}-soc-options.txt
             out/boot/boot.scr
             out/boot/boot.cmd
           retention-days: 14
@@ -622,23 +710,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # 板级参数从上一个 step 的 outputs 取，避免在 workflow 里散布机型字面量
+          BOARD_UPPER="${{ steps.board.outputs.upper }}"
+          BOARD_NAME="${{ steps.board.outputs.name }}"
+          BOARD_ID="${{ steps.board.outputs.id }}"
+          FIT_OUT="${{ steps.board.outputs.fit_out }}"
+          ROOTFS_OUT="${{ steps.board.outputs.rootfs_out }}"
+          SYSUP_OUT="${{ steps.board.outputs.sysupgrade_out }}"
+
           VERSION="$(date -u +%y.%m.%d)-r${GITHUB_RUN_NUMBER}"   # e.g. 26.10.06-r43，追加运行序号避免同日重跑覆盖旧 Release
-          TAG="H5000M-debian13-${VERSION}"   # 命名带机型（H5000M）+ 版本
+          TAG="${BOARD_UPPER}-debian13-${VERSION}"   # 命名带机型（H5000M / AP3000M）+ 版本
           RELEASE_DIR="$GITHUB_WORKSPACE/out/release"
           mkdir -p "$RELEASE_DIR"
           # 主交付：sysupgrade-tar 单文件（~150 MiB 级，sysupgrade -n 一条命令刷写）
-          cp -f out/H5000M-debian13-sysupgrade.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-sysupgrade.bin"
+          cp -f "out/$SYSUP_OUT" "$RELEASE_DIR/${BOARD_UPPER}-debian13-${VERSION}-sysupgrade.bin"
           # 分区级刷写产物 + 在线升级用 SquashFS
-          cp -f out/H5000M-debian13-kernel.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-kernel.bin"
-          cp -f out/H5000M-debian13-rootfs.bin "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.bin"
-          cp -f out/rootfs/rootfs.squashfs "$RELEASE_DIR/H5000M-debian13-${VERSION}-rootfs.squashfs"
+          cp -f "out/$FIT_OUT" "$RELEASE_DIR/${BOARD_UPPER}-debian13-${VERSION}-kernel.bin"
+          cp -f "out/$ROOTFS_OUT" "$RELEASE_DIR/${BOARD_UPPER}-debian13-${VERSION}-rootfs.bin"
+          cp -f out/rootfs/rootfs.squashfs "$RELEASE_DIR/${BOARD_UPPER}-debian13-${VERSION}-rootfs.squashfs"
           # 【安全】不再把 initial-credentials.txt 放进 Release：公开 Release 对任何人
           # 可下载。出厂凭据的说明写入下方 RELEASE-NOTES，实际凭据仍只存在于设备内
-          # /etc/h5000m-initial-credentials（0600），首次登录后必须立即修改。
-          (cd "$RELEASE_DIR" && sha256sum * > sha256sums.txt)
+          # /etc/<board>-initial-credentials（0600），首次登录后必须立即修改。
+          (cd "$RELEASE_DIR" && sha256sum ./* > sha256sums.txt)
           cat > "$RELEASE_DIR/RELEASE-NOTES.md" <<EOF
-          Hiveton H5000M（MT7987A + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}（SquashFS + OverlayFS）
+          ${BOARD_NAME}（${{ steps.board.outputs.soc }} + eMMC）Debian 13 (Trixie) 刷写包 ${VERSION}（SquashFS + OverlayFS）
 
+          目标板卡：\`${BOARD_ID}\`（boards/${BOARD_ID}.board）
           完全复用设备现有 OpenWrt 分区布局与启动链（BL2 / U-Boot / FIP / u-boot-env / factory / GPT / eMMC 硬件配置零改动）。
 
           ## 方式一（推荐）：sysupgrade 单文件刷写（~150 MiB 级）
@@ -646,29 +743,29 @@ jobs:
           sysupgrade-tar 格式与官方 OpenWrt sysupgrade.bin 同构（板名校验 + dd 写分区），
           整包可完整放入设备 /tmp（tmpfs）。下载后先对照 sha256sums.txt 校验：
 
-              sysupgrade -n -v /tmp/H5000M-debian13-${VERSION}-sysupgrade.bin
+              sysupgrade -n -v /tmp/${BOARD_UPPER}-debian13-${VERSION}-sysupgrade.bin
 
           自动流程：板名校验 → kernel FIT dd → p4 → 引导层 ext4 dd → p5 → 重启进 Debian。
 
           ## 方式二：运行中在线升级（保留全部配置，从已刷 SquashFS + OverlayFS 版本起可用）
 
-              sudo bash scripts/install-emmc.sh \
-                --kernel-fit H5000M-debian13-${VERSION}-kernel.bin \
-                --rootfs-squashfs H5000M-debian13-${VERSION}-rootfs.squashfs
+              sudo bash scripts/install-emmc.sh --board ${BOARD_ID} \
+                --kernel-fit ${BOARD_UPPER}-debian13-${VERSION}-kernel.bin \
+                --rootfs-squashfs ${BOARD_UPPER}-debian13-${VERSION}-rootfs.squashfs
 
           仅替换 p5 上的只读 SquashFS + 刷新 p4，/etc /var /opt 等持久化数据不动；
           旧版自动备份为 rootfs.squashfs.bak，重启前 mv 回去即可回退。
 
           ## 方式三：分区级 dd（initramfs / live 环境全新刷写）
 
-              sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \
-                --kernel-fit H5000M-debian13-${VERSION}-kernel.bin \
-                --rootfs-img H5000M-debian13-${VERSION}-rootfs.bin
+              sudo bash scripts/install-emmc.sh --board ${BOARD_ID} --dev /dev/mmcblk0 \
+                --kernel-fit ${BOARD_UPPER}-debian13-${VERSION}-kernel.bin \
+                --rootfs-img ${BOARD_UPPER}-debian13-${VERSION}-rootfs.bin
 
           ## 架构说明
 
           - 只读基础系统：SquashFS（zstd 压缩，~120 MiB）挂在 /sq，由引导层 /sbin/init 组装
-          - 可写层：OverlayFS upper/work 位于 p5 引导层 ext4，首启自动扩满 p5（~7.2 GiB），
+          - 可写层：OverlayFS upper/work 位于 p5 引导层 ext4，首启自动扩满 p5，
             /etc /var /opt /服务数据全部持久化，重启保留
           - sysupgrade 整包重写 p5 = 恢复出厂（overlay 旧配置不保留）；保留配置走方式二
           - 主引导 = p4 FIT（现有 U-Boot bootm 流程不变）；首启 WebUI http://192.168.88.1
@@ -679,7 +776,7 @@ jobs:
 
           - WebUI：http://192.168.88.1 用户 admin
           - SSH / 串口：root
-          - 默认口令见设备内 /etc/h5000m-initial-credentials（权限 0600，仅本机可读）
+          - 默认口令见设备内 /etc/${BOARD_ID}-initial-credentials（权限 0600，仅本机可读）
           - 本 Release 不附带凭据文件；出厂默认口令为公开已知值，**首次登录后必须立即修改**：
             WebUI「系统 → 安全」改 admin 口令，SSH 内执行 passwd 改 root 口令
 
@@ -690,7 +787,7 @@ jobs:
           fi
           gh release create "$TAG" "$RELEASE_DIR"/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "H5000M Debian 13 固件 ${VERSION}" \
+            --title "${BOARD_NAME} Debian 13 固件 ${VERSION}" \
             --notes-file "$RELEASE_DIR/RELEASE-NOTES.md"
           echo "已发布 Release：$TAG"
 

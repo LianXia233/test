@@ -1,0 +1,38 @@
+[Unit]
+Description=Grow p5 boot-layer ext4 to fill partition (post-boot fallback, not boot-critical)
+Documentation=file:/usr/local/sbin/router-grow-rootfs
+ConditionPathExists=!/var/lib/router-rootfs-grown
+
+# ---------------------------------------------------------------------------
+# 2026-10-09 实机实证后改造：本单元**不再是启动关键路径**，请勿改回。
+#
+# 实测（串口 COM3）：系统在 t≈9.5s 并行启动 dbus / e2scrub_reap / router-grow-rootfs /
+# router-led / systemd-logind 之后 **t≈10.0s 发生完全静默的内核级冻结**：
+#   - CPU 0/1/3 的 softirq 计数 6 分钟内逐字不变（1096/1097、928/939、839/839）；
+#   - CPU3 timer-softirq 冻结，内核自述 "Possible timer handling issue on cpu=3"；
+#   - `Sending NMI from CPU 2 to CPUs 0/1/3` 之后拿不到任何 per-CPU 回栈；
+#   - 系统永远到不了 multi-user.target，网络/WebUI/dnsmasq 全部不会起来。
+# 挂死起点 t≈10.0s 由 `t=2105 jiffies`（CONFIG_HZ=100）反推得出，与上述单元启动时刻精确重合。
+#
+# 本次是 `router-grow-rootfs` 在真机上的**第一次执行**（CHANGELOG 2026-10-06 明确记录该服务
+# 此前从未被 enable，2026-10-07 才补进 enable 清单），它是这批单元里唯一做重量级块层 +
+# 全区文件系统操作的一个，与项目长期跟踪的「msdc 写挂死」特征一致。
+#
+# 因此做两件事：
+#   1. 正常刷写路径（scripts/install-emmc.sh --rootfs-img）已在**刷写时离线扩容**
+#      （p5 未挂载，安全且可复现），本单元在那种情况下只剩「写 marker」的作用；
+#   2. 本单元作为**兜底**保留（sysupgrade 等确实需要运行中扩容的场景），但排到
+#      multi-user.target 之后 —— 路由器先完成启动、网络与 WebUI 先可用，
+#      真出问题时至少系统已经可用、可见、可介入，而不是开机就变砖。
+# ---------------------------------------------------------------------------
+After=local-fs.target multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/router-grow-rootfs
+RemainAfterExit=yes
+# 兜底超时：约束用户态卡住的情况（内核级冻结无法由 systemd 超时挽救）。
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

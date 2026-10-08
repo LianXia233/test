@@ -4,6 +4,74 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — AP3000M 风扇控制落地（GPIO 软 PWM 驱动内置构建 + 三后端 PWM 分流 + 板级回归测试）
+
+**背景**：AP3000M 的风扇接法与 H5000M **完全不同**，且存在两款硬件版本。依据官方
+`LianXia233/luci-app-airpi3000m-fancontrol`（该插件专为 `airpi,ap3000m` 定制）：
+
+| eMMC | 驱动链路 | PWM 节点 |
+| --- | --- | --- |
+| 16GB | 主板未引出硬件 PWM 引脚，风扇挂 **GPIO 540**，由 `kmod-airpi-gpio-fan` 位翻转软 PWM | `/sys/kernel/duty_cycle` |
+| 8GB | 主板已接硬件 PWM 控制器，内核 `pwm-fan` 驱动 | `hwmon/*/pwm1`（上游 DTS `&fan { pwms = <&pwm 2 40000 0>; }`） |
+
+**此前仓库中的缺陷（本轮修复）**：通用层 `router-fancontrol` 的 `find_pwm()` 只扫描
+`hwmon/*/pwm1`。在 16GB 版上该节点**永不存在** → `find_pwm()` 恒失败 → 风扇完全不转，
+且日志只报「PWM control node not found」，极易被误判为硬件故障。板级层原注释还错误地
+写着「AP3000M fan 挂 pwm2 / hwmon 名 pwmfan」，与硬件实际不符。
+
+**改动**：
+
+- **内核驱动内置构建**（`kernel/files-boards/ap3000m/drivers/hwmon/airpi-gpio-fan/`，vendored 自官方，GPL-2.0-only）：
+  - 新增**板级内核源码层**机制 `kernel/files-boards/<board>/`：`build-kernel.sh` 在复制
+    `files-generic` / `files-mediatek` 之后叠加该层，只对所属板卡生效。
+  - **为什么在本仓库构建而不是拿上游 .ko**：上游 README 记录了实机踩坑 —— 即使 vermagic
+    完全一致，外部 .ko 仍可能因 `struct module` 大小/偏移不匹配被拒载
+    （`this_module section size must match`），根因是 `CONFIG_MODULES_TREE_LOOKUP` /
+    `EVENT_TRACING` / `DEBUG_INFO_BTF_MODULES` / `BPF_EVENTS` 改变了结构体布局。
+    本仓库自行编译内核，模块与 vmlinux 出自同一次 `make`，配置天然一致，该 ABI 风险归零。
+  - `drivers/hwmon/Makefile` 追加 `obj-$(CONFIG_AIRPI_GPIO_FAN) += airpi-gpio-fan/`
+    （新增目录不会被自动递归；用追加而非 patch，避免随内核版本漂移失配）。
+  - **`CONFIG_GPIOLIB_LEGACY=y` 显式钉死**：驱动有两条 GPIO 申请路径（legacy 整数接口 /
+    6.17+ descriptor），由 `IS_ENABLED()` 选择。显式开启 legacy，不依赖 6.18 的默认值，
+    锁定在长期验证的成熟路径上。
+- **通用层 `router-fancontrol` 三后端 PWM 分流**：
+  - `hwmon`（H5000M / AP3000M 8GB）、`pwmchip`（`/sys/class/pwm/.../duty_cycle`）、
+    `softpwm`（`/sys/kernel/duty_cycle`）。
+  - `PWM_BACKEND=auto` 判定与官方 `airpi-fanctl` 一致：读 `/sys/block/mmcblk0/size`，
+    > 25 000 000 扇区（≈12.8 GiB）判为 16GB 版 → softpwm；否则先试 hwmon → pwmchip →
+    最后回退 softpwm。读不到容量时按「有硬件 PWM 就走硬件」处理。
+  - 新增 `router-fancontrol-modprobe` 钩子（**通用层为空操作，板级层覆盖**），由
+    `router-fancontrol.service` 的 `ExecStartPre` 调用，在守护进程读 sysfs 之前加载驱动模块。
+  - `status` 子命令新增 `pwm_backend` / `pwm_backend_cfg` / `softpwm_node` /
+    `softpwm_loaded` / `emmc_sectors` 五项，便于实机诊断。
+  - 软 PWM 节点缺失时给出**区分性告警**（提示检查 `airpi-gpio-fan` 是否加载），
+    不再与「通用找不到 PWM」混为一条消息。
+- **板级层**（`boards/overlay.d/ap3000m/`）：
+  - 新增 `usr/local/sbin/router-fancontrol-modprobe`（覆盖通用层空操作版）：按 eMMC 容量
+    决定是否 `modprobe airpi_gpio_fan fangpio=540 cycle=255 period=15000 fanen=1`，
+    并校验 `/sys/kernel/duty_cycle` 出现；加载失败 `exit 1` 让服务显式失败。
+  - `etc/default/router-fancontrol` 新增 `PWM_BACKEND=auto` / `AIRPI_FAN_GPIO=540` /
+    `AIRPI_FAN_PERIOD=15000` / `AIRPI_FAN_FORCE=`（调试用强制覆盖）。
+  - `etc/default/router.conf` 风扇段更正为「两版本双路径」的准确描述（原文有误）。
+  - **H5000M 侧显式 `PWM_BACKEND=hwmon`**：钉死行为，避免 auto 判定在异常情形下误走
+    softpwm（该板没有 `/sys/kernel/duty_cycle`）。
+- **构建与 CI 防回归**：
+  - `build/kernel-conf/ap3000m-6.18.config` 新增 `CONFIG_GPIOLIB_LEGACY=y` /
+    `CONFIG_AIRPI_GPIO_FAN=m`（`CONFIG_SENSORS_PWM_FAN=y` 原已有，未重复定义）。
+  - `build/build-kernel.sh` 的 `ap3000m` 分支 `REQUIRED_SYMBOLS` 纳入上述三项。
+  - **ccache key 修正**（`build.yml`）：原 key 未覆盖 `kernel/files-generic` /
+    `files-mediatek` / `files-boards` 与 `boards/`，会导致「改了驱动源码仍复用旧 .o」的
+    静默脏命中；同时加入板卡维度，避免两板跨用缓存。这是引入 `files-boards` 后必须同步的修复。
+- **新增回归测试** `scripts/tests/test-fan-pwm-backend.sh`（CI 的 `scripts/tests/*.sh` 自动纳入）：
+  用 awk 从**真实脚本抽取函数体**（不复制逻辑）喂入 mock sysfs，覆盖 9 例：16GB→softpwm、
+  8GB→hwmon、8GB 仅 pwmchip、容量不可读的三种回退、强制覆盖两例、H5000M 判据。
+
+**验证状态**：`bash -n` / `shellcheck --severity=error` 全绿（含 workflow 36 段内嵌脚本）；
+`test-fan-pwm-backend.sh` 9/9 通过；两块板板级字段导出实测正确；
+两层 overlay 叠加后板级钩子覆盖与 0755 权限实测正确。
+**待实机确认**（无实机，仅静态分析）：16GB 版 `modprobe` 后 `/sys/kernel/duty_cycle`
+确已出现、`fangpio=540` 对该板正确、8GB 版 `hwmon pwm1` 实际 hwmon 序号。
+
 ### 2026-10-09 — 实机启动硬挂死诊断 + 五组缺陷修复（内核可诊断性 / Wi-Fi 时序 / 首启扩容 / 刷写脚本 / 兜底引导与救援）
 
 **实机现象（串口实锤，COM3 115200 8N1 全程录制）**：t≈10.0s 起完全静默冻结，此后只有 RCU 告警

@@ -1,4 +1,4 @@
-# Hiveton H5000M — SquashFS + OverlayFS 布局
+# <board> — SquashFS + OverlayFS 布局
 #
 # 根文件系统 = OverlayFS：
 #   lower = /sq        （只读 SquashFS：/squashfs/rootfs.squashfs 挂载）

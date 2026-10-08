@@ -7,6 +7,15 @@
 # 由 build/build-rootfs.sh 复制进 rootfs 后以 chroot 执行，参数顺序：
 #   $1 HOSTNAME  $2 TIMEZONE  $3 ADMIN_PASSWORD  $4 ROOT_PASSWORD
 #   $5 LINUX_ROUTER_DIR（chroot 内路径）  $6 LINUX_ROUTER_DATA（chroot 内路径）
+#   $7 BOARD_ID  $8 BOARD_NAME  $9 BOARD_UPPER  $10 BOARD_DROPIN_PREFIX
+#      （$7~$10 为多板化新增：用于生成板级 hostname/凭据/motd/drop-in 文件名）
+
+# 【多板化说明】本脚本以固定位置参数接收板级信息，不再出现机型字面量。
+# 承载板级配置的 overlay 机制（与旧实现的关键差异）：
+#   rootfs-overlay/ 是"板级无关"的共用覆盖层，其上的板级参数由
+#   rootfs-overlay/../boards/<board>.overlay.d/ 目录叠加（见 build-rootfs.sh
+#   第 6.5 步）。systemd unit / 脚本的文件名统一改为 <drop-in 前缀>，
+#   避免为每个板卡复制一整套 27 个文件。
 #
 # 为什么独立成文件：这段原先是 build-rootfs.sh 里的 `chroot ... bash -s <<'EOF'`
 # heredoc。放在字符串里的代价是——shellcheck 完全看不到它，语法错误与引号陷阱
@@ -27,8 +36,14 @@ ADMIN_PASSWORD_="$3"
 ROOT_PASSWORD_="$4"
 LINUX_ROUTER_DIR_="$5"
 LINUX_ROUTER_DATA_="$6"
+BOARD_ID_="${7:-}"
+BOARD_NAME_="${8:-}"
+BOARD_UPPER_="${9:-}"
+BOARD_PREFIX_="${10:-}"
+# 缺省前缀：$7 未传时退回 H5000M（保持旧调用方可用），传了则一律用板级前缀
+[[ -n "$BOARD_PREFIX_" ]] || BOARD_PREFIX_="h5000m"
 
-# LAN 网段：与 rootfs-overlay/etc/nftables.conf、h5000m-router-init.sh
+# LAN 网段：与 rootfs-overlay/etc/nftables.conf、router-init.sh
 # 以及 linux-router 的 DEFAULT_LAN_NETWORK 保持一致，用于 SSH 口令登录白名单
 LAN_NET_IPV4="192.168.88.0/24"
 LAN_NET_IPV6="fd88:88::/64"
@@ -56,7 +71,7 @@ mkdir -p /etc/ssh/sshd_config.d
 # 防火墙规则被改坏），全局 PasswordAuthentication yes 就等于把 root 口令
 # 认证直接暴露到不可信网络。这里改成全局禁用 + Match 仅对 LAN 网段/ULA/
 # 本机回环放行，和 nftables 的 input drop 形成两道独立防线。
-cat > /etc/ssh/sshd_config.d/90-h5000m.conf <<SSHD_LAN
+cat > "/etc/ssh/sshd_config.d/90-${BOARD_PREFIX_}.conf" <<SSHD_LAN
 # 由 build/build-rootfs.sh 调用 build/rootfs/chroot-finalize.sh 生成 —— 手工改动会在下次构建时被覆盖
 PermitRootLogin yes
 
@@ -66,7 +81,7 @@ PasswordAuthentication no
 Match address ${LAN_NET_IPV4},${LAN_NET_IPV6},127.0.0.1,::1
     PasswordAuthentication yes
 SSHD_LAN
-chmod 0644 /etc/ssh/sshd_config.d/90-h5000m.conf
+chmod 0644 "/etc/ssh/sshd_config.d/90-${BOARD_PREFIX_}.conf"
 
 # Linux-Router 运行账号与数据目录
 getent group router-panel >/dev/null 2>&1 || groupadd --system router-panel
@@ -85,41 +100,51 @@ chmod 0700 "$LINUX_ROUTER_DATA_"
 find "$LINUX_ROUTER_DATA_" -type f -exec chmod 0600 {} +
 
 # 首次登录凭据文件（root 可读）
-cat > /etc/h5000m-initial-credentials <<CRED
-Hiveton H5000M - Debian 13 首次登录凭据
+cat > "/etc/${BOARD_PREFIX_}-initial-credentials" <<CRED
+${BOARD_NAME_} - Debian 13 首次登录凭据
 SSH / 串口: root  / $ROOT_PASSWORD_
 WebUI      : http://192.168.88.1  admin / $ADMIN_PASSWORD_
 （登录后请立即修改密码）
 CRED
-chmod 0600 /etc/h5000m-initial-credentials
+chmod 0600 "/etc/${BOARD_PREFIX_}-initial-credentials"
 
 # motd 提示
 cat > /etc/motd <<MOTD
-Welcome to Hiveton H5000M Debian 13 Router
+Welcome to ${BOARD_NAME_} Debian 13 Router
 LAN: 192.168.88.1  |  WebUI: http://192.168.88.1
 模组面板: http://192.168.88.1:9000（MT5700M 5G 管理，WebUI + HTTP API，仅局域网可访问）
 Wi-Fi: OWRT（2.4G / 5G 同名，与 LAN 同一二层网络）
-初始凭据：cat /etc/h5000m-initial-credentials
+初始凭据：cat /etc/${BOARD_PREFIX_}-initial-credentials
 MOTD
 
 # 服务编排（唯一控制面：Linux-Router；禁用冲突服务）
 systemctl enable NetworkManager.service >/dev/null 2>&1 || true
 systemctl enable dnsmasq.service >/dev/null 2>&1 || true
 systemctl enable nftables.service >/dev/null 2>&1 || true
-systemctl enable h5000m-router-init.service >/dev/null 2>&1 || true
-systemctl enable h5000m-fancontrol.service >/dev/null 2>&1 || true
+# 【命名约定 — 2026-10-09 修正】这些 unit 的文件名**不含板级前缀**：
+# 它们由通用层 rootfs-overlay/etc/systemd/system/router-*.service 提供，
+# 板级差异通过 boards/overlay.d/<board>/etc/default/router*.conf 的
+# **内容**体现（同名文件整体覆盖），而非文件名。因此这里必须 enable
+# 字面量 "router-*.service"。
+# 此前写的是 "${BOARD_PREFIX_}-router-init.service"（= h5000m-router-init.service），
+# 该文件在改名为 router-*.service 后已不存在 → enable 静默失败，而这 5 个
+# 服务的 systemctl enable 都带 `|| true`，错误被完全吞掉：
+#   后果 = 首启网络编排 / 风扇 / 首启扩容 / LED 全部不启动（无任何报错）。
+#   BOARD_PREFIX_ 仍用于 **文件名带前缀** 的资产（sshd drop-in、初始凭据）。
+systemctl enable router-init.service >/dev/null 2>&1 || true
+systemctl enable router-fancontrol.service >/dev/null 2>&1 || true
 # 【为什么这三个必须在此显式 enable】覆盖层只拷贝 .service 文件、不携带
 # .wants 软链，若不在此处 enable，首次启动 systemd 永远不会拉起它们：
-#   h5000m-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩满分区
+#   router-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩满分区
 #     （~7.2 GiB）。漏 enable 会让 /overlay 持久化空间永久锁死在镜像大小，
 #     与 make-sd-image.sh / make-sysupgrade-tar.sh 注释描述的行为直接矛盾。
-#     unit 自带 ConditionPathExists=!/var/lib/h5000m-rootfs-grown，天然只跑一次。
-#   h5000m-led-boot.service（WantedBy=sysinit.target，早期蓝灯闪烁）与
-#   h5000m-led.service（WantedBy=multi-user.target，就绪后收尾熄灭）：
-#     与清单内已验证可行的 h5000m-fancontrol.service（同为 WantedBy=sysinit.target）同构。
-systemctl enable h5000m-grow-rootfs.service >/dev/null 2>&1 || true
-systemctl enable h5000m-led-boot.service >/dev/null 2>&1 || true
-systemctl enable h5000m-led.service >/dev/null 2>&1 || true
+#     unit 自带 ConditionPathExists=!/var/lib/router-rootfs-grown，天然只跑一次。
+#   router-led-boot.service（WantedBy=sysinit.target，早期蓝灯闪烁）与
+#   router-led.service（WantedBy=multi-user.target，就绪后收尾熄灭）：
+#     与清单内已验证可行的 router-fancontrol.service（同为 WantedBy=sysinit.target）同构。
+systemctl enable router-grow-rootfs.service >/dev/null 2>&1 || true
+systemctl enable router-led-boot.service >/dev/null 2>&1 || true
+systemctl enable router-led.service >/dev/null 2>&1 || true
 systemctl enable router-panel-agent.service >/dev/null 2>&1 || true
 systemctl enable router-panel.service >/dev/null 2>&1 || true
 systemctl enable at-webserver.service >/dev/null 2>&1 || true

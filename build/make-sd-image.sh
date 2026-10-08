@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Hiveton H5000M — Debian 13 刷写包制作脚本（SquashFS + OverlayFS，复用现有 eMMC 分区布局）
+# 多板 Debian 13 刷写包制作脚本（SquashFS + OverlayFS，复用现有 eMMC 分区布局）
+#
+# 支持板卡见 boards/*.board（当前：h5000m=MT7987A、ap3000m=MT7981B）。
+# 板级差异（DTB 文件名 / 产物名 / FIT load 地址 / bootargs 串口基址 / 分区布局）
+# 全部由 boards/<board>.board 驱动，本脚本不含机型字面量。
 #
 # 【布局基准】以设备当前 OpenWrt 的 GPT 分区为唯一基准（不重建、不重排）：
 #   p1 u-boot-env  1 MiB    ← 原样保留
 #   p2 factory     2 MiB    ← 原样保留
 #   p3 fip         4 MiB    ← 原样保留
-#   p4 kernel     30 MiB    ← 复用：写入 H5000M-debian13-kernel.bin（U-Boot 现有 bootm 流程不变）
-#   p5 rootfs  ~7.2 GiB     ← 复用：写入 H5000M-debian13-rootfs.bin（引导层 ext4，PARTLABEL=rootfs）
+#   p4 kernel     30 MiB    ← 复用：写入 <BOARD_UPPER>-debian13-kernel.bin（U-Boot 现有 bootm 流程不变）
+#   p5 rootfs  ~7.2 GiB     ← 复用：写入 <BOARD_UPPER>-debian13-rootfs.bin（引导层 ext4，PARTLABEL=rootfs）
 #
 # 【p5 内容 = 引导层 ext4】（取代旧方案的整分区 ext4 Debian rootfs）：
 #   /sbin/init                  引导脚本（busybox）：挂 SquashFS → 组装 OverlayFS → pivot_root → systemd
@@ -26,14 +30,17 @@
 #   带 --keep-boot-image 时约 210 MiB 级（多一份解压态 Image），仍远低于门槛。
 #
 # 本脚本只生成两个可刷写文件，不创建分区表、不触碰任何块设备：
-#   out/H5000M-debian13-kernel.bin  → dd 到 p4
-#   out/H5000M-debian13-rootfs.bin  → dd 到 p5（引导层 ext4 镜像）
+#   out/<BOARD_UPPER>-debian13-kernel.bin  → dd 到 p4
+#   out/<BOARD_UPPER>-debian13-rootfs.bin  → dd 到 p5（引导层 ext4 镜像）
 #
 # 用法：
-#   sudo bash build/make-sd-image.sh --out out \
+#   sudo bash build/make-sd-image.sh --board h5000m|ap3000m --out out \
 #     --kernel-dir out/kernel --squashfs out/rootfs/rootfs.squashfs [--boot-dir out/boot] \
 #     [--extra-mb 128] [--busybox /path/to/busybox] [--mirror https://deb.debian.org/debian] \
 #     [--keep-boot-image] [--force-extra-mb]
+#
+# --board 可省略：此时从 --kernel-dir 下的 DTB 文件名反推板级（哪块板的 DTB 在就
+# 认为是哪块板），仍无法判定则报错并列出可选板卡。
 #
 # 【--keep-boot-image】把解压态 Image 另存一份到 p5 引导层 /boot，让 distro boot /
 # extlinux 兜底引导（build/../boot/boot.cmd 的 p5 分支、/boot/extlinux/extlinux.conf）
@@ -59,7 +66,12 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ---------------------------------------------------------------- 板级加载
+# shellcheck source=../boards/board-lib.sh
+source "$PROJECT_ROOT/boards/board-lib.sh"
+
 OUT_DIR="$PROJECT_ROOT/out"
+BOARD=""
 KERNEL_DIR="$OUT_DIR/kernel"
 SQUASHFS="$OUT_DIR/rootfs/rootfs.squashfs"
 BOOT_DIR="$OUT_DIR/boot"
@@ -100,7 +112,11 @@ MIRROR="https://deb.debian.org/debian"
 # 0x40000000 for loading OS）。官方内核解压后仅 14.5MiB 故可同值。
 # 0x46000000 与 U-Boot 自身区（0x41e00000+）、FIT 暂存区（0x60000000）均无冲突，
 # 且为 2MB 对齐，满足 arm64 Image 装载对齐要求。
-FIT_LOAD_ADDR="0x46000000"
+#
+# 【多板化】该地址已移至 boards/<board>.board 的 BOARD_FIT_LOAD_ADDR
+#（h5000m=0x46000000 / ap3000m=0x46000000，两板同址便于共用打包路径）。
+# gmac0/gmac1 与 bootargs 中的 earlycon 串口基址同理，全部由板级卡片提供。
+
 # 【内嵌 bootargs，2026-10-06】OpenWrt 构建的 DTB 在 /chosen 内嵌了 bootargs
 # （r31 产物实锤：earlycon=... root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf，
 # 无 rw、无 console=ttyS0——实机串口 cmdline 与之逐字符一致）。若不覆写，
@@ -109,7 +125,10 @@ FIT_LOAD_ADDR="0x46000000"
 # 自包含、确定性的 cmdline（与参考仓库 ctr54188/h5000m-debian 同思路）。
 # 注意：U-Boot env 的 bootargs 行为未知（可能覆写 fdt chosen），故 init 内
 # remount,rw 兜底仍必须保留（双保险）。
-FIT_BOOTARGS="${FIT_BOOTARGS:-console=ttyS0,115200n8 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf}"
+# 【多板化】cmdline 现由 boards/<board>.board 生成（BOARD_BOOTARGS）：
+# 串口基址随 SoC 变化（MT7987A=0x11000000 / MT7981B=0x11002000），PCIe 片段
+# 只在有 PCIe 的板卡上出现（MT7981B 无 PCIe，带 pci=pcie_bus_perf 是无害但无意义的噪声）。
+# 仍支持环境变量 FIT_BOOTARGS 覆盖（调试用），优先级最高。
 
 usage() {
   # 打印文件抬头注释块（第 2 行起，遇首个非注释行停止）——**不要写死行号**：
@@ -120,6 +139,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --board)     BOARD="$2"; shift 2 ;;
     --out)       OUT_DIR="$2"; shift 2 ;;
     --kernel-dir) KERNEL_DIR="$2"; shift 2 ;;
     --squashfs)  SQUASHFS="$2"; shift 2 ;;
@@ -136,6 +156,20 @@ done
 
 log() { printf '[make-sd-image] %s\n' "$*"; }
 die() { printf '[make-sd-image] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# 板级解析：--kernel-dir 里带 Image 时，可从 DTB 文件名反推板级（免显式 --board）
+if [[ -z "$BOARD" && -d "$KERNEL_DIR" ]]; then
+  for b in $(board_list); do
+    board_load "$b" >/dev/null 2>&1 || continue
+    [[ -f "$KERNEL_DIR/$BOARD_DTB_FILE" ]] && { BOARD="$b"; break; }
+  done
+fi
+[[ -n "$BOARD" ]] || die "无法确定板级。请显式指定 --board（可用：$(board_list | tr '\n' ' ')）"
+board_load "$BOARD" || exit 1
+
+# 环境变量 FIT_BOOTARGS 可覆盖板级生成的 cmdline（调试用）
+BOARD_BOOTARGS="${FIT_BOOTARGS:-$BOARD_BOOTARGS}"
+
 [[ "$MIRROR" == https://* ]] || die "Debian mirror 必须使用 HTTPS：$MIRROR"
 
 # 规范化路径为绝对路径（mkimage 在 (cd "$WORK") 子 shell 中展开相对路径会解析错）
@@ -148,13 +182,13 @@ fi
 if [[ -d "$BOOT_DIR" ]]; then BOOT_DIR="$(cd "$BOOT_DIR" && pwd)"; fi
 
 IMAGE="$KERNEL_DIR/Image"
-DTB="$KERNEL_DIR/mt7987a-hiveton-h5000m.dtb"
-FIT_OUT="$OUT_DIR/H5000M-debian13-kernel.bin"
-ROOTFS_IMG="$OUT_DIR/H5000M-debian13-rootfs.bin"
+DTB="$KERNEL_DIR/$BOARD_DTB_FILE"
+FIT_OUT="$OUT_DIR/$BOARD_FIT_OUT"
+ROOTFS_IMG="$OUT_DIR/$BOARD_ROOTFS_OUT"
 SIGN_KEY=""            # FIT 签名密钥目录；留空则不签名
 SIGN_ARGS=()           # mkimage 附加参数（签名时填充；显式空数组保证 set -u 安全）
 
-[[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh）"
+[[ -f "$IMAGE" ]] || die "缺少内核 Image：$IMAGE（先运行 build/build-kernel.sh --board $BOARD）"
 [[ -f "$DTB"   ]] || die "缺少 DTB：$DTB"
 [[ -f "$SQUASHFS" ]] || die "缺少 SquashFS：$SQUASHFS（先运行 build/make-squashfs.sh）"
 
@@ -169,28 +203,31 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/h5000m-img.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/${BOARD}-img.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 # ================================================================ 1. 生成 FIT 镜像（p4 内容）
 log "生成 FIT 镜像：$FIT_OUT"
+log "  板级：$BOARD_NAME（$BOARD_SOC）"
 log "  内核：$IMAGE（LZMA 压缩）"
 log "  DTB ：$DTB"
-log "  load/entry：$FIT_LOAD_ADDR"
+log "  load/entry：$BOARD_FIT_LOAD_ADDR"
 
 IMAGE_LZMA="$WORK/Image.lzma"
 lzma -9 -f -c "$IMAGE" > "$IMAGE_LZMA" 2>/dev/null
 IMAGE_LZMA_SIZE=$(stat -c %s "$IMAGE_LZMA")
-log "  Image 压缩后：$(( IMAGE_LZMA_SIZE / 1024 / 1024 )) MiB（p4 分区 30 MiB）"
-(( IMAGE_LZMA_SIZE < 28 * 1024 * 1024 )) || \
-  die "压缩后内核超过 28 MiB，无法放入 30 MiB 的 p4 kernel 分区。请精简内核配置。"
+log "  Image 压缩后：$(( IMAGE_LZMA_SIZE / 1024 / 1024 )) MiB（p4 分区 ${BOARD_P4_SIZE_MIB} MiB）"
+(( IMAGE_LZMA_SIZE < (BOARD_P4_SIZE_MIB - 2) * 1024 * 1024 )) || \
+  die "压缩后内核超过 $(( BOARD_P4_SIZE_MIB - 2 )) MiB，无法放入 ${BOARD_P4_SIZE_MIB} MiB 的 p4 kernel 分区。请精简内核配置。"
 
-cat > "$WORK/h5000m.its" <<EOF
+# ITS 文件名带板级：多板并行构建时互不覆盖（同一 WORK 目录内虽不冲突，
+# 但落盘名可读性更好，且便于出错时人工复查是哪一个板卡的 ITS）
+cat > "$WORK/$BOARD_DTB.its" <<EOF
 /dts-v1/;
 
 / {
-    description = "Hiveton H5000M Debian 13 (Trixie) kernel";
+    description = "$BOARD_NAME Debian 13 (Trixie) kernel";
     #address-cells = <1>;
 
     images {
@@ -201,19 +238,19 @@ cat > "$WORK/h5000m.its" <<EOF
             arch = "arm64";
             os = "linux";
             compression = "lzma";
-            load = <$FIT_LOAD_ADDR>;
-            entry = <$FIT_LOAD_ADDR>;
+            load = <$BOARD_FIT_LOAD_ADDR>;
+            entry = <$BOARD_FIT_LOAD_ADDR>;
             hash-1 { algo = "crc32"; };
             hash-2 { algo = "sha1"; };
         };
 
         fdt-1 {
-            description = "ARM64 OpenWrt hiveton_h5000m device tree";
-            data = /incbin/("mt7987a-hiveton-h5000m.dtb");
+            description = "ARM64 OpenWrt $BOARD_SYSUPGRADE_BOARD device tree";
+            data = /incbin/("$BOARD_DTB_FILE");
             type = "flat_dt";
             arch = "arm64";
             compression = "none";
-            compatible = "hiveton,h5000m";
+            compatible = "$BOARD_COMPATIBLE";
             hash-1 { algo = "crc32"; };
             hash-2 { algo = "sha1"; };
         };
@@ -223,7 +260,7 @@ cat > "$WORK/h5000m.its" <<EOF
         default = "config-1";
 
         config-1 {
-            description = "OpenWrt hiveton_h5000m";
+            description = "OpenWrt $BOARD_SYSUPGRADE_BOARD";
             kernel = "kernel-1";
             fdt = "fdt-1";
         };
@@ -231,20 +268,22 @@ cat > "$WORK/h5000m.its" <<EOF
 };
 EOF
 
-cp -f "$DTB" "$WORK/mt7987a-hiveton-h5000m.dtb"
+cp -f "$DTB" "$WORK/$BOARD_DTB_FILE"
 # 覆写 DTB /chosen/bootargs：OpenWrt 原生 DTB 内嵌的 cmdline 缺 rw 与
-# console=ttyS0（见 FIT_BOOTARGS 注释）。覆写后回读校验，失败即终止。
+# console=ttyS0（见 BOARD_BOOTARGS 注释）。覆写后回读校验，失败即终止。
+# 【板级差异】earlycon 串口基址随 SoC 变化（MT7987A=0x11000000 / MT7981B=0x11002000），
+# 且 MT7981B 无 PCIe 故不带 pci=pcie_bus_perf —— 由 BOARD_BOOTARGS 统一生成。
 log "  覆写 /chosen/bootargs（fdtput）..."
-fdtput -t s "$WORK/mt7987a-hiveton-h5000m.dtb" /chosen bootargs "$FIT_BOOTARGS" \
+fdtput -t s "$WORK/$BOARD_DTB_FILE" /chosen bootargs "$BOARD_BOOTARGS" \
   || die "fdtput 覆写 bootargs 失败（device-tree-compiler 包）"
-EMBEDDED="$(fdtget -t s "$WORK/mt7987a-hiveton-h5000m.dtb" /chosen bootargs 2>/dev/null || true)"
-[[ "$EMBEDDED" == "$FIT_BOOTARGS" ]] \
-  || die "bootargs 覆写校验失败：期望 [$FIT_BOOTARGS] 实际 [$EMBEDDED]"
+EMBEDDED="$(fdtget -t s "$WORK/$BOARD_DTB_FILE" /chosen bootargs 2>/dev/null || true)"
+[[ "$EMBEDDED" == "$BOARD_BOOTARGS" ]] \
+  || die "bootargs 覆写校验失败：期望 [$BOARD_BOOTARGS] 实际 [$EMBEDDED]"
 log "  [OK] 内嵌 bootargs：$EMBEDDED"
 log "  mkimage 打包 FIT ..."
 (
   cd "$WORK"
-  mkimage "${SIGN_ARGS[@]}" -f h5000m.its "$FIT_OUT" >/dev/null
+  mkimage "${SIGN_ARGS[@]}" -f "$BOARD_DTB.its" "$FIT_OUT" >/dev/null
 ) || die "mkimage 打包 FIT 失败（检查上方 dtc/mkimage 输出；需安装 u-boot-tools + device-tree-compiler）"
 log "  [OK] $FIT_OUT（$(stat -c %s "$FIT_OUT") 字节）"
 dd if="$FIT_OUT" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | grep -q 'd0 0d fe ed' \
@@ -364,14 +403,14 @@ cp -f "$SQUASHFS" "$STAGE/squashfs/rootfs.squashfs"
 
 # 引导层 init：挂 SquashFS → 组装 OverlayFS → pivot_root → 交棒 systemd
 # （沙箱已验证：busybox applet 齐备；pivot_root 序列真机等价模拟通过）
-cat > "$STAGE/sbin/init" <<'INIT_EOF'
+cat > "$STAGE/sbin/init" <<INIT_EOF
 #!/usr/bin/busybox sh
-# H5000M (MT7987A) Debian 13 引导层 init —— SquashFS + OverlayFS 组装
+# ${BOARD_NAME} (${BOARD_SOC}) Debian 13 引导层 init —— SquashFS + OverlayFS 组装
 # 内核已按 cmdline root=PARTLABEL=rootfs 挂载 p5（本引导层 ext4）为 /。
 # 职责：remount rw → 挂 squashfs → 组装 overlay → pivot_root → 交棒 systemd。
 set -u
 BB=/usr/bin/busybox
-RETRY_FILE=/dev/.h5000m_rescue_count   # devtmpfs 恒可写：root 只读时也能做救援计数
+RETRY_FILE=/dev/.${BOARD}_rescue_count   # devtmpfs 恒可写：root 只读时也能做救援计数
 $BB mkdir -p /dev /proc /sys /tmp /sq /overlay/upper /overlay/work /overlay/merged
 $BB mount -t proc proc /proc 2>/dev/null || true
 $BB mount -t sysfs sysfs /sys 2>/dev/null || true
@@ -384,11 +423,11 @@ $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true   # 已挂载（DEVTMPFS
 $BB mount -o remount,rw / 2>/dev/null \
     || $BB mount -o remount,rw /dev/root / 2>/dev/null \
     || $BB mount -n -o remount,rw / 2>/dev/null \
-    || echo "!!! H5000M: 根文件系统 remount,rw 失败（cmdline 可能含 ro），继续尝试 overlay !!!" >&2
+    || echo "!!! ${BOARD_UPPER}: 根文件系统 remount,rw 失败（cmdline 可能含 ro），继续尝试 overlay !!!" >&2
 SQ=/squashfs/rootfs.squashfs
 MERGED=/overlay/merged
 overlay_fail() {
-    echo "!!! H5000M: Overlay 组装失败（$*），进入救援流程 !!!" >&2
+    echo "!!! ${BOARD_UPPER}: Overlay 组装失败（$*），进入救援流程 !!!" >&2
     # 【防 OOM 修复 2026-10-06】旧实现无条件重执行 init → 失败后无限循环：
     # 实机实测 437 轮（每轮挂 squashfs 泄漏 kmalloc-4k，约 465MiB）→ t=128s
     # "Kernel panic - not syncing: System is deadlocked on memory"。
@@ -446,7 +485,7 @@ overlay_fail() {
                     $BB mount --move /tmpold/dev /dev 2>/dev/null || true
                     $BB mount --move /tmpold/proc /proc 2>/dev/null || true
                     $BB mount --move /tmpold/sys /sys 2>/dev/null || true
-                    echo "!!! H5000M: 救援模式就绪（/ 可写，上层为 tmpfs，重启不保留）!!!" >&2
+                    echo "!!! ${BOARD_UPPER}: 救援模式就绪（/ 可写，上层为 tmpfs，重启不保留）!!!" >&2
                     exec "$BB" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /sbin/init
                 fi
                 echo "!!! 救援 pivot_root 失败，转串口应急 shell !!!" >&2
@@ -492,14 +531,14 @@ INIT_EOF
 chmod 0755 "$STAGE/sbin/init"
 
 cat > "$STAGE/etc/fstab" <<'FSTAB_EOF'
-# Hiveton H5000M — SquashFS + OverlayFS 布局
+# ${BOARD_NAME} — SquashFS + OverlayFS 布局
 # 根文件系统 = overlay（lower=/sq 只读 SquashFS，upper/work=p5 引导层 /overlay），
 # 由引导层 /sbin/init 在内核挂载 p5 后组装；此文件仅作布局说明，无运行时挂载项。
 FSTAB_EOF
 
 # /boot 兜底引导文件（主路径为 p4 FIT；distro boot 兜底按需保留 Image/DTB/extlinux/boot.scr）
 if [[ -f "$DTB" ]]; then
-  cp -f "$DTB" "$STAGE/boot/mt7987a-hiveton-h5000m.dtb"
+  cp -f "$DTB" "$STAGE/boot/$BOARD_DTB_FILE"
 fi
 if [[ -f "$BOOT_DIR/boot.scr" ]]; then
   cp -f "$BOOT_DIR/boot.scr" "$STAGE/boot/boot.scr"
@@ -517,13 +556,13 @@ if (( KEEP_BOOT_IMAGE == 1 )); then
   install -m 0644 "$IMAGE" "$STAGE/boot/Image"
   mkdir -p "$STAGE/boot/extlinux"
   cat > "$STAGE/boot/extlinux/extlinux.conf" <<EOF
-# Hiveton H5000M Debian 13 — 备用引导（主引导为 p4 FIT，由现有 U-Boot bootm 加载）
+# ${BOARD_NAME} Debian 13 — 备用引导（主引导为 p4 FIT，由现有 U-Boot bootm 加载）
 # 本文件仅在 /boot/Image 同时存在时有意义；二者由 make-sd-image.sh --keep-boot-image 一同落盘。
-# APPEND 带 rw：与 FIT_BOOTARGS / boot.cmd 三处 cmdline 保持一致（引导层 init 内 remount,rw 为兜底）。
-LABEL H5000M Debian 13
+# APPEND 带 rw：与 BOARD_BOOTARGS / boot.cmd 三处 cmdline 保持一致（引导层 init 内 remount,rw 为兜底）。
+LABEL ${BOARD_UPPER} Debian 13
     KERNEL ../Image
-    FDT ../mt7987a-hiveton-h5000m.dtb
-    APPEND earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf console=ttyS0,115200n8
+    FDT ../${BOARD_DTB_FILE}
+    APPEND ${BOARD_BOOTARGS}
 EOF
   log "  /boot/Image 已写入（$(( IMAGE_BYTES / 1024 / 1024 )) MiB）+ /boot/extlinux/extlinux.conf 就位"
 else
@@ -562,13 +601,13 @@ fi
 
 # ================================================================ 4. 输出
 log "=========================================="
-log "刷写包生成完成："
+log "刷写包生成完成（$BOARD_NAME / $BOARD_SOC）："
 log "  p4 ← $FIT_OUT（FIT 内核）"
 log "  p5 ← $ROOTFS_IMG（引导层 ext4：init + busybox + SquashFS + overlay 目录）"
 log "首启：/sbin/init 组装 OverlayFS → 首启扩容服务把 p5 扩满（~7.2 GiB，供 /etc /var 持久化）"
 log "封装 sysupgrade-tar 单文件（推荐）："
-log "  bash build/make-sysupgrade-tar.sh --kernel $FIT_OUT --root $ROOTFS_IMG"
+log "  bash build/make-sysupgrade-tar.sh --board $BOARD --kernel $FIT_OUT --root $ROOTFS_IMG"
 log "分区级刷写方法（在目标设备上执行，保持分区布局不变）："
-log "  sudo bash scripts/install-emmc.sh --dev /dev/mmcblk0 \\"
+log "  sudo bash scripts/install-emmc.sh --board $BOARD --dev /dev/mmcblk0 \\"
 log "    --kernel-fit $FIT_OUT --rootfs-img $ROOTFS_IMG"
 ls -lh "$FIT_OUT" "$ROOTFS_IMG"

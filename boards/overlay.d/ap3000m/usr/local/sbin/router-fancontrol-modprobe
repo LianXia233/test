@@ -1,0 +1,98 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Airpi AP3000M — 风扇驱动模块预加载（覆盖通用层空操作版本）
+#
+# AP3000M 存在两款硬件版本，风扇接法不同（依据官方
+# LianXia233/luci-app-airpi3000m-fancontrol 的 airpi-fanctl 判定逻辑）：
+#
+#   16GB eMMC → 主板未引出硬件 PWM 引脚，风扇挂 GPIO 540，由 airpi-gpio-fan
+#               模块位翻转模拟 PWM，导出全局节点 /sys/kernel/duty_cycle
+#    8GB eMMC → 主板已接硬件 PWM 控制器，由内核 pwm-fan 驱动导出 hwmon pwm1
+#
+# 判定与官方一致：读 /sys/block/mmcblk0/size（512B 扇区），> 25_000_000
+# （≈12.8 GiB）判为 16GB 版 → 需要加载 airpi-gpio-fan；否则不需要。
+# 读不到容量时：有硬件 PWM 节点就当 8GB 版处理，没有则按 16GB 版尝试加载。
+#
+# 【可覆盖项】/etc/default/router-fancontrol 中的：
+#   AIRPI_FAN_GPIO   软 PWM 使用的 GPIO（缺省 540）
+#   AIRPI_FAN_PERIOD 模拟 PWM 周期 μs（缺省 15000；过小增加软中断负载，
+#                    过大易产生可闻啸叫）
+#   AIRPI_FAN_FORCE  强制驱动：空=自动 | softpwm | pwm
+#
+# 行尾：本文件为 LF。
+
+CONFIG_FILE="/etc/default/router-fancontrol"
+# shellcheck source=/dev/null
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+EMMC_FILE="/sys/block/mmcblk0/size"
+EMMC_LARGE=25000000
+MODULE="airpi_gpio_fan"
+GPIO="${AIRPI_FAN_GPIO:-540}"
+PERIOD="${AIRPI_FAN_PERIOD:-15000}"
+FORCE="${AIRPI_FAN_FORCE:-}"
+
+log() { logger -p daemon.info -t router-fancontrol-modprobe "$@" 2>/dev/null || echo "$*"; }
+err() { logger -p daemon.err  -t router-fancontrol-modprobe "$@" 2>/dev/null || echo "$*" >&2; }
+
+module_loaded() {
+	grep -q "^${MODULE} " /proc/modules 2>/dev/null
+}
+
+# 判定是否需要软 PWM
+need_softpwm() {
+	local sectors
+	case "$FORCE" in
+		softpwm) return 0 ;;
+		pwm)     return 1 ;;
+	esac
+	sectors=""
+	[ -r "$EMMC_FILE" ] && IFS= read -r sectors < "$EMMC_FILE"
+	case "$sectors" in
+		''|*[!0-9]*)
+			# 读不到容量：有硬件 PWM 就当 8GB 版
+			[ -e /sys/class/hwmon/hwmon0/pwm1 ] && return 1
+			for _p in /sys/class/hwmon/hwmon*/pwm1; do
+				[ -e "$_p" ] && return 1
+			done
+			return 0
+			;;
+		*)
+			[ "$sectors" -gt "$EMMC_LARGE" ] && return 0
+			return 1
+			;;
+	esac
+}
+
+if ! need_softpwm; then
+	log "hardware PWM path selected (emmc sectors=${EMMC_FILE:+$(cat "$EMMC_FILE" 2>/dev/null)}); airpi-gpio-fan not required"
+	exit 0
+fi
+
+if module_loaded; then
+	log "airpi_gpio_fan already loaded"
+	exit 0
+fi
+
+if [ ! -d /sys/module/airpi_gpio_fan ] && ! modinfo airpi_gpio_fan >/dev/null 2>&1; then
+	err "airpi_gpio_fan module not available; fan will not respond"
+	exit 1
+fi
+
+# 参数顺序与官方 airpi-fanctl 一致：fangpio / cycle / period / fanen
+if modprobe airpi_gpio_fan "fangpio=${GPIO}" cycle=255 "period=${PERIOD}" fanen=1 2>/dev/null \
+   || insmod airpi-gpio-fan "fangpio=${GPIO}" cycle=255 "period=${PERIOD}" fanen=1 2>/dev/null; then
+	log "airpi_gpio_fan loaded: gpio=$GPIO period=$PERIOD"
+else
+	err "failed to load airpi_gpio_fan (gpio=$GPIO period=$PERIOD)"
+	exit 1
+fi
+
+# 模块加载后确认 PWM 节点已出现；否则是明确的失败（而非静默不转）
+if [ ! -e /sys/kernel/duty_cycle ]; then
+	err "airpi_gpio_fan loaded but /sys/kernel/duty_cycle is missing"
+	exit 1
+fi
+
+exit 0

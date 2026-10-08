@@ -1,0 +1,25 @@
+[Unit]
+Description=<board> fan control (temperature-aware PWM policy)
+Documentation=file:/usr/local/sbin/router-fancontrol file:/etc/default/router-fancontrol
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+# 先加载板级风扇驱动模块（通用层提供空操作版本，板级层可整体覆盖）。
+# 必须在 ExecStart 之前：软 PWM 的 /sys/kernel/duty_cycle 由该模块创建，
+# 模块不在则守护进程找不到 PWM 节点。
+# 不加 "-" 前缀：钩子失败必须中断启动。通用层已保证该文件始终存在
+# （rootfs-overlay/usr/local/sbin/router-fancontrol-modprobe），因此
+# "文件缺失"不会发生；这里只关心"加载失败要可见"。
+ExecStartPre=/usr/local/sbin/router-fancontrol-modprobe
+ExecStart=/usr/local/sbin/router-fancontrol daemon
+Restart=on-failure
+RestartSec=5
+# PWM/thermal 输出与控制节点写失败时允许继续存活并重试
+FailureAction=none
+
+[Install]
+WantedBy=sysinit.target

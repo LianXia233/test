@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# 板级描述文件 — Hiveton H5000M (MediaTek MT7987A)
+#
+# 【用途】本文件是 H5000M 全部板级差异的**单一真源**（single source of truth）。
+# 所有构建 / 刷写 / CI 脚本通过 `source boards/<board>.board` 读取，
+# 脚本体内不得再出现机型字面量。新增板卡 = 新增一个 boards/<board>.board。
+#
+# 【字段契约】纯 shell 赋值，禁止出现命令替换与函数定义（会被多个脚本 source）。
+# 本文件一律 LF 行尾。
+
+# ---- 身份 ----
+BOARD="h5000m"                         # 板级 ID（= boards/ 目录名，用于选板）
+BOARD_NAME="Hiveton H5000M"            # 人类可读机型名（文档 / Release 标题）
+BOARD_UPPER="H5000M"                   # 产物文件名用的大写机型串
+BOARD_DTB="mt7987a-hiveton-h5000m"     # DTB 基名（不含 .dtb）
+BOARD_DTS="${BOARD_DTB}.dts"           # 板级 DTS 文件名（位于 dts/）
+BOARD_SOC_DTSI="mt7987.dtsi"           # SoC dtsi 文件名（位于 dts/）
+BOARD_COMPATIBLE="hiveton,h5000m"      # DTS compatible 首项（FIT fdt 节点使用）
+BOARD_SYSUPGRADE_BOARD="hiveton_h5000m" # 内核/OpenWrt 板名（sysupgrade CONTROL 校验值）
+BOARD_HOSTNAME="h5000m-debian"         # 装机 hostname
+BOARD_KERNEL_CONFIG="h5000m-6.18.config" # build/kernel-conf/ 下的内核配置片段
+
+# ---- SoC 关键参数 ----
+BOARD_SOC="MT7987A"
+BOARD_CPU_CORES="4"
+# 内核串口基址：MT7987A 为 0x11000000（MT7981B 为 0x11002000，勿混用）
+BOARD_UART_MMIO="0x11000000"
+BOARD_PCI="1"                          # 是否有 PCIe（决定 bootargs 是否带 pci=pcie_bus_perf）
+
+# ---- 分区布局（与设备现存 OpenWrt GPT 完全一致，不重建）----
+# FIT 内核 load/entry：MT7987A 的 U-Boot（bl-mt798x, mt7987_airpi_h5000m_defconfig）
+# TEXT_BASE=0x41e00000 且 POSITION_INDEPENDENT，bootm 的 lmb 窗口只有 30MiB，
+# 官方 0x40000000 会被 LZMA 解压（35~45MiB）撑爆，必须用 0x46000000。
+BOARD_FIT_LOAD_ADDR="0x46000000"
+BOARD_PART_COUNT="5"
+BOARD_P4_SECTORS_START="22528"
+BOARD_P4_SECTORS_END="83967"
+BOARD_P4_LABEL="kernel"
+BOARD_P5_SECTORS_START="83968"
+BOARD_P5_LABEL="rootfs"
+BOARD_P4_SIZE_MIB="30"                 # p4 分区大小上限（FIT 必须放得下）
+
+# ---- 网络角色（与 ImmortalWrt 02_network 的 ucidef_set_interfaces_lan_wan 一致）----
+BOARD_LAN_IFACE="eth0"
+BOARD_WAN_IFACE="eth1"
+BOARD_WAN_IFACE_5G="eth2"              # USB 5G 模组（MT5700M）RNDIS/NCM 接口
+
+# ---- Wi-Fi ----
+# MT7987A：PCIe MT7992（mt7996e 驱动），固件 mediatek/mt7996/
+BOARD_WIFI_DRIVER="mt7996e"
+BOARD_WIFI_FIRMWARE_DIR="mt7996"
+BOARD_WIFI_MODULES_LOAD="mt7996e"
+BOARD_AP_2G_IFACE="wlan0"
+BOARD_AP_5G_IFACE="wlan1"
+BOARD_AP_BAND_2G="bg"
+BOARD_AP_BAND_5G="a"
+BOARD_WIFI_PHY_DESC="MT7992 双 PHY"
+
+# ---- 风扇 / PWM ----
+BOARD_FAN_HWMON_MATCH="pwmfan"         # /sys/class/hwmon/*/name 匹配串（留空则按 pwm1 探测）
+BOARD_FAN_PWM_CH="2"
+
+# ---- 固件包（scripts/fetch-firmware.py 消费）----
+BOARD_EXTRA_FIRMWARE="mt7996,i2p5ge"
+
+# ---- 构建开关 ----
+BOARD_BUILD_MT5700="1"                 # 是否构建 luci-app-mt5700 at-webserver

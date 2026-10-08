@@ -1,6 +1,6 @@
 [Unit]
-Description=Linux Router Panel (H5000M WebUI)
-After=network-online.target NetworkManager.service h5000m-router-init.service router-panel-agent.service
+Description=Linux Router Panel (<board> WebUI)
+After=network-online.target NetworkManager.service router-init.service router-panel-agent.service
 Wants=network-online.target
 Requires=router-panel-agent.service
 PartOf=router-panel-agent.service

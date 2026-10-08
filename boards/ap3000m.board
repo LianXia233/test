@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# 板级描述文件 — Airpi AP3000M (MediaTek MT7981B)
+#
+# 【用途】本文件是 AP3000M 全部板级差异的**单一真源**（single source of truth）。
+# 所有构建 / 刷写 / CI 脚本通过 `source boards/<board>.board` 读取，
+# 脚本体内不得再出现机型字面量。新增板卡 = 新增一个 boards/<board>.board。
+#
+# 【字段契约】纯 shell 赋值，禁止出现命令替换与函数定义（会被多个脚本 source）。
+# 本文件一律 LF 行尾。
+
+# ---- 身份 ----
+BOARD="ap3000m"
+BOARD_NAME="Airpi AP3000M"
+BOARD_UPPER="AP3000M"
+BOARD_DTB="mt7981b-airpi-ap3000m"
+BOARD_DTS="${BOARD_DTB}.dts"
+BOARD_SOC_DTSI="mt7981b.dtsi"
+BOARD_COMPATIBLE="airpi,ap3000m"
+BOARD_SYSUPGRADE_BOARD="airpi_ap3000m"
+BOARD_HOSTNAME="ap3000m-debian"
+BOARD_KERNEL_CONFIG="ap3000m-6.18.config"
+
+# ---- SoC 关键参数 ----
+BOARD_SOC="MT7981B"
+BOARD_CPU_CORES="2"
+# 内核串口基址：MT7981B 为 0x11002000（**不是** MT7987A 的 0x11000000）。
+# 取自 dts/mt7981b.dtsi 的 &uart0 reg = <0 0x11002000 0 0x1000>。
+BOARD_UART_MMIO="0x11002000"
+BOARD_PCI="0"                          # MT7981B 无 PCIe → bootargs 不带 pci=pcie_bus_perf
+
+# ---- 分区布局 ----
+# 【约束】按用户决定，AP3000M 的 p4/p5 布局与 H5000M 完全一致（同一套 eMMC
+# 分区规划），因此 p4 起始扇区 / p5 起始扇区 / p4 大小三项与 H5000M 相同。
+# 若实机 GPT 与之不符，install-emmc.sh 会在刷写前用 expect_part 硬拦（拒绝刷写），
+# 绝不会盲刷 —— 届时只需改本文件三行，不需要动任何脚本逻辑。
+#
+# FIT load/entry：与 H5000M 同址。0x46000000 在 MT7981B 的 DDR 低位（4GB 起始
+# 0x40000000 之上 96MiB）内，且避开了 MT7981B U-Boot 的解压窗口；
+# 该值同时是 H5000M 已验证可用的地址，保持一致便于共用打包路径。
+BOARD_FIT_LOAD_ADDR="0x46000000"
+BOARD_PART_COUNT="5"
+BOARD_P4_SECTORS_START="22528"
+BOARD_P4_SECTORS_END="83967"
+BOARD_P4_LABEL="kernel"
+BOARD_P5_SECTORS_START="83968"
+BOARD_P5_LABEL="rootfs"
+BOARD_P4_SIZE_MIB="30"
+
+# ---- 网络角色 ----
+# ImmortalWrt 02_network 中 airpi,ap3000m 与 hiveton,h5000m 共用同一行
+# `ucidef_set_interfaces_lan_wan eth0 eth1` → LAN/WAN 角色完全一致。
+# 注意：AP3000M 的 gmac0 为 2.5G（2500base-x → RTL8221B），gmac1 走内置 GE PHY。
+BOARD_LAN_IFACE="eth0"
+BOARD_WAN_IFACE="eth1"
+BOARD_WAN_IFACE_5G="eth2"              # USB 5G 模组（FM350-GL / MT5700M）
+
+# ---- Wi-Fi ----
+# MT7981B：**内置** wmac（MT7915 IP，mt7915e 驱动），无 PCIe 端点，
+# 固件路径为 mediatek/mt7981/（WA/PATCH/ROM 三件套，由 wireless-regdb 之外单独提供）。
+BOARD_WIFI_DRIVER="mt7915e"
+BOARD_WIFI_FIRMWARE_DIR="mt7981"
+BOARD_WIFI_MODULES_LOAD="mt7915e"
+BOARD_AP_2G_IFACE="wlan0"
+BOARD_AP_5G_IFACE="wlan1"
+BOARD_AP_BAND_2G="bg"
+BOARD_AP_BAND_5G="a"
+BOARD_WIFI_PHY_DESC="MT7981B 内置 wmac（MT7915）"
+
+# ---- 风扇 / PWM ----
+# MT7981B 有 3 路 PWM。AP3000M 依上游 DTS 使用 pwm2（groups = "pwm2"）。
+BOARD_FAN_HWMON_MATCH="pwmfan"
+BOARD_FAN_PWM_CH="2"
+
+# ---- 固件包（scripts/fetch-firmware.py 消费）----
+BOARD_EXTRA_FIRMWARE="mt7981"
+
+# ---- 构建开关 ----
+BOARD_BUILD_MT5700="1"                 # MT5700M 5G 模组同样可插在 AP3000M 上

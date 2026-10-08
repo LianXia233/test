@@ -1,0 +1,782 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# <board> — 风扇控制守护进程（Debian 版）
+#
+# 功能（与 OpenWrt luci-app-router-fancontrol 行为一致）：
+#   * 自动曲线控制（silent / balanced / performance / custom）
+#   * 手动 PWM 控制（manual 模式）
+#   * kernel 模式：仅保留内核保护，不干预 PWM
+#   * 温度滞回、降速延迟、启动助推、传感器 / 曲线故障保护
+#   * 接管 CPU thermal zone 策略前先保存，退出时恢复（step_wise 等）
+#
+# 配置：/etc/default/router-fancontrol（source 方式读取，修改后重启服务）
+# 服务：systemctl enable --now router-fancontrol
+# 用法：router-fancontrol {apply|status|daemon|release}
+#
+# 行尾：本文件为 LF。
+
+TAG="router-fancontrol"
+CONFIG_FILE="/etc/default/router-fancontrol"
+STATE_FILE="/run/router-fancontrol.state"
+POLICY_FILE="/run/router-fancontrol.policy"
+LOCK_DIR="/run/router-fancontrol.lock"
+MT5700M_TEMP_CACHE="${ROUTER_FAN_MT5700M_TEMP_CACHE:-/run/mt5700m/temperature}"
+MT5700M_TEMP_MAX_AGE="${ROUTER_FAN_MT5700M_TEMP_MAX_AGE:-60}"
+
+is_uint() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+# 读单行文件（sysfs 属性都是单行）。
+# 守护进程每轮都要读十几个 sysfs 节点，用 cat 意味着每轮十几次 fork+exec；
+# 这里用 shell 内建的 read 完成，进程数降到 0。文件不存在或不可读时返回空串，
+# 与原来的 "$(cat ... || true)" 行为一致。
+sysfs_read() {
+	local value=""
+	[ -r "$1" ] && IFS= read -r value < "$1" 2>/dev/null
+	printf '%s' "${value:-}"
+}
+
+clamp() {
+	local value="$1" min="$2" max="$3"
+	[ "$value" -lt "$min" ] && value="$min"
+	[ "$value" -gt "$max" ] && value="$max"
+	echo "$value"
+}
+
+log_msg() {
+	# 走 journald 并带 syslog 级别，这样 journalctl -p warning 能直接过滤；
+	# logger 不可用时回退到 stderr（systemd 同样会收进 journal）。
+	if command -v logger >/dev/null 2>&1; then
+		logger -p daemon.info -t "$TAG" "$@"
+	else
+		printf '%s: %s\n' "$TAG" "$*" >&2
+	fi
+}
+
+warn_msg() {
+	if command -v logger >/dev/null 2>&1; then
+		logger -p daemon.warning -t "$TAG" "$@"
+	else
+		printf '%s: WARN: %s\n' "$TAG" "$*" >&2
+	fi
+}
+
+# 同一类故障在 daemon 循环里每 INTERVAL 都会命中，不去重的话 journal 会被
+# 刷满，反而把真正的故障埋掉。key 相同的只报第一次。
+LOGGED_ONCE=""
+log_once() {
+	local key="$1"
+	shift
+	case " $LOGGED_ONCE " in
+		*" $key "*) return 0 ;;
+	esac
+	LOGGED_ONCE="${LOGGED_ONCE:+$LOGGED_ONCE }$key"
+	warn_msg "$*"
+}
+
+cfg_uint() {
+	local option="$1" fallback="$2" min="$3" max="$4" value
+	eval "value=\"\${$option:-}\""
+	is_uint "$value" || value="$fallback"
+	clamp "$value" "$min" "$max"
+}
+
+cfg_string() {
+	local option="$1" fallback="$2" value
+	eval "value=\"\${$option:-}\""
+	[ -n "$value" ] || value="$fallback"
+	echo "$value"
+}
+
+load_config() {
+	# shellcheck disable=SC1090
+	[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+	ENABLED="$(cfg_uint ENABLED 1 0 1)"
+	MODE="$(cfg_string MODE auto)"
+	case "$MODE" in auto|manual|kernel) ;; off) MODE="kernel" ;; *) MODE="auto" ;; esac
+	PROFILE="$(cfg_string CURVE balanced)"
+	case "$PROFILE" in silent|balanced|performance|custom) ;; *) PROFILE="balanced" ;; esac
+	TEMP_SOURCE="$(cfg_string TEMP_SOURCE max)"
+	case "$TEMP_SOURCE" in max|cpu) ;; *) TEMP_SOURCE="max" ;; esac
+	MANUAL_PWM="$(cfg_uint MANUAL_PWM 160 0 255)"
+	INTERVAL="$(cfg_uint INTERVAL 5 2 60)"
+	HYSTERESIS="$(cfg_uint HYSTERESIS 2 0 10)"
+	DOWN_DELAY="$(cfg_uint DOWN_DELAY 30 0 300)"
+	START_PWM="$(cfg_uint START_PWM 192 80 255)"
+	START_BOOST_MS="$(cfg_uint START_BOOST_MS 700 0 3000)"
+	FAIL_PWM="$(cfg_uint FAIL_PWM 255 192 255)"
+
+	# PWM 后端：auto | hwmon | pwmchip | softpwm（板级层按硬件接法指定）
+	PWM_BACKEND="$(cfg_string PWM_BACKEND auto)"
+	case "$PWM_BACKEND" in auto|hwmon|pwmchip|softpwm) ;; *) PWM_BACKEND="auto" ;; esac
+
+	CURVE_SILENT="$(cfg_string CURVE_SILENT '20:0,35:0,40:50,55:50,70:60,85:75,95:100')"
+	CURVE_BALANCED="$(cfg_string CURVE_BALANCED '20:0,35:0,40:50,55:60,70:75,85:90,95:100')"
+	CURVE_PERFORMANCE="$(cfg_string CURVE_PERFORMANCE '20:0,30:60,45:70,60:82,75:92,85:100')"
+	CURVE_CUSTOM="$(cfg_string CURVE_CUSTOM '20:0,40:50,55:60,70:75,85:90,95:100')"
+	case "$PROFILE" in
+		silent) CURVE_DATA="$CURVE_SILENT" ;;
+		performance) CURVE_DATA="$CURVE_PERFORMANCE" ;;
+		custom) CURVE_DATA="$CURVE_CUSTOM" ;;
+		*) CURVE_DATA="$CURVE_BALANCED" ;;
+	esac
+}
+
+# ---------------------------------------------------------------- PWM 后端发现
+#
+# 三块板卡的风扇接法完全不同，因此 PWM 路径发现必须分后端：
+#
+#   hwmon    /sys/class/hwmon/hwmon*/pwm1     — pwm-fan 驱动（H5000M；AP3000M 8GB 版）
+#   pwmchip  /sys/class/pwm/pwmchipN/pwmM/duty_cycle — PWM 控制器直接导出（AP3000M 备选）
+#   softpwm  /sys/kernel/duty_cycle           — airpi-gpio-fan 全局节点（AP3000M 16GB 版）
+#
+# 【为什么需要 softpwm】AP3000M 16GB eMMC 版主板未引出硬件 PWM 引脚，风扇挂在
+# GPIO 540 上由 airpi-gpio-fan 位翻转模拟 PWM，只暴露 /sys/kernel/duty_cycle
+# 这一个节点（0..255，与 hwmon pwm1 同量纲）。若只认 hwmon，该版本风扇永不转。
+#
+# 【auto 的判定顺序】与官方 airpi-fanctl 一致：
+#   读 /sys/block/mmcblk0/size（512B 扇区）：
+#     > 25_000_000（≈12.8 GiB，16GB 版）→ softpwm
+#     ≤ 该阈值（8GB 版）                → 先试 hwmon/pwmchip
+#   读不到容量时：有硬件 PWM 路径走硬件，否则回退 softpwm。
+# 该逻辑仅当 PWM_BACKEND=auto（缺省）时生效，H5000M 不受影响（它没有
+# /sys/kernel/duty_cycle，也不匹配 16GB 判据）。
+EMMC_SECTORS_FILE="/sys/block/mmcblk0/size"
+SOFTPWM_NODE="/sys/kernel/duty_cycle"
+EMMC_LARGE_SECTORS=25000000
+
+find_pwm_hwmon() {
+	local hwmon pwm name
+	for hwmon in /sys/class/hwmon/hwmon*; do
+		[ -d "$hwmon" ] || continue
+		name="$(sysfs_read "$hwmon/name")"
+		[ "$name" = "pwmfan" ] || continue
+		pwm="$hwmon/pwm1"
+		[ -e "$pwm" ] && { echo "$pwm"; return 0; }
+	done
+	for pwm in /sys/class/hwmon/hwmon*/pwm1; do
+		[ -e "$pwm" ] && { echo "$pwm"; return 0; }
+	done
+	return 1
+}
+
+find_pwm_chip() {
+	local pwm
+	for pwm in /sys/class/pwm/pwmchip*/pwm*/duty_cycle; do
+		[ -e "$pwm" ] && { echo "$pwm"; return 0; }
+	done
+	return 1
+}
+
+find_pwm_soft() {
+	[ -e "$SOFTPWM_NODE" ] && { echo "$SOFTPWM_NODE"; return 0; }
+	return 1
+}
+
+# airpi-gpio-fan 是否已加载（软 PWM 的前置条件）。
+# 该模块由 systemd unit 的 ExecStartPre 按板级配置 insmod；此处只做状态读取，
+# 不负责加载（模块加载失败应由 unit 显式报错，而不是让守护进程静默降级）。
+softpwm_module_loaded() {
+	[ -r /proc/modules ] && grep -q '^airpi_gpio_fan ' /proc/modules 2>/dev/null
+}
+
+# 按 PWM_BACKEND 选后端；auto 走容量/存在性判定。
+resolve_pwm_backend() {
+	local backend="$1" sectors
+	case "$backend" in
+		hwmon)   echo "hwmon" ;;
+		pwmchip) echo "pwmchip" ;;
+		softpwm) echo "softpwm" ;;
+		*)
+			sectors="$(sysfs_read "$EMMC_SECTORS_FILE")"
+			if is_uint "$sectors" && [ "$sectors" -gt "$EMMC_LARGE_SECTORS" ]; then
+				# 大容量 eMMC = 16GB 版，只有软 PWM
+				echo "softpwm"
+			elif find_pwm_hwmon >/dev/null 2>&1; then
+				echo "hwmon"
+			elif find_pwm_chip >/dev/null 2>&1; then
+				echo "pwmchip"
+			elif find_pwm_soft >/dev/null 2>&1; then
+				echo "softpwm"
+			else
+				echo "none"
+			fi
+			;;
+	esac
+}
+
+find_pwm() {
+	case "${PWM_BACKEND:-auto}" in
+		hwmon)   find_pwm_hwmon ;;
+		pwmchip) find_pwm_chip ;;
+		softpwm) find_pwm_soft ;;
+		*)
+			local backend
+			backend="$(resolve_pwm_backend auto)"
+			case "$backend" in
+				hwmon)   find_pwm_hwmon ;;
+				pwmchip) find_pwm_chip ;;
+				softpwm) find_pwm_soft ;;
+				*)       return 1 ;;
+			esac
+			;;
+	esac
+}
+
+find_fan_rpm() {
+	local fan
+	for fan in /sys/class/hwmon/hwmon*/fan*_input; do
+		[ -e "$fan" ] && { echo "$fan"; return 0; }
+	done
+	return 1
+}
+
+find_thermal_zone() {
+	local zone policies type fallback
+	fallback=""
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/policy" ] && [ -r "$zone/available_policies" ] || continue
+		policies="$(sysfs_read "$zone/available_policies")"
+		case " $policies " in *" user_space "*) ;; *) continue ;; esac
+		[ -n "$fallback" ] || fallback="$zone"
+		type="$(sysfs_read "$zone/type")"
+		case "$type" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*) echo "$zone"; return 0 ;;
+		esac
+	done
+	[ -n "$fallback" ] && { echo "$fallback"; return 0; }
+	return 1
+}
+
+take_thermal_control() {
+	local zone policy
+	zone="$(find_thermal_zone 2>/dev/null || true)"
+	[ -n "$zone" ] || {
+		CONTROL_ZONE=""
+		CONTROL_POLICY=""
+		return 0
+	}
+
+	# 若上次运行留下接管记录（例如崩溃或升级），先恢复内核策略。
+	if [ -f "$POLICY_FILE" ]; then
+		release_thermal_control
+	fi
+	policy="$(sysfs_read "$zone/policy")"
+	[ -n "$policy" ] || return 1
+	CONTROL_ZONE="$zone"
+	CONTROL_POLICY="$policy"
+	return 0
+}
+
+release_thermal_control() {
+	local zone policy available
+	[ -f "$POLICY_FILE" ] || return 0
+	zone="$(sed -n '1p' "$POLICY_FILE" 2>/dev/null || true)"
+	policy="$(sed -n '2p' "$POLICY_FILE" 2>/dev/null || true)"
+	if [ -r "$zone/policy" ]; then
+		available="$(sysfs_read "$zone/available_policies")"
+		case " $available " in
+			*" $policy "*) ;;
+			*" step_wise "*) policy="step_wise" ;;
+			*) policy="" ;;
+		esac
+		[ -z "$policy" ] || echo "$policy" > "$zone/policy" 2>/dev/null || true
+	fi
+	rm -f "$POLICY_FILE"
+}
+
+read_temp_c() {
+	local value
+	value="$(sysfs_read "$1")"
+	case "$value" in ''|*[!0-9-]*) return 1 ;; esac
+	if [ "$value" -gt 1000 ] 2>/dev/null || [ "$value" -lt -1000 ] 2>/dev/null; then
+		value=$((value / 1000))
+	fi
+	[ "$value" -ge -40 ] 2>/dev/null && [ "$value" -le 150 ] 2>/dev/null || return 1
+	echo "$value"
+}
+
+find_module_temp() {
+	local file value updated now age line
+	if [ -r "$MT5700M_TEMP_CACHE" ]; then
+		# 缓存文件是脚本自己写的 key=value 文本，用内建 read 扫一遍即可拿到
+		# updated=，省掉 sed | head 两个子进程。
+		updated=""
+		while IFS= read -r line; do
+			case "$line" in
+				updated=*) updated="${line#updated=}"; break ;;
+			esac
+		done < "$MT5700M_TEMP_CACHE"
+		# date 是子进程，只在确实拿到 updated 后才需要调用，避免每轮无条件 fork。
+		now=""
+		is_uint "$updated" && now="$(date +%s)"
+		if is_uint "$updated" && is_uint "$now" && is_uint "$MT5700M_TEMP_MAX_AGE"; then
+			age=$((now - updated))
+			if [ "$age" -ge 0 ] && [ "$age" -le "$MT5700M_TEMP_MAX_AGE" ]; then
+				value="$(awk -F= '$1 == "temperature" && $2 ~ /^-?[0-9]+([.][0-9]+)?$/ {
+					v = $2 + 0
+					if (v >= -40 && v <= 150) printf "%d\n", (v < 0 ? v - 0.5 : v + 0.5)
+					exit
+				}' "$MT5700M_TEMP_CACHE" 2>/dev/null)"
+				case "$value" in
+					''|*[!0-9-]*) ;;
+					*) echo "$value"; return 0 ;;
+				esac
+			fi
+		fi
+	fi
+	for file in /tmp/cache_base_info_* /tmp/cache_*info*; do
+		[ -f "$file" ] || continue
+		value="$(sed -n 's/.*"key"[[:space:]]*:[[:space:]]*"temperature"[^}]*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" 2>/dev/null | head -n 1 | grep -Eo -- '-?[0-9]+' | head -n 1)"
+		case "$value" in ''|*[!0-9-]*) continue ;; esac
+		[ "$value" -ge -40 ] 2>/dev/null && [ "$value" -le 150 ] 2>/dev/null || continue
+		echo "$value"
+		return 0
+	done
+	return 1
+}
+
+max_sensor() {
+	local value="$1" label="$2"
+	[ -n "$value" ] || return 0
+	if [ -z "${CONTROL_TEMP:-}" ] || [ "$value" -gt "$CONTROL_TEMP" ]; then
+		CONTROL_TEMP="$value"
+		CONTROL_SENSOR="$label"
+	fi
+}
+
+read_sensors() {
+	local zone type value hwmon name
+	CPU_TEMP=""; CPU_LABEL=""; PHY_TEMP=""; PHY_LABEL=""
+	WIFI1_TEMP=""; WIFI1_LABEL=""; WIFI2_TEMP=""; WIFI2_LABEL=""
+	MODULE_TEMP="$(find_module_temp 2>/dev/null || true)"
+	CONTROL_TEMP=""; CONTROL_SENSOR=""
+
+	# 传感器类型/名称的匹配原先是 printf | tr（每个传感器两个子进程）。这里改成
+	# case 的字符类写法，大小写都能匹配上，且完全不 fork。
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -e "$zone/temp" ] || continue
+		type="$(sysfs_read "$zone/type")"
+		value="$(read_temp_c "$zone/temp" 2>/dev/null || true)"
+		[ -n "$value" ] || continue
+		case "$type" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*)
+				[ -n "$CPU_TEMP" ] || { CPU_TEMP="$value"; CPU_LABEL="$type"; }
+				;;
+		esac
+	done
+
+	for hwmon in /sys/class/hwmon/hwmon*; do
+		[ -d "$hwmon" ] || continue
+		name="$(sysfs_read "$hwmon/name")"
+		value="$(read_temp_c "$hwmon/temp1_input" 2>/dev/null || true)"
+		[ -n "$value" ] || continue
+		case "$name" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*)
+				[ -n "$CPU_TEMP" ] || { CPU_TEMP="$value"; CPU_LABEL="$name"; }
+				;;
+			*[Mm][Tt]799*|*[Ww][Ii][Ff][Ii]*|*[Rr][Aa][Dd][Ii][Oo]*)
+				if [ -z "$WIFI1_TEMP" ]; then
+					WIFI1_TEMP="$value"; WIFI1_LABEL="$name"
+				elif [ -z "$WIFI2_TEMP" ]; then
+					WIFI2_TEMP="$value"; WIFI2_LABEL="$name"
+				fi
+				;;
+			*[Mm][Dd][Ii][Oo]*|*[Pp][Hh][Yy]*)
+				[ -n "$PHY_TEMP" ] || { PHY_TEMP="$value"; PHY_LABEL="$name"; }
+				;;
+		esac
+	done
+
+	max_sensor "$CPU_TEMP" "${CPU_LABEL:-CPU}"
+	if [ "$TEMP_SOURCE" = "max" ]; then
+		max_sensor "$PHY_TEMP" "${PHY_LABEL:-PHY}"
+		max_sensor "$WIFI1_TEMP" "${WIFI1_LABEL:-WiFi 1}"
+		max_sensor "$WIFI2_TEMP" "${WIFI2_LABEL:-WiFi 2}"
+		max_sensor "$MODULE_TEMP" "5G modem"
+	fi
+}
+
+cooling_device_path() {
+	local dev
+	for dev in /sys/class/thermal/cooling_device*; do
+		[ -d "$dev" ] || continue
+		[ "$(sysfs_read "$dev/type")" = "pwm-fan" ] && { echo "$dev"; return 0; }
+	done
+	return 1
+}
+
+read_be32() {
+	local file="$1" skip="${2:-0}" hex value
+	hex="$(dd if="$file" bs=4 skip="$skip" count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')"
+	case "$hex" in
+		????????) value="$(printf '%d' "0x$hex" 2>/dev/null || true)" ;;
+		*) value="" ;;
+	esac
+	is_uint "$value" || return 1
+	echo "$value"
+}
+
+cooling_level_for_state() {
+	local state="$1" levels value
+	levels="$(readlink -f "$(dirname "$PWM_PATH")/device/of_node/cooling-levels" 2>/dev/null || true)"
+	[ -f "$levels" ] || levels="/sys/firmware/devicetree/base/pwm-fan/cooling-levels"
+	[ -f "$levels" ] || return 1
+	value="$(read_be32 "$levels" "$state" 2>/dev/null || true)"
+	is_uint "$value" && [ "$value" -le 255 ] || return 1
+	echo "$value"
+}
+
+set_thermal_floor() {
+	local dev dt fan_phandle map map_phandle map_state trip_ref trip threshold hyst trip_phandle value maps_examined map_found
+	THERMAL_FLOOR=0
+	THERMAL_STATE=0
+	THERMAL_MAX_STATE=0
+	THERMAL_OWNER="unknown"
+	dev="$(cooling_device_path 2>/dev/null || true)"
+	[ -n "$dev" ] || return 0
+	THERMAL_MAX_STATE="$(sysfs_read "$dev/max_state")"
+	is_uint "$THERMAL_MAX_STATE" || THERMAL_MAX_STATE=0
+
+	dt="$(readlink -f "$(dirname "$PWM_PATH")/device/of_node" 2>/dev/null || true)"
+	[ -d "$dt" ] || dt="/sys/firmware/devicetree/base/pwm-fan"
+	fan_phandle="$(read_be32 "$dt/phandle" 2>/dev/null || true)"
+	maps_examined=0
+	map_found=0
+
+	# 依据内核自身的 cooling maps 推导最低 PWM。直接写 PWM 也会改变 cur_state，
+	# 因此 cur_state 本身不能作为安全下限。
+	if is_uint "$fan_phandle"; then
+		for map in /sys/firmware/devicetree/base/thermal-zones/*/cooling-maps/*; do
+			[ -f "$map/cooling-device" ] && [ -f "$map/trip" ] || continue
+			map_phandle="$(read_be32 "$map/cooling-device" 0 2>/dev/null || true)"
+			is_uint "$map_phandle" || continue
+			maps_examined=1
+			[ "$map_phandle" = "$fan_phandle" ] || continue
+			map_found=1
+			map_state="$(read_be32 "$map/cooling-device" 2 2>/dev/null || true)"
+			trip_ref="$(read_be32 "$map/trip" 0 2>/dev/null || true)"
+			is_uint "$map_state" && is_uint "$trip_ref" || continue
+			for trip in /sys/firmware/devicetree/base/thermal-zones/*/trips/*; do
+				[ -f "$trip/phandle" ] && [ -f "$trip/temperature" ] || continue
+				trip_phandle="$(read_be32 "$trip/phandle" 0 2>/dev/null || true)"
+				[ "$trip_phandle" = "$trip_ref" ] || continue
+				threshold="$(read_be32 "$trip/temperature" 0 2>/dev/null || true)"
+				hyst="$(read_be32 "$trip/hysteresis" 0 2>/dev/null || echo 0)"
+				is_uint "$threshold" || continue
+				threshold=$((threshold / 1000)); is_uint "$hyst" || hyst=0; hyst=$((hyst / 1000))
+				if [ "$CPU_TEMP" -ge "$((threshold - hyst))" ] && [ "$map_state" -gt "$THERMAL_STATE" ]; then
+					THERMAL_STATE="$map_state"
+				fi
+				done
+		done
+	fi
+	if [ "$maps_examined" -eq 1 ] && [ "$map_found" -eq 0 ]; then
+		THERMAL_OWNER="userspace"
+		# 老固件 40°C active map 使低速控制不可用；独占模式下仅保留高温应急下限。
+		[ -n "$CPU_TEMP" ] || { THERMAL_STATE=3; THERMAL_FLOOR=255; return 0; }
+		[ "$CPU_TEMP" -ge 83 ] && THERMAL_STATE=2
+		[ "$CPU_TEMP" -ge 113 ] && THERMAL_STATE=3
+		if [ "$THERMAL_STATE" -gt 0 ]; then
+			value="$(cooling_level_for_state "$THERMAL_STATE" 2>/dev/null || true)"
+			if is_uint "$value"; then THERMAL_FLOOR="$value"; else THERMAL_FLOOR=255; fi
+		fi
+		return 0
+	fi
+	[ "$map_found" -eq 1 ] && THERMAL_OWNER="shared"
+	[ -n "$CPU_TEMP" ] || { THERMAL_FLOOR=255; return 0; }
+
+	# DT 发现失败的保守回退（兼容旧版固件）。
+	if [ "$THERMAL_STATE" -eq 0 ]; then
+		[ "$CPU_TEMP" -ge 38 ] && THERMAL_STATE=1
+		[ "$CPU_TEMP" -ge 83 ] && THERMAL_STATE=2
+		[ "$CPU_TEMP" -ge 113 ] && THERMAL_STATE=3
+	fi
+	[ "$THERMAL_STATE" -gt 0 ] || return 0
+	value="$(cooling_level_for_state "$THERMAL_STATE" 2>/dev/null || true)"
+	if is_uint "$value"; then THERMAL_FLOOR="$value"; else THERMAL_FLOOR=255; fi
+}
+
+acquire_lock() {
+	local owner
+	if mkdir "$LOCK_DIR" 2>/dev/null; then
+		echo "$$" > "$LOCK_DIR/pid"
+		return 0
+	fi
+	owner="$(sysfs_read "$LOCK_DIR/pid")"
+	if ! is_uint "$owner" || ! kill -0 "$owner" 2>/dev/null; then
+		rm -rf "$LOCK_DIR" 2>/dev/null
+		mkdir "$LOCK_DIR" 2>/dev/null || return 1
+		echo "$$" > "$LOCK_DIR/pid"
+		return 0
+	fi
+	return 1
+}
+
+release_lock() {
+	rm -rf "$LOCK_DIR" 2>/dev/null
+}
+
+calc_curve_pwm() {
+	local temp="$1" curve="$2" old_ifs point t p prev_t prev_p result
+	old_ifs="$IFS"; IFS=','
+	for point in $curve; do
+		t="${point%%:*}"; p="${point#*:}"
+		is_uint "$t" && is_uint "$p" && [ "$t" -le 150 ] && [ "$p" -le 100 ] || { IFS="$old_ifs"; return 1; }
+		if [ -n "${prev_t:-}" ] && [ "$t" -le "$prev_t" ]; then IFS="$old_ifs"; return 1; fi
+		if [ "$temp" -le "$t" ]; then
+			if [ -z "${prev_t:-}" ]; then
+				result="$p"
+			else
+				result=$((prev_p + (temp - prev_t) * (p - prev_p) / (t - prev_t)))
+			fi
+			IFS="$old_ifs"
+			echo $((result * 255 / 100))
+			return 0
+		fi
+		prev_t="$t"; prev_p="$p"
+	done
+	IFS="$old_ifs"
+	[ -n "${prev_p:-}" ] || return 1
+	echo $((prev_p * 255 / 100))
+}
+
+# 状态文件是脚本自己写的 key=value 文本，一行一个键。原实现每次取值都跑一遍
+# sed | head（两个子进程），apply_once 一轮要取三次。这里改成用 shell 内建的
+# read 逐行匹配：子进程数降到 0，代价只是每次多打开一次文件（远小于 fork）。
+# 注意不能用 $'\n' 之类的写法——本脚本是 /bin/sh（Debian 上是 dash）。
+state_get() {
+	local key="$1" line
+	[ -f "$STATE_FILE" ] || return 0
+	while IFS= read -r line; do
+		case "$line" in
+			"${key}="*) printf '%s' "${line#*=}"; return 0 ;;
+		esac
+	done < "$STATE_FILE"
+	return 0
+}
+
+write_state() {
+	local tmp="${STATE_FILE}.$$"
+	{
+		echo "updated=$(date +%s)"
+		echo "result=$RESULT"
+		echo "reason=$REASON"
+		echo "requested_pwm=$REQUESTED_PWM"
+		echo "target_pwm=$TARGET_PWM"
+		echo "applied_pwm=$APPLIED_PWM"
+		echo "thermal_floor=$THERMAL_FLOOR"
+		echo "thermal_state=$THERMAL_STATE"
+		echo "thermal_max_state=$THERMAL_MAX_STATE"
+		echo "thermal_owner=$THERMAL_OWNER"
+		echo "control_temp=${CONTROL_TEMP:-}"
+		echo "control_sensor=${CONTROL_SENSOR:-}"
+		echo "down_since=${DOWN_SINCE:-0}"
+	} > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+apply_once() {
+	local current last_pwm candidate now elapsed sleep_s previous_result
+	load_config
+	PWM_PATH="$(find_pwm 2>/dev/null || true)"
+	if [ -z "$PWM_PATH" ]; then
+		# 每轮都会命中，只报第一次，否则 journal 被刷满。
+		# 分两种情形给出可操作的提示，避免"风扇不转但日志只说找不到节点"。
+		if [ "${PWM_BACKEND:-auto}" = "softpwm" ] || \
+		   [ -z "$(sysfs_read "$EMMC_SECTORS_FILE")" ]; then
+			log_once "pwm-missing-soft" \
+				"PWM control node not found (backend=${PWM_BACKEND:-auto}, softpwm node $SOFTPWM_NODE absent); check that airpi-gpio-fan is loaded"
+		else
+			log_once "pwm-missing" "PWM control node not found; unable to apply policy"
+		fi
+		return 1
+	fi
+
+	read_sensors
+	set_thermal_floor
+	REQUESTED_PWM=0; REASON="$MODE"; RESULT="ok"; DOWN_SINCE=0
+
+	if [ "$ENABLED" != "1" ] || [ "$MODE" = "kernel" ]; then
+		release_thermal_control
+		current="$(sysfs_read "$PWM_PATH")"
+		is_uint "$current" || current=0
+		REQUESTED_PWM=0; TARGET_PWM="$current"; APPLIED_PWM="$current"
+		REASON="kernel"
+		THERMAL_OWNER="kernel"
+		write_state
+		return 0
+	fi
+
+	if ! take_thermal_control; then
+		log_msg "unable to inspect kernel thermal policy; cooling policy not changed"
+		release_thermal_control
+		return 1
+	fi
+	[ "$THERMAL_OWNER" = "unknown" ] && THERMAL_OWNER="userspace-pwm"
+
+	if [ "$MODE" = "manual" ]; then
+		REQUESTED_PWM="$MANUAL_PWM"
+		REASON="manual"
+	elif [ -z "$CONTROL_TEMP" ]; then
+		REQUESTED_PWM="$FAIL_PWM"
+		REASON="sensor-failsafe"
+		RESULT="failsafe"
+	else
+		REQUESTED_PWM="$(calc_curve_pwm "$CONTROL_TEMP" "$CURVE_DATA" 2>/dev/null || true)"
+		if ! is_uint "$REQUESTED_PWM"; then
+			REQUESTED_PWM="$FAIL_PWM"
+			REASON="curve-failsafe"
+			RESULT="failsafe"
+		else
+			REASON="auto"
+		fi
+	fi
+
+	REQUESTED_PWM="$(clamp "$REQUESTED_PWM" 0 255)"
+	TARGET_PWM="$REQUESTED_PWM"
+	[ "$THERMAL_FLOOR" -gt "$TARGET_PWM" ] && { TARGET_PWM="$THERMAL_FLOOR"; REASON="${REASON}+kernel-floor"; }
+
+	current="$(sysfs_read "$PWM_PATH")"
+	is_uint "$current" || current=0
+	last_pwm="$(state_get applied_pwm)"; is_uint "$last_pwm" || last_pwm="$current"
+	now="$(date +%s)"
+
+	if [ "$MODE" = "auto" ] && [ "$RESULT" = "ok" ] && [ "$TARGET_PWM" -lt "$last_pwm" ]; then
+		candidate="$(calc_curve_pwm "$((CONTROL_TEMP + HYSTERESIS))" "$CURVE_DATA" 2>/dev/null || echo "$TARGET_PWM")"
+		is_uint "$candidate" || candidate="$TARGET_PWM"
+		[ "$THERMAL_FLOOR" -gt "$candidate" ] && candidate="$THERMAL_FLOOR"
+		TARGET_PWM="$candidate"
+		DOWN_SINCE="$(state_get down_since)"; is_uint "$DOWN_SINCE" || DOWN_SINCE=0
+		[ "$DOWN_SINCE" -gt 0 ] || DOWN_SINCE="$now"
+		elapsed=$((now - DOWN_SINCE))
+		if [ "$elapsed" -lt "$DOWN_DELAY" ]; then
+			TARGET_PWM="$last_pwm"
+			REASON="auto-down-delay"
+		else
+			DOWN_SINCE=0
+		fi
+	fi
+
+	TARGET_PWM="$(clamp "$TARGET_PWM" 0 255)"
+	if [ "$current" -eq 0 ] && [ "$TARGET_PWM" -gt 0 ] && [ "$START_BOOST_MS" -gt 0 ]; then
+		candidate="$START_PWM"; [ "$TARGET_PWM" -gt "$candidate" ] && candidate="$TARGET_PWM"
+		echo "$candidate" > "$PWM_PATH" 2>/dev/null || return 1
+		sleep_s=$(((START_BOOST_MS + 999) / 1000))
+		sleep "$sleep_s"
+	fi
+
+	if [ "$current" -ne "$TARGET_PWM" ]; then
+		if ! echo "$TARGET_PWM" > "$PWM_PATH" 2>/dev/null; then
+			log_msg "failed to set PWM target=$TARGET_PWM"
+			return 1
+		fi
+	fi
+	APPLIED_PWM="$(sysfs_read "$PWM_PATH")"
+	is_uint "$APPLIED_PWM" || APPLIED_PWM="$TARGET_PWM"
+	previous_result="$(state_get result)"
+	if [ "$RESULT" != "$previous_result" ]; then
+		if [ "$RESULT" = "failsafe" ]; then
+			log_msg "failsafe enabled reason=$REASON pwm=$TARGET_PWM"
+		elif [ "$previous_result" = "failsafe" ]; then
+			log_msg "sensor and curve validation recovered; normal control resumed"
+		fi
+	fi
+	write_state
+	return 0
+}
+
+print_settings() {
+	echo "enabled=$ENABLED"
+	echo "mode=$MODE"
+	echo "curve=$PROFILE"
+	echo "curve_data=$CURVE_DATA"
+	echo "temp_source=$TEMP_SOURCE"
+	echo "manual_pwm=$MANUAL_PWM"
+	echo "interval=$INTERVAL"
+	echo "hysteresis=$HYSTERESIS"
+	echo "down_delay=$DOWN_DELAY"
+	echo "start_pwm=$START_PWM"
+	echo "start_boost_ms=$START_BOOST_MS"
+}
+
+print_status() {
+	local fan updated now age zone policy
+	load_config
+	PWM_PATH="$(find_pwm 2>/dev/null || true)"
+	read_sensors
+	THERMAL_FLOOR=0; THERMAL_STATE=0; THERMAL_MAX_STATE=0; THERMAL_OWNER="unknown"
+	[ -n "$PWM_PATH" ] && set_thermal_floor
+	zone="$(find_thermal_zone 2>/dev/null || true)"
+	policy="$([ -n "$zone" ] && sysfs_read "$zone/policy" || true)"
+	if [ "$ENABLED" != "1" ] || [ "$MODE" = "kernel" ]; then
+		THERMAL_OWNER="kernel"
+	fi
+	print_settings
+	echo "pwm_backend=$(resolve_pwm_backend "${PWM_BACKEND:-auto}")"
+	echo "pwm_backend_cfg=${PWM_BACKEND:-auto}"
+	echo "softpwm_node=$([ -e "$SOFTPWM_NODE" ] && echo 1 || echo 0)"
+	echo "softpwm_loaded=$(softpwm_module_loaded && echo 1 || echo 0)"
+	echo "emmc_sectors=$(sysfs_read "$EMMC_SECTORS_FILE")"
+	echo "pwm=${PWM_PATH:-}"
+	echo "pwm_value=$([ -n "$PWM_PATH" ] && sysfs_read "$PWM_PATH" || true)"
+	fan="$(find_fan_rpm 2>/dev/null || true)"
+	echo "fan=${fan:-}"
+	if [ -n "$fan" ]; then
+		echo "fan_feedback=1"
+		echo "fan_rpm=$(sysfs_read "$fan")"
+	else
+		echo "fan_feedback=0"
+		echo "fan_rpm="
+	fi
+	echo "cpu_temp=$CPU_TEMP"; echo "cpu_label=$CPU_LABEL"
+	echo "phy_temp=$PHY_TEMP"; echo "phy_label=$PHY_LABEL"
+	echo "wifi1_temp=$WIFI1_TEMP"; echo "wifi1_label=$WIFI1_LABEL"
+	echo "wifi2_temp=$WIFI2_TEMP"; echo "wifi2_label=$WIFI2_LABEL"
+	echo "module_temp=$MODULE_TEMP"; echo "module_label=5G modem"
+	echo "control_temp=$CONTROL_TEMP"; echo "control_sensor=$CONTROL_SENSOR"
+	echo "thermal_floor=$THERMAL_FLOOR"
+	echo "thermal_state=$THERMAL_STATE"
+	echo "thermal_max_state=$THERMAL_MAX_STATE"
+	echo "thermal_owner=$THERMAL_OWNER"
+	for key in result reason requested_pwm target_pwm applied_pwm; do
+		echo "$key=$(state_get "$key")"
+	done
+	updated="$(state_get updated)"; now="$(date +%s)"
+	if is_uint "$updated"; then age=$((now - updated)); else age=""; fi
+	echo "state_age=$age"
+}
+
+run_daemon() {
+	trap 'exit 0' TERM INT
+	trap 'release_lock; release_thermal_control' EXIT
+	while true; do
+		if acquire_lock; then
+			apply_once
+			release_lock
+		fi
+		load_config
+		sleep "$INTERVAL" & wait $!
+	done
+}
+
+case "${1:-apply}" in
+	apply)
+		if acquire_lock; then
+			trap 'release_lock' EXIT
+			apply_once
+		else
+			echo "fan control is busy" >&2
+			exit 1
+		fi
+		;;
+	status) print_status ;;
+	daemon) run_daemon ;;
+	release) release_thermal_control ;;
+	*) echo "Usage: $0 {apply|status|daemon|release}"; exit 1 ;;
+esac

@@ -1,5 +1,5 @@
 #!/bin/sh
-# H5000M Debian: let NetworkManager exclusively acquire DHCP for the MT5700M link.
+# <board> Debian: let NetworkManager exclusively acquire DHCP for the MT5700M link.
 # The USB Ethernet device is eth2 on this board; the interface can appear after
 # at-webserver starts. A saved WAN-5G profile autoconnects when the device arrives.
 
