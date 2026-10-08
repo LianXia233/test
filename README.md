@@ -2,29 +2,39 @@
 
 > ## ⚠️ 重要警告：本项目仍在测试中，**两板实机均未通过**
 >
-> **当前状态：AP3000M 云编译连续失败、未产出可用镜像；H5000M 云编译虽成功，但实机尚未验证。**
+> **当前状态：两板内核均已云编译成功；AP3000M 的 RootFS + 刷写包阶段失败
+> （根因已定位并修复，待重跑复验）；两板实机均未验证。**
 >
-> | 板卡 | SoC | 云编译 | **实机验证** | 说明 |
+> | 板卡 | SoC | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
 > | --- | --- | --- | --- | --- |
-> | Hiveton H5000M | MT7987A | ✅ 成功（`c21fc66`） | ⚠️ **尚未通过** | 产物可构建，但**未在真机刷写验收**；多板化改造后的回归同样未做 |
-> | Airpi AP3000M | MT7981B | ❌ **失败** | — | 内核编译阶段连续两次失败，无可用产物，见下 |
+> | Hiveton H5000M | MT7987A | ✅ 成功 | ✅ 成功 | ⚠️ **尚未通过** |
+> | Airpi AP3000M | MT7981B | ✅ 成功（`c3f861d`） | ❌ **失败**（根因已修复，待重跑） | ⚠️ **尚未通过** |
 >
-> **⚠️ 云编译成功不等于实机可用。** H5000M 的 `success` 只说明"能构建出镜像"，
-> 不代表"镜像能启动、网络能通、功能正常"。本项目**至今没有任何一块板卡完成实机验收**。
+> **⚠️ 云编译成功不等于实机可用。** 上表的 `success` 只说明"能构建出镜像"，
+> 不代表"镜像能启动、网络能通、功能正常"。本项目**至今没有任何一块板卡完成实机验收**——
+> 包括 H5000M（多板化改造后的回归同样未做）。
 >
-> AP3000M 失败记录（详细根因与修复见 [CHANGELOG.md](CHANGELOG.md)）：
+> **状态依据单一真源：[docs/ci-status.md](docs/ci-status.md)**（含每条结论对应的
+> run id / 提交 / job 与步骤，由 `scripts/tests/test-docs-ci-status.sh` 机械校验）。
 >
-> | run | 提交 | 结果 | 失败根因 |
+> AP3000M 云编译历史（**三次失败，三个阶段各不相同；前两次修复已由 `37843516159`
+> 内核 job 证实，第三次修复待重跑复验**）：
+>
+> | run | 提交 | 结果 | 失败阶段与根因 |
 > | --- | --- | --- | --- |
-> | 37840375623 | `a8e73ce` | ❌ 46s | 缺 `drivers/hwmon/Kconfig` 注册 → `CONFIG_AIRPI_GPIO_FAN` 符号不存在 → `=m` 被 `olddefconfig` **静默丢弃** |
-> | 37841719136 | `e9c1594` | ❌ 46s | 补齐 Kconfig 但 `depends on ... && HRTIMER` 引用了**非 Kconfig 符号** → 符号恒不可见 → `=m` 再次被丢弃 |
-> | （进行中） | `c3f861d` | ⏳ 待验证 | 已移除 `HRTIMER` 依赖（改为 `depends on GPIOLIB`），等待 CI 结果 |
+> | 37840375623 | `a8e73ce` | ❌ 46s | 内核编译 —— 缺 `drivers/hwmon/Kconfig` 注册 → `CONFIG_AIRPI_GPIO_FAN` 符号不存在 → `=m` 被 `olddefconfig` **静默丢弃** |
+> | 37841719136 | `e9c1594` | ❌ 44s | 内核编译 —— 补齐 Kconfig 但 `depends on ... && HRTIMER` 引用了**非 Kconfig 符号** → 符号恒不可见 → `=m` 再次被丢弃（**症状与上次完全相同，根因不同**） |
+> | 37843516159 | `c3f861d` | ❌ | **内核 job ✅ 通过**（前两次修复生效）；**RootFS 构建 ❌** —— MT7981 固件「路径 + 清单」双错：路径应为平铺 `mediatek/mt7981_*.bin` 而非子目录（上游 404），且漏了**主固件** `mt7981_wm.bin`。**已修复，实跑拉取 3/3 成功，待重跑复验** |
+>
+> > **注意 scope**：`37843516159` 是**部分成功** —— 内核 job 通过、RootFS job 失败。
+> > 既不能笼统写成「云编译失败」（掩盖内核已能编过），也不能写成「成功」（无产物）。
 >
 > **请勿将本仓库当前状态用于生产或刷机验收。**
 >
 > **两板共同待办（实机复核清单）**：
 > - ⚠️ **H5000M**：刷写后能否正常启动、LAN 口 `192.168.88.1` 是否可达、Wi-Fi 是否 probe 成功、
 >   风扇是否按曲线转动、eMMC 首启扩容是否生效 —— **以上全部未验证**
+> - ⚠️ **AP3000M**：重跑云编译确认 RootFS 阶段转绿并产出镜像（当前**无任何可用产物**）
 > - ⚠️ **AP3000M**：真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
 > - ⚠️ **AP3000M 风扇**：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、
 >   `fangpio=540` 是否准确；8GB 版 `pwm1` 的实际 hwmon 序号
@@ -47,7 +57,7 @@
 | 硬件 | H5000M (MT7987A) | AP3000M (MT7981B) |
 | --- | --- | --- |
 | SoC / 核心 | MT7987A，4×Cortex-A53 | MT7981B，2×Cortex-A53 |
-| 自定义 6.18 内核 | ⚠️ 云编译通过，实机未验证 | ⚠️ 云编译失败（见上方警告） |
+| 自定义 6.18 内核 | ⚠️ 云编译通过，实机未验证 | ⚠️ 内核云编译通过（RootFS 阶段失败，已修复待复验），实机未验证 |
 | 有线网口 | 双 2.5G（RTL8221B + 内置 PHY） | 千兆（内置 PHY） |
 | eMMC | ✅ 约 14.6 GiB（含 factory NVMEM Wi-Fi EEPROM） | ✅ 8GB / 16GB 两版本（容量影响风扇链路，见下） |
 | Wi-Fi | PCIe + MT7992（2.4G/5G），mt76 模块 | 内置 wmac（MT7915），`mt7915e` 模块 |
@@ -99,18 +109,42 @@ sudo bash build/make-sd-image.sh --out /path/to/out --squashfs /path/to/out/root
 
 构建机依赖：`git curl xz bison flex libssl-dev bc crossbuild-essential-arm64 debootstrap qemu-user-static u-boot-tools squashfs-tools curl`。
 
-产物：`out/H5000M-debian13-kernel.bin`（→ p4，FIT）+ `out/H5000M-debian13-rootfs.bin`（→ p5，
-引导层 ext4）+ `out/rootfs/rootfs.squashfs`（只读基础系统，发布物之一）。
+产物：`out/<BOARD_UPPER>-debian13-kernel.bin`（→ p4，FIT）+ `out/<BOARD_UPPER>-debian13-rootfs.bin`
+（→ p5，引导层 ext4）+ `out/rootfs/rootfs.squashfs`（只读基础系统，发布物之一），
+`<BOARD_UPPER>` 为 `H5000M` / `AP3000M`（由 `boards/<board>.board` 的 `BOARD_UPPER` 决定）。
 
 ## 云编译（GitHub Actions）
 
-仓库已配置 `.github/workflows/build.yml`，**仅手动触发**（`workflow_dispatch`）：内核编译
-耗时长，避免每次提交都空耗 runner 时长。到 Actions 页面 Run workflow，或命令行
-`gh workflow run build.yml`。
+仓库已配置 **三个 workflow 文件，三层触发入口**（推而不用，内核编译耗时长，避免每次
+提交都空耗 runner 时长）：
 
-流程：内核编译（6.18 + MT7987A 补丁，`--strict` 严格核验）→ boot.scr 生成 → Debian 13
-RootFS 树 → SquashFS 只读基础系统（zstd）→ 刷写包（`H5000M-debian13-kernel.bin` → p4、
-`H5000M-debian13-rootfs.bin` → p5 引导层）。
+| 入口 | 文件 | board | 适用场景 |
+| --- | --- | --- | --- |
+| **H5000M 专用** | `.github/workflows/build-h5000m.yml` | 写死 `h5000m` | 日常推荐；Actions 侧边栏一眼可见是哪个板卡 |
+| **AP3000M 专用** | `.github/workflows/build-ap3000m.yml` | 写死 `ap3000m` | 同上 |
+| 多板合一 | `.github/workflows/build.yml` | `board` 输入选择 | 需一次性覆盖全部输入（`clear_cache` / `keep_releases`）时 |
+
+```bash
+# 推荐：板卡专用入口
+gh workflow run build-h5000m.yml
+gh workflow run build-ap3000m.yml
+# 或到 Actions 页面点对应条目 Run workflow
+
+# 合一入口（指定板卡）
+gh workflow run build.yml -f board=ap3000m
+```
+
+**为什么用薄壳而不是一个 workflow 加下拉框**：Action 侧边栏直接显示两条独立入口，
+免去"先点 Run workflow 再挑板"；并发组 / Release tag / Artifact 名天然按板卡隔离，
+两板可同时构建互不排队；**误选板卡的可能性归零** —— 两板 SoC 不同（MT7987A / MT7981B），
+内核配置与 DTB 都不同，选错会产出一块砖。
+
+实现只有一份：两个薄壳**不含任何 job 定义**，仅以 `uses: ./.github/workflows/build.yml`
+调用带 `workflow_call` 的基座文件（`board` 写死）。改一处两板同时生效。
+
+流程（按板卡各跑一遍）：内核编译（6.18 + 板级补丁，`--strict` 严格核验）→ boot.scr 生成 →
+Debian 13 RootFS 树 → SquashFS 只读基础系统（zstd）→ 刷写包
+（`<BOARD_UPPER>-debian13-kernel.bin` → p4、`<BOARD_UPPER>-debian13-rootfs.bin` → p5 引导层）。
 
 **编译提速**（详见 [docs/build-guide.md](docs/build-guide.md) §3.7）：默认跑在
 **ARM64 原生 runner**（`ubuntu-24.04-arm`，仓库 public 故免费）——宿主即 arm64，RootFS 的
@@ -122,11 +156,12 @@ x86_64 runner（交叉编译 + qemu 第二阶段）。
 
 产物双通道交付：
 
-- **GitHub Releases**：编译完成后自动创建/更新 `H5000M-debian13-<日期>-r<Run序号>` Release，
-  发布 `H5000M-debian13-<日期>-r<Run序号>-sysupgrade.bin`（≈164 MiB，CONTROL+kernel+root
+- **GitHub Releases**：编译完成后自动创建/更新 `<BOARD_UPPER>-debian13-<日期>-r<Run序号>` Release，
+  发布 `<BOARD_UPPER>-debian13-<日期>-r<Run序号>-sysupgrade.bin`（≈164 MiB，CONTROL+kernel+root
   自校验包）/ `-kernel.bin`（FIT，内核 LZMA 内嵌）/ `-rootfs.bin`（p5 引导层镜像）/
   `-rootfs.squashfs`（只读基础系统，供在线升级）与 `sha256sums.txt`
   （版本号含 GitHub Run 序号，同日重跑不会覆盖旧 Release）；
+  **板卡独立**：两条专用入口各自发布本板 Release 与 tag，互不覆盖；
   **历史 Release 自动清理**：发布成功后只保留最近 `keep_releases` 个（默认 3，可在手动
   触发时调整，填 `0` 关闭），更旧的 Release 连同资产与 tag 一并删除——单个 Release 约
   660 MiB，不清理会持续吃满Release 资产配额；需要回退旧版本时用 `git checkout` 到对应
@@ -147,7 +182,7 @@ x86_64 runner（交叉编译 + qemu 第二阶段）。
 p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层 ext4：init + busybox + SquashFS + overlay）
 ```
 
-- 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`（与 OpenWrt 同型）；
+- 主引导：现有 U-Boot 从 **p4** 读取 `<BOARD_UPPER>-debian13-kernel.bin`（FIT）并 `bootm`（与 OpenWrt 同型）；
 - FIT load/entry = **0x46000000**（不能用官方的 0x40000000：板上 U-Boot 自身常驻
   `0x41e00000`（`CONFIG_TEXT_BASE` + `POSITION_INDEPENDENT`），`bootm` 按
   `[0x40000000, 0x40000000+解压尺寸)` 做 LMB 分配，窗口仅 30 MiB；官方内核解压后
@@ -164,7 +199,7 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层
 
 ## 首次启动（兼容当前 U-Boot，不破坏 eMMC 中的 ImmortalWrt）
 
-1. 构建刷写包（`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`）；
+1. 构建刷写包（`<BOARD_UPPER>-debian13-kernel.bin` + `<BOARD_UPPER>-debian13-rootfs.bin`）；
 2. 进入设备（OpenWrt initramfs / Debian live），**先完整备份**（整盘 dd 或逐分区备份）；
 3. 执行 `scripts/install-emmc.sh` 全新刷写，脚本**仅写 p4（FIT）+ p5（引导层）**，其余区域零写入；
 4. 重启后由现有 U-Boot 直接引导 Debian 13；WAN 自动 DHCP、LAN 自动 DHCP+DNS+NAT、
@@ -173,21 +208,21 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层
 5. 后续升级无需重刷：在运行中的 Debian 上执行 `install-emmc.sh --rootfs-squashfs`，在线原子替换
    SquashFS + 刷新 p4 FIT，配置/数据全保留，旧版自动备份 `rootfs.squashfs.bak`；
 6. 若要回退 ImmortalWrt，用备份恢复 p4 / p5 即可（p1-p3 与 GPT 未被改动）；
-7. 也可使用单文件包 `out/H5000M-debian13-sysupgrade.bin`（CONTROL+kernel+root，
+7. 也可使用单文件包 `out/<BOARD_UPPER>-debian13-sysupgrade.bin`（CONTROL+kernel+root，
    与官方 sysupgrade tar 同构）：运行中的 OpenWrt/ImmortalWrt 上 `sysupgrade -n` 直刷，
    或断网状态走 U-Boot 菜单 "Upgrade firmware" / Web failsafe 上传该 tar——
    两条通道同样**只写 p4/p5**，BL2 / FIP / u-boot-env / factory / GPT 零改动。
 
 ```bash
-# 全新刷写：在 H5000M 上（OpenWrt initramfs / Debian live / 已启动的 Debian）执行
+# 全新刷写：在目标板上（OpenWrt initramfs / Debian live / 已启动的 Debian）执行
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/H5000M-debian13-kernel.bin \
-  --rootfs-img out/H5000M-debian13-rootfs.bin \
+  --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
+  --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 
 # 在线升级（系统已以 SquashFS+OverlayFS 架构运行时，仅替换系统，配置保留）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/H5000M-debian13-kernel.bin \
+  --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs-squashfs out/rootfs/rootfs.squashfs \
   --dev /dev/mmcblk0 [--yes]
 ```
@@ -201,50 +236,60 @@ sudo bash scripts/install-emmc.sh \
 ├── README.md
 ├── CHANGELOG.md
 ├── docs/                        # 文档
+│   ├── ci-status.md             # ★ CI 实际状态单一真源（run id / job / 步骤级证据）
 │   ├── architecture.md          # 架构与网络职责（含 SquashFS+OverlayFS 存储栈）
-│   ├── hardware.md              # 硬件适配
+│   ├── hardware.md              # 硬件适配（H5000M / AP3000M 双板）
 │   ├── debian13-partition-plan.md # 分区方案（复用现有 eMMC 布局）
-│   ├── build-guide.md           # 构建指南
+│   ├── build-guide.md           # 构建指南（多板 --board）
 │   ├── first-boot.md            # 首次启动（仅写 p4/p5，含在线升级）
-│   └── troubleshooting.md       # 故障排查
-├── dts/                         # H5000M 设备树（已验证，作为硬件参考）
+│   ├── troubleshooting.md       # 故障排查
+│   ├── armbian-evaluation.md    # Armbian 可行性评估（仅评估，未改构建逻辑）
+│   └── refs/                    # 参考用例（Armbian CSC 配置样本）
+├── boards/                      # ★ 板级单一真源
+│   ├── board-lib.sh             # 板级字段解析库（供 build / CI 脚本 source）
+│   ├── h5000m.board            # H5000M 板级描述（SoC / DTB / 分区 / 网络 / 风扇）
+│   ├── ap3000m.board           # AP3000M 板级描述
+│   └── overlay.d/<board>/       # 板级 rootfs 覆盖层（同名内容覆盖通用层）
+├── dts/                         # 设备树（H5000M 已验证；AP3000M 自维护完整版）
 ├── boot/
 │   └── boot.cmd                 # U-Boot 备用引导脚本源文件（编译为 boot.scr）
 ├── build/
-│   ├── build-kernel.sh          # 内核构建（6.18.54 + ImmortalWrt 补丁集）
+│   ├── build-kernel.sh          # 内核构建（6.18.x + ImmortalWrt 补丁集 + 板级源码层注册）
 │   ├── build-rootfs.sh          # Debian 13 ARM64 rootfs 构建（--skip-tar 产出树）
 │   ├── build-mt5700.sh          # luci-app-mt5700（Debian 分支）at-webserver 交叉编译
 │   ├── make-squashfs.sh         # RootFS 树 → 瘦身 + SquashFS（zstd）只读基础系统
 │   ├── make-boot.sh             # 生成 boot.scr（备用引导）
 │   ├── make-sd-image.sh         # 生成刷写包（p4 FIT + p5 引导层 ext4：init+busybox+SquashFS+overlay）
-│   ├── kernel-conf/             # 内核 defconfig 片段
+│   ├── kernel-conf/             # 内核 defconfig 片段（每板一份 + 通用基座）
 │   └── rootfs/
 │       └── packages.list        # Debian 13 软件包清单
-├── rootfs-overlay/              # rootfs 覆盖层（开箱即用配置）
+├── rootfs-overlay/              # 通用 rootfs 覆盖层（板级无关；板级差异见 boards/overlay.d/）
 │   ├── etc/                     # NM / dnsmasq / nftables / sysctl / systemd
-│   │   ├── NetworkManager/      # dns=none，接口独占
-│   │   ├── dnsmasq.d/           # 唯一 DHCP+DNS(:53)
-│   │   ├── nftables.conf        # 唯一防火墙/NAT
-│   │   ├── default/             # h5000m-router / h5000m-fancontrol 配置
-│   │   └── systemd/system/      # h5000m-router-init / h5000m-fancontrol / router-panel / agent / h5000m-grow-rootfs
-│   └── usr/local/sbin/          # h5000m-router-init.sh、h5000m-fancontrol（风扇温控）、h5000m-grow-rootfs
+│   └── usr/local/sbin/          # router-init.sh、router-fancontrol、router-grow-rootfs…
+│                                #   （unit 名与脚本名**不带板级前缀**，板级差异走同名内容覆盖）
 ├── kernel/
-│   ├── patches/                 # MT7987A 内核补丁（ImmortalWrt 4 层 + MT7987 eth 修复）
+│   ├── patches/                 # 内核补丁（ImmortalWrt 分层 + MT7987/MT7981 修复）
 │   ├── files-generic/           # OpenWrt 通用源码（mtdsplit 等）
-│   └── files-mediatek/          # OpenWrt mediatek 源码
+│   ├── files-mediatek/          # OpenWrt mediatek 源码
+│   └── files-boards/<board>/    # 板级内核源码层（如 ap3000m 的 airpi-gpio-fan 软 PWM 驱动）
 ├── linux-router/vendor/         # Linux-Router 项目源码（vendored）
 ├── scripts/
-│   ├── build.sh                 # 一键构建入口（内核 → RootFS → SquashFS → 刷写包）
-│   ├── fetch-firmware.py        # 固件获取（跨平台）
-│   └── install-emmc.sh          # eMMC 刷入脚本（全新刷写 / --rootfs-squashfs 在线升级）
-└── .github/workflows/build.yml  # GitHub Actions 云编译
+│   ├── build.sh                 # 一键构建入口（--board 必填；内核 → RootFS → SquashFS → 刷写包）
+│   ├── fetch-firmware.py        # 固件获取（跨平台，按板级 BOARD_EXTRA_FIRMWARE）
+│   ├── install-emmc.sh          # eMMC 刷入脚本（全新刷写 / --rootfs-squashfs 在线升级）
+│   └── tests/                   # 回归测试（质量门强制执行）
+└── .github/workflows/
+    ├── build.yml                # 基座：workflow_dispatch + workflow_call（实现仅一份）
+    ├── build-h5000m.yml         # 板卡专用薄壳（board 写死 h5000m，无 job 定义）
+    ├── build-ap3000m.yml        # 板卡专用薄壳（board 写死 ap3000m）
+    └── clean-cache.yml          # 手动清理 Actions 缓存
 ```
 
 ## 验收标准
 
 1. H5000M 由现有 U-Boot 从 **p4 FIT** 直接引导 Debian 13，**BL2 / U-Boot / FIP / u-boot-env /
    factory / GPT / eMMC 硬件配置零改动**，分区表 Start/End/PARTLABEL 与迁移前逐项一致；
-2. 首次启动由 systemd 与 `h5000m-router-init` 建立基础连接：eth1 有线 WAN 优先、eth2 USB 5G WAN 备用、
+2. 首次启动由 systemd 与 `router-init` 建立基础连接：eth1 有线 WAN 优先、eth2 USB 5G WAN 备用、
    eth0/br-lan 的 `192.168.88.1/24` LAN、dnsmasq DHCP/DNS/RA、nftables 转发/NAT；MT7992 AP profile
    配置为接口出现后自动连接（默认凭据见首次启动指南），风扇自动温控；无线及硬件功能仍需在目标 Debian 镜像上实测；
 3. LAN/Wi-Fi 客户端自动获取 IP/网关/DNS，直接访问 Internet；
@@ -253,7 +298,7 @@ sudo bash scripts/install-emmc.sh \
    hostapd 不默认启用，避免与 NetworkManager 的 AP profile 冲突；
 6. 故障隔离：WAN 断网、IPv6 失效、Wi-Fi 失败、单网口异常均不影响其他功能；
    agent / WebUI 等服务按各自 unit 的重启策略恢复；
-7. 持久化与可升级：`/etc` `/var` `/opt` 写入经 OverlayFS 落 p5 重启保留；`h5000m-grow-rootfs`
+7. 持久化与可升级：`/etc` `/var` `/opt` 写入经 OverlayFS 落 p5 重启保留；`router-grow-rootfs`
    服务首启在线扩容 p5 至 ~7.2 GiB；sysupgrade 整包 ≤ 600 MiB（当前 ≈164 MiB）；
    在线升级仅替换 SquashFS、配置零丢失、可回退；
 8. 回退能力：备份的 p4 / p5 可随时恢复，恢复后 ImmortalWrt 原样可用（p1-p3 未动）。
@@ -261,10 +306,13 @@ sudo bash scripts/install-emmc.sh \
 ## 版本约束
 
 - **Debian 13 (Trixie) ARM64 stable**，不使用 Debian 12 / Testing / Unstable；
-- **U-Boot 不修改**：沿用 H5000M 现有 U-Boot，仅适配其引导方式；
+- **U-Boot 不修改**：沿用各板现有 U-Boot，仅适配其引导方式（**禁止刷写 BL2 / FIP / u-boot-env**）；
 - 内核补丁与 DTS 以 ImmortalWrt master（`target/linux/mediatek/`）已验证版本为准；
 - 不安装任何 OpenWrt 用户空间组件（OpenWrt 组件仅作内核参考来源）。
 
 ## 更新文档
 
 每次内容变更同步维护 [CHANGELOG.md](CHANGELOG.md)。
+
+**CI 状态相关表述**必须先改 [docs/ci-status.md](docs/ci-status.md)（单一真源），再让引用方跟随——
+避免同一条结论散落在 10 个文件里、一处变了其余九处不动。

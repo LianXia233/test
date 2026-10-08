@@ -1,14 +1,24 @@
 # Hiveton H5000M（MT7987A + eMMC）Debian 13 分区方案
 
-> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
-> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
->   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
-> - **H5000M (MT7987A)：⚠️ 云编译通过，但实机尚未验证** —— `c21fc66` 只是"能构建出镜像"，
->   刷写后能否正常启动、网络能否连通、功能是否正常**均未验收**。多板化改造后的
->   回归同样未做。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159` 的**内核 job 已通过**）；③ **RootFS 构建阶段**
+>   失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺 `mediatek/mt7981_*.bin` 而非
+>   子目录；且漏了主固件 `mt7981_wm.bin`），**根因已定位并已修复**（实跑拉取 3/3 成功），
+>   待重跑 CI 复验。**当前无任何可用产物**。
+> - **H5000M**：全链路云编译通过（`c21fc66`），但该镜像**从未在真机刷写验收** ——
+>   能否启动、网络能否连通、功能是否正常**均未验证**；多板化改造后的回归同样未做。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
 > `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
@@ -71,7 +81,7 @@ aarch64_cortex-a53）并实测分析，全部结论与上述分区方案一致�
 | GPT PARTLABEL 定位 | `lib/upgrade/platform.sh`：`CI_KERNPART="kernel" CI_ROOTPART="rootfs"`；`lib/upgrade/emmc.sh` 用 `find_mmc_part`（按 PARTLABEL）定位分区设备后 **dd 直接写入** | 确认 OpenWrt 仅按 PARTLABEL 写 `kernel`/`rootfs` 两分区，其余区域零写入（与本方案设计一致） |
 | factory 分区 | DTB：`block-partition-factory { partname = "factory"; nvmem-layout … }`（Wi-Fi EEPROM 校准） | 确认 p2 不可动 |
 | 网口映射 | `etc/board.d/02_network`：`ucidef_set_interfaces_lan_wan "eth0" eth1` | LAN=eth0 / WAN=eth1，与方案一致 |
-| MAC 生成 | `macaddr_generate_from_mmc_cid mmcblk0`（LAN=CID 派生，WAN=LAN+1） | 记录的是官方 OpenWrt 行为，仅供参考；Debian 分支没有这套 `02_network` 钩子，改为 `h5000m-router-init.sh` 自行按 eMMC CID 派生（见 `docs/hardware.md` 第 5 节） |
+| MAC 生成 | `macaddr_generate_from_mmc_cid mmcblk0`（LAN=CID 派生，WAN=LAN+1） | 记录的是官方 OpenWrt 行为，仅供参考；Debian 分支没有这套 `02_network` 钩子，改为 `router-init.sh` 自行按 eMMC CID 派生（见 `docs/hardware.md` 第 5 节） |
 | eMMC 节点 | DTB `mmc@11230000`，`mmc-card`，`non-removable` | 无 SD 卡槽，仅 eMMC，与方案一致 |
 
 > 实测结论：官方 U-Boot 使用 **GPT PARTLABEL 定位 p4（kernel）→ 读取裸 FIT → bootm**
@@ -152,7 +162,7 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 | p1 | `u-boot-env` | 8192 | 10239 | 1 MiB | 裸（U-Boot env） | 原样保留 |
 | p2 | `factory` | 10240 | 14335 | 2 MiB | 裸（校准数据） | 原样保留（Wi-Fi EEPROM） |
 | p3 | `fip` | 14336 | 22527 | 4 MiB | 裸（FIP） | 原样保留（BL2/U-Boot） |
-| p4 | `kernel` | 22528 | 83967 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（H5000M-debian13-kernel.bin） |
+| p4 | `kernel` | 22528 | 83967 | 30 MiB | 裸（FIT 镜像，无文件系统） | **Debian Kernel 所在**（<BOARD_UPPER>-debian13-kernel.bin） |
 | p5 | `rootfs` | 83968 | 15268830 | ~7.24 GiB | **ext4**（卷标 `rootfs`） | **Debian 引导层所在**（init + busybox + rootfs.squashfs + overlay 持久层） |
 
 - **PARTUUID**：保持不变（现有 GPT 中已存在，全部保留；Debian 不依赖 PARTUUID）。
@@ -166,10 +176,10 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 
 | 内容 | 位置 |
 | --- | --- |
-| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `H5000M-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb`（**Image 仅在 `make-sd-image.sh --keep-boot-image` 时落盘**；默认省空间不生成，此时 boot.scr 的 p5 分支与 extlinux 均不可用） |
+| **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `<BOARD_UPPER>-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb`（**Image 仅在 `make-sd-image.sh --keep-boot-image` 时落盘**；默认省空间不生成，此时 boot.scr 的 p5 分支与 extlinux 均不可用） |
 | **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb`（p5 引导层内） |
 | **RootFS（只读基础系统）** | p5 引导层内 `/squashfs/rootfs.squashfs`（Debian 13 Trixie ARM64，zstd 压缩，~120 MiB，只读不可变） |
-| **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；首启 `h5000m-grow-rootfs` 在线扩容 p5 至 ~7.2 GiB |
+| **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；首启 `router-grow-rootfs` 在线扩容 p5 至 ~7.2 GiB |
 | **引导脚本** | p5 引导层 `/sbin/init`（busybox 静态）：挂 SquashFS → 组装 OverlayFS → pivot_root → systemd；失败进入只读救援模式 |
 | **Data** | p5 引导层 overlay 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
 | **U-Boot 启动脚本（备用）** | p5 引导层 `/boot/boot.scr`（由 boot/boot.cmd 编译，始终落盘）+ `/boot/extlinux/extlinux.conf`（**仅在 `--keep-boot-image` 时落盘**：其 `KERNEL ../Image` 依赖同目录 Image，缺 Image 时不写该文件，避免留下引用不存在文件的配置） |
@@ -254,7 +264,7 @@ earlycon=uart8250,mmio32,0x11000000
 
 | 区域 | 操作 |
 | --- | --- |
-| p4 `kernel`（30 MiB） | **覆盖**：写入 `H5000M-debian13-kernel.bin`（原 OpenWrt FIT 被替换） |
+| p4 `kernel`（30 MiB） | **覆盖**：写入 `<BOARD_UPPER>-debian13-kernel.bin`（原 OpenWrt FIT 被替换） |
 | p5 `rootfs`（~7.24 GiB） | **覆盖**：格式化为引导层 ext4 并写入 `/sbin/init` + busybox + `rootfs.squashfs` + overlay 目录（原 OpenWrt SquashFS/overlay 全部被替换；p5 分区本身 Start/End 不变，首启在线扩容至 ~7.2 GiB） |
 | p1 / p2 / p3 | **零写入** |
 | GPT（主 + 备份） | **零写入**（不重建、不重排） |
@@ -319,8 +329,8 @@ cat /proc/mounts   > /tmp/h5000m-backup/mounts.txt
 
 ```
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/H5000M-debian13-kernel.bin \
-  --rootfs-img out/H5000M-debian13-rootfs.bin \
+  --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
+  --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin \
   --backup-full /tmp/h5000m-full.img        # 整盘
   # 或 --backup-p45 /tmp/h5000m-p45          # 仅 p4/p5
 ```
@@ -364,7 +374,7 @@ cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
 findmnt /                    # overlay（upperdir=/overlay/upper ...）
 findmnt /sq                  # squashfs ro
 df -h /                      # overlay 可写容量（首启扩容后 ~7.2 GiB）
-systemctl status h5000m-grow-rootfs h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+systemctl status router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
 
 # 5. 网络/服务自检
 curl -sI http://192.168.88.1    # WebUI 可达
@@ -379,8 +389,8 @@ build/build-kernel.sh        → out/kernel/Image + mt7987a-hiveton-h5000m.dtb +
 build/build-rootfs.sh        → out/rootfs/rootfs/（RootFS 树；默认另打 tar.zst，--skip-tar 跳过）
 build/make-squashfs.sh       → out/rootfs/rootfs.squashfs（只读基础系统，zstd，~120 MiB）
 build/make-boot.sh           → out/boot/boot.scr（备用引导）
-build/make-sd-image.sh       → out/H5000M-debian13-kernel.bin（→ p4）
-                               out/H5000M-debian13-rootfs.bin（→ p5 引导层 ext4）
+build/make-sd-image.sh       → out/<BOARD_UPPER>-debian13-kernel.bin（→ p4）
+                               out/<BOARD_UPPER>-debian13-rootfs.bin（→ p5 引导层 ext4）
 scripts/install-emmc.sh      → 校验现有分区 → 仅写 p4 / p5 → 校验
                                （--rootfs-squashfs 为运行中在线升级：原子替换 SquashFS）
 ```

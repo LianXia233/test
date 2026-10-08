@@ -1,16 +1,26 @@
 # 构建指南
 
-> ## ⚠️ 警告：项目仍在测试中，**AP3000M 尚未跑通**
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
 > 本文档描述的多板构建流程**尚未实机验证通过**。当前状态：
 >
-> - **H5000M (MT7987A)**：⚠️ **云编译通过，实机尚未验证** —— `c21fc66` 只说明能构建出
->   镜像，刷写后能否启动、网络能否连通**均未验收**
-> - **AP3000M (MT7981B)**：❌ **云编译失败** —— 内核编译阶段连续失败两次
->   （缺 Kconfig 注册 → 后修复但 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
->   最新修复 `c3f861d` 仍在等待 CI 验证。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功（`c3f861d`） | ❌ **失败**（根因已修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159`（`c3f861d`）的内核 job 已通过）；③ **RootFS
+>   构建阶段**失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺
+>   `mediatek/mt7981_*.bin` 而非子目录，上游 404；且漏了主固件 `mt7981_wm.bin`），
+>   **根因已定位并已修复**（实跑拉取 3/3 成功），待重跑 CI 复验。
+>   **当前无任何可用产物**。
+> - **H5000M**：云编译通过仅说明能构建出镜像，刷写后能否启动、网络能否连通**均未验收**。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > **请勿用本文档产出的镜像刷机**（两板均不例外）。根因与修复记录见
 > [../CHANGELOG.md](../CHANGELOG.md) 的「AP3000M 首次/二次云编译失败」条目。
@@ -62,7 +72,7 @@ sudo apt-get install -y \
 ```bash
 git clone <本项目> && cd <本项目>
 sudo bash scripts/build.sh \
-  --board h5000m \                 # 或 ap3000m（⚠️ 尚未跑通）
+  --board h5000m \                 # 或 ap3000m
   --kernel-version 6.18.54 \
   --out /path/to/out
 ```
@@ -145,15 +155,18 @@ sudo bash build/build-rootfs.sh \
 
 脚本流程：
 
-1. 先执行 `scripts/fetch-firmware.py` 拉取 MT7992 / MT7987 PHY 固件到 `build/rootfs/firmware/`；
+1. 先执行 `scripts/fetch-firmware.py` 拉取**本板所需**固件到 `build/rootfs/firmware/`
+   （H5000M：6 个 MT7992 Wi-Fi + 2 个 MT7987 2p5g PHY；AP3000M：2 个 MT7981 wmac 固件）；
 2. debootstrap：宿主为 arm64/aarch64 时走 **native** 模式一次完成（免 qemu 翻译）；
    否则 `--arch=arm64 --foreign trixie <rootfs>` + qemu 第二阶段（x86 宿主兼容路径）；
    传 `--apt-cache-dir` 可复用已下载的 `.deb`（见 §3.7.1）；
 3. 拷贝 `qemu-aarch64-static`，`chroot` 内完成第二阶段；
 4. 配置 Debian 13 软件源（`deb.debian.org` stable），`apt-get update`；
 5. 安装 `build/rootfs/packages.list` 中全部软件包；
-6. 应用 `rootfs-overlay/` 覆盖层（网络配置、Linux-Router 集成、systemd 服务、`/etc/fstab` 使用 `PARTLABEL=rootfs`）；
-   并把下载的 MT7992 / MT7987 PHY 固件安装到 Debian firmware 路径，校验 8 个文件非空；
+6. 应用 `rootfs-overlay/` 通用覆盖层，再叠加 `boards/overlay.d/<board>/` 板级层
+   （网络配置、Linux-Router 集成、systemd 服务、`/etc/fstab` 使用 `PARTLABEL=rootfs`；
+   板级层同名文件**内容**覆盖通用层，unit 名本身不带板级前缀）；
+   并把下载的固件安装到 Debian firmware 对应路径并校验非空；
 7. 集成 Linux-Router 到 `/opt/linux-router`，预初始化运行账号/数据目录/初始密码；
 8. 安装内核产物到 `/boot`、模块到 `/lib/modules`；
 9. 配置 systemd 服务 enable、SSH、locale、首次登录凭据；
@@ -194,13 +207,13 @@ sudo bash build/make-sd-image.sh \
 输出（对应现有 eMMC 分区，**不创建任何分区表**）：
 
 ```
-out/H5000M-debian13-kernel.bin        → dd 到 p4（kernel，30 MiB）
-out/H5000M-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 镜像，~152 MiB）
+out/<BOARD_UPPER>-debian13-kernel.bin        → dd 到 p4（kernel，30 MiB）
+out/<BOARD_UPPER>-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 镜像，~152 MiB）
 ```
 
-- `H5000M-debian13-kernel.bin`：内核 LZMA 压缩 + H5000M DTB 的 FIT 镜像，**与 OpenWrt 同型**
+- `<BOARD_UPPER>-debian13-kernel.bin`：内核 LZMA 压缩 + H5000M DTB 的 FIT 镜像，**与 OpenWrt 同型**
   （U-Boot 现有 `bootm` 流程原样加载），p4 无需文件系统；
-- `H5000M-debian13-rootfs.bin`：**p5 引导层 ext4 镜像**，内含：
+- `<BOARD_UPPER>-debian13-rootfs.bin`：**p5 引导层 ext4 镜像**，内含：
   - `/sbin/init`：busybox 引导脚本（挂 SquashFS → 组装 OverlayFS → pivot_root → systemd；
     OverlayFS 组装失败自动进入只读救援模式）；
   - `/usr/bin/busybox`：静态 busybox（脚本自动从 Debian mirror 下载 busybox-static arm64
@@ -235,19 +248,19 @@ bash build/make-boot.sh --out /path/to/out/boot
 ```bash
 # 方法一：引导层 ext4 镜像（推荐，SquashFS+OverlayFS 完整架构）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
-  --rootfs-img /path/to/out/H5000M-debian13-rootfs.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
+  --rootfs-img /path/to/out/<BOARD_UPPER>-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 
 # 方法二：rootfs tar.zst（兼容模式：p5 直接展开为纯 Debian 树，无引导层/只读根）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
   --dev /dev/mmcblk0 [--yes]
 
 # 方法三：在线升级（系统已以 SquashFS+OverlayFS 架构运行时，无需重启/失联）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs-squashfs /path/to/out/rootfs/rootfs.squashfs \
   --dev /dev/mmcblk0 [--yes]
 ```
@@ -270,17 +283,32 @@ sudo bash scripts/install-emmc.sh \
 
 ## 3.7 GitHub Actions 云编译
 
-推送后不会自动触发（`workflow_dispatch` 手动触发），到 Actions 页面 Run workflow 或
-`gh workflow run build.yml`。两个 job：
+推送后不会自动触发（仅手动 `workflow_dispatch` 或 `workflow_call`）。**三层入口，实现只有一份**：
 
-1. **build-kernel**：编译 6.18 内核（含源码缓存）+ 生成 boot.scr，上传 artifact；
-2. **build-image**：下载内核产物，`debootstrap` 构建 Debian 13 RootFS 树（`--skip-tar`），
-   `make-squashfs.sh` 生成只读基础系统（zstd），`make-sd-image.sh` 生成引导层镜像与 FIT，
-   组装 `H5000M-debian13-sysupgrade.bin`（≈164 MiB），chown 修正产物属主后上传 artifact
-   并发布 Release。
+| 入口 | 文件 | board | 命令 |
+| --- | --- | --- | --- |
+| H5000M 专用（推荐） | `build-h5000m.yml` | 写死 `h5000m` | `gh workflow run build-h5000m.yml` |
+| AP3000M 专用（推荐） | `build-ap3000m.yml` | 写死 `ap3000m` | `gh workflow run build-ap3000m.yml` |
+| 多板合一 | `build.yml` | `board` 输入 | `gh workflow run build.yml -f board=ap3000m` |
+
+两个 `build-<board>.yml` 是**薄壳**：不含任何 job 定义，仅以
+`uses: ./.github/workflows/build.yml` 调用基座并写死 `board`。这样 Actions 侧边栏
+一眼可见是哪个板卡、并发组/Release tag/Artifact 名按板卡隔离、误选板卡的风险归零
+（两板内核配置与 DTB 不同，选错会出砖）；而实现只有一份，改一处两板同时生效。
+薄壳须显式授予 `contents: write`（`workflow_call` 权限只收窄不放大，否则建 Release 失败）。
+
+基座 job 有两个：
+
+1. **内核 6.18**：解析板级参数（`boards/board-lib.sh` → job outputs）→ 编译内核
+   （含源码 tar 缓存 + ccache）+ 生成 boot.scr → 整理为扁平目录并上传 artifact；
+2. **RootFS + 刷写包**：下载内核产物 → 校验关键内核模块已产出 → 交叉编译 mt5700 →
+   `debootstrap` 构建 Debian 13 RootFS 树（`--skip-tar`）→ `make-squashfs.sh` 生成只读
+   基础系统（zstd）→ `make-sd-image.sh` 生成引导层镜像与 FIT → 组装
+   `<BOARD_UPPER>-debian13-sysupgrade.bin`（≈164 MiB）→ chown 修正产物属主 →
+   上传 artifact 并发布 Release。
 
 发布成功后自动执行历史 Release 清理：按发布时间倒序保留最近 `keep_releases` 个
-（`workflow_dispatch` 输入，默认 `3`，填 `0` 关闭），其余 Release 连同资产与 tag 一并
+（手动触发的输入，默认 `3`，填 `0` 关闭），其余 Release 连同资产与 tag 一并
 删除。设计要点：
 
 | 保护措施 | 作用 |
@@ -301,8 +329,8 @@ sudo bash scripts/install-emmc.sh \
 > `/etc/<board>-initial-credentials`（0600）。仓库为 public，历史上传过的凭据文件任何人
 > 都可下载，若曾使用过非默认口令应立即轮换。
 
-产物从 Actions 页面「Artifacts」下载：`<BOARD_UPPER>-debian13-release`（触发时用
-`workflow_dispatch` 的 `board` 输入选择板卡，缺省 `h5000m`）
+产物从 Actions 页面「Artifacts」下载：`<BOARD_UPPER>-debian13-release`
+（板卡由入口决定：薄壳已写死；合一入口用 `board` 输入选择，缺省 `h5000m`）
 （kernel.bin、rootfs.bin、rootfs.squashfs、sysupgrade.bin、boot.scr、初始凭据）。
 
 ### 3.7.1 编译提速设计（实测基线 → 优化）
@@ -344,31 +372,67 @@ sudo bash scripts/install-emmc.sh \
 ## 4. 内核版本说明
 
 - 默认 `6.18.54`（ImmortalWrt snapshot 当前使用的 6.18.x 系列）。
-- 主线上游内核 **不支持 MT7987A**（pinctrl/clk/eth 等驱动需 ImmortalWrt SDK 补丁），因此必须使用补丁内核；
-- MT7992 Wi-Fi：mainline mt76 已支持，无需外部驱动包。
+- 主线上游内核 **不支持 MT7987A / MT7981B**（pinctrl/clk/eth 等驱动需 ImmortalWrt SDK 补丁），
+  因此必须使用补丁内核；
+- Wi-Fi：H5000M 的 MT7992 与 AP3000M 的 MT7981B 内置 wmac 均由 mainline mt76 支持，
+  无需外部驱动包；AP3000M 另有板级源码层 `airpi-gpio-fan`（GPIO 软 PWM 风扇驱动）。
 
 ## 5. 固件获取
 
 ```bash
-python3 scripts/fetch-firmware.py --out build/rootfs/firmware
+python3 scripts/fetch-firmware.py --out build/rootfs/firmware [--board h5000m|ap3000m]
 ```
 
-- MT7992：linux-firmware `mediatek/mt7996/mt7992_*_23.bin`（含 dsp/eeprom/rom_patch/wa/wm）
-- MT7987 2p5g PHY：linux-firmware `mediatek/mt7987/i2p5ge-phy-*.bin`
+| 板卡 | 固件 | 来源（linux-firmware） |
+| --- | --- | --- |
+| H5000M | MT7992 Wi-Fi（6 个：dsp / eeprom ×2 / rom_patch / wa / wm） | `mediatek/mt7996/mt7992_*_23.bin` |
+| H5000M | MT7987 内置 2.5G PHY（2 个） | `mediatek/mt7987/i2p5ge-phy-*.bin` |
+| AP3000M | MT7981B wmac（2 个） | `mediatek/mt7981/mt7981_{wa,rom_patch}.bin` |
 
-该脚本使用 Python 标准库（urllib），跨平台（Windows/macOS/Linux 均可运行）。RootFS 构建流程会自动调用它，
-随后将 6 个 MT7992 文件和 2 个 MT7987 PHY 文件安装至 RootFS 并检查存在且非空；此处手动运行仅用于离线预取/刷新缓存。
+> AP3000M 的 Wi-Fi EEPROM **不走固件文件**：由 DTS 的 `nvmem-cells` 从 eMMC
+> factory 分区（`eeprom@0`）读取（见 `dts/mt7981b-airpi-ap3000m.dts`）。
 
-## 6. 验证清单（构建后）
+该脚本使用 Python 标准库（urllib），跨平台（Windows/macOS/Linux 均可运行），并按板卡
+`BOARD_EXTRA_FIRMWARE` 挑选清单。RootFS 构建流程会自动调用它，随后将固件安装至 RootFS
+并检查存在且非空；此处手动运行仅用于离线预取/刷新缓存。
 
-- [ ] `Image` 为 arm64 且含 MT7987A 驱动（`strings Image | grep -i mt7987`）
-- [ ] `mt7987a-hiveton-h5000m.dtb` 生成成功
-- [ ] `H5000M-debian13-kernel.bin` 首 4 字节为 FIT 魔数 `d0 0d fe ed`，且体积 < 30 MiB
+## 6. 验证清单（构建后，按板卡各查一遍）
+
+**通用项**（两板相同）：
+
+- [ ] `Image` 为 arm64（`file Image` 显示 `ARM aarch64`）
+- [ ] `Image` 含本板 SoC 驱动：`strings Image | grep -i mt7987`（H5000M）/
+      `strings Image | grep -i mt7981`（AP3000M）
+- [ ] `kernel/` 下存在 `<BOARD_DTB>.dtb`
+- [ ] `<BOARD_UPPER>-debian13-kernel.bin` 首 4 字节为 FIT 魔数 `d0 0d fe ed`，且体积 < 30 MiB
 - [ ] `rootfs.squashfs` 首 4 字节为 `hsqs`，`unsquashfs -s` 显示 Compression zstd / Block 262144
-- [ ] `H5000M-debian13-rootfs.bin` 可 `e2fsck -fn` 通过；debugfs 确认含
+- [ ] `<BOARD_UPPER>-debian13-rootfs.bin` 可 `e2fsck -fn` 通过；debugfs 确认含
       `/sbin/init`、`/usr/bin/busybox`、`/squashfs/rootfs.squashfs`、`/overlay/{upper,work,merged}`
-- [ ] rootfs 内 `/usr/lib/firmware/mediatek/mt7996/` 的 6 个 MT7992 文件与 `mt7987/` 的 2 个 PHY 文件齐全且非空（构建脚本会强制检查）
 - [ ] rootfs 内 Linux-Router 服务已 enable；`/usr/local/sbin/router-grow-rootfs` 存在
 - [ ] 首启相关服务已 enable：`router-init` / `router-fancontrol` / `router-grow-rootfs` /
       `router-led-boot` / `router-led`（unit 名**不带板级前缀**，板级差异走同名内容覆盖）
-- [ ] `H5000M-debian13-sysupgrade.bin` 体积 ≤ 600 MiB（当前 ≈164 MiB）
+- [ ] `kernel/kernel-<board>-soc-options.txt` 存在（SoC 选项快照，按板隔离，避免 artifact 互相覆盖）
+- [ ] `<BOARD_UPPER>-debian13-sysupgrade.bin` 体积 ≤ 600 MiB（当前 ≈164 MiB）
+
+**板级项**：
+
+| 板卡 | 固件检查 | DTB 检查 |
+| --- | --- | --- |
+| H5000M | `/usr/lib/firmware/mediatek/mt7996/` 的 6 个 MT7992 文件 + `mt7987/` 的 2 个 2p5g PHY 文件齐全且非空（构建脚本强制检查） | dtb 名 `mt7987a-hiveton-h5000m.dtb` |
+| AP3000M | `/usr/lib/firmware/mediatek/mt7981/` 的 wmac 固件齐全且非空 | dtb 名 `mt7981b-airpi-ap3000m.dtb`；风扇模块 `airpi_gpio_fan.ko` 已产出 |
+
+> **AP3000M 特别说明**：`airpi_gpio_fan` 是**板级内核源码层**
+> （`kernel/files-boards/ap3000m/drivers/hwmon/airpi-gpio-fan/`），必须在
+> `drivers/hwmon/` 下**同时**注册 `Makefile` 与 `Kconfig` 两处 —— 只注册 Makefile 会让
+> 符号不存在、`.config` 的 `=m` 被 `olddefconfig` **静默丢弃**（2026-10-09 两次 CI 失败
+> 的真实根因，且两次原因不同）。该不变量由
+> `scripts/tests/test-board-kconfig-registration.sh` 在质量门强制校验。
+
+**待实机复核**（云编译**测不到**，必须上机）：
+
+- [ ] 真实 GPT 分区表（`sgdisk -p`）与 `boards/<board>.board` 的
+      `BOARD_P4_SECTORS_*` / `BOARD_P5_SECTORS_START` 是否一致
+      （不一致时 `install-emmc.sh` 会硬拦拒绝刷写，届时改 board 文件即可）
+- [ ] U-Boot `bdinfo` 实际地址与 `BOARD_FIT_LOAD_ADDR`（`0x46000000`）是否冲突
+- [ ] AP3000M 风扇：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、
+      `fangpio=540` 是否准确；8GB 版 `pwm1` 的实际 hwmon 序号

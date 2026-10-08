@@ -1,14 +1,24 @@
 # Hiveton H5000M Debian 13 路由器系统 — 架构说明
 
-> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
-> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
->   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
-> - **H5000M (MT7987A)：⚠️ 云编译通过，但实机尚未验证** —— `c21fc66` 只是"能构建出镜像"，
->   刷写后能否正常启动、网络能否连通、功能是否正常**均未验收**。多板化改造后的
->   回归同样未做。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159` 的**内核 job 已通过**）；③ **RootFS 构建阶段**
+>   失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺 `mediatek/mt7981_*.bin` 而非
+>   子目录；且漏了主固件 `mt7981_wm.bin`），**根因已定位并已修复**（实跑拉取 3/3 成功），
+>   待重跑 CI 复验。**当前无任何可用产物**。
+> - **H5000M**：全链路云编译通过（`c21fc66`），但该镜像**从未在真机刷写验收** ——
+>   能否启动、网络能否连通、功能是否正常**均未验证**；多板化改造后的回归同样未做。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
 > `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
@@ -32,7 +42,7 @@ p5 引导层 ext4（root=PARTLABEL=rootfs）：/sbin/init（busybox）
   ↓
 Debian 13 (Trixie) ARM64 RootFS（systemd，根 = OverlayFS merged）
   ↓
-基础网络初始化（h5000m-router-init.service）
+基础网络初始化（router-init.service）
   ├── NetworkManager（管理网口、WAN/LAN bridge 与 Wi-Fi AP profiles）
   ├── dnsmasq（DHCP Server + DNS Forwarder + IPv6 RA，由 systemd 后续启动）
   └── nftables（NAT / 防火墙）
@@ -79,7 +89,7 @@ exec busybox env -i /sbin/init               # 交棒 systemd（Debian 正常启
 | 系统完整性 | 基础系统在 SquashFS 中**只读不可变**，意外断电/写坏不影响系统本体 |
 | 配置持久化 | `/etc` `/var` `/opt` 等全部写入经 OverlayFS 落 p5 upper，重启保留 |
 | 在线升级 | 仅替换 `/tmpold/squashfs/rootfs.squashfs` + 刷 p4 FIT；overlay 数据零丢失；旧版自动备份 `.bak`（mv 回即回退） |
-| 空间在线扩容 | `h5000m-grow-rootfs.service`（oneshot）首启 `findfs PARTLABEL=rootfs` + `resize2fs` 把引导层扩到 ~7.2 GiB |
+| 空间在线扩容 | `router-grow-rootfs.service`（oneshot）首启 `findfs PARTLABEL=rootfs` + `resize2fs` 把引导层扩到 ~7.2 GiB |
 | 防砖救援 | OverlayFS 组装失败 → **只读救援模式**：直接以 SquashFS 为根 + tmpfs upper，可 SSH 登录修复 overlay |
 
 ### 2.4 体积收益
@@ -104,7 +114,7 @@ exec busybox env -i /sbin/init               # 交棒 systemd（Debian 正常启
 | UART | 8250 (mainline) | 115200n8，earlycon |
 | GPIO / LED / 按键 | gpio-leds / gpio-keys（mainline） | Reset = GPIO1，WPS = GPIO0 |
 | PWM 风扇 | pwm-mediatek（补丁）+ pwm-fan | pwm1 50kHz；`/sys/class/hwmon/*/pwm1` |
-| 风扇温控 | h5000m-fancontrol（systemd） | 自动曲线 / 手动 PWM / 故障保护 |
+| 风扇温控 | router-fancontrol（systemd） | 自动曲线 / 手动 PWM / 故障保护 |
 
 ### 3.1 WAN / LAN 物理确认
 
@@ -134,7 +144,7 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 
 | 功能 | 唯一控制者 | 底层实现 |
 | --- | --- | --- |
-| 首启默认 WAN/LAN/Bridge | h5000m-router-init | NetworkManager / Linux bridge |
+| 首启默认 WAN/LAN/Bridge | router-init | NetworkManager / Linux bridge |
 | WebUI 发起的网络变更 | Linux-Router agent | NetworkManager / nftables / dnsmasq |
 | Wi-Fi AP | 初始化脚本创建默认 profile；NetworkManager 管理 | wpa_supplicant AP 模式（hostapd 预装但默认不启用） |
 | Wi-Fi 驱动 | Linux Kernel | mt76 |
@@ -149,8 +159,8 @@ MAC 分配规则（沿用 ImmortalWrt）：LAN MAC 由 eMMC CID 生成，WAN MAC
 
 ### 4.2 组件边界
 
-- 默认 AP 使用 `H5000M-AP-2G` / `H5000M-AP-5G` NetworkManager profiles，并桥接至 `br-lan`；不要同时启用 hostapd 管理相同无线接口。
-- Linux-Router 面板识别系统首启 AP profiles `H5000M-AP-2G` / `H5000M-AP-5G`，并可关闭它们；用户从面板启动自定义热点时，`DebianRouterHotspot` 以 `br-lan` 从属接口运行，不启用 NetworkManager `shared` DHCP/NAT，避免与 dnsmasq/nftables 重复提供服务。停止自定义热点后恢复对应系统 AP。
+- 默认 AP 使用 `ROUTER-AP-2G` / `ROUTER-AP-5G` NetworkManager profiles，并桥接至 `br-lan`；不要同时启用 hostapd 管理相同无线接口。
+- Linux-Router 面板识别系统首启 AP profiles `ROUTER-AP-2G` / `ROUTER-AP-5G`，并可关闭它们；用户从面板启动自定义热点时，`DebianRouterHotspot` 以 `br-lan` 从属接口运行，不启用 NetworkManager `shared` DHCP/NAT，避免与 dnsmasq/nftables 重复提供服务。停止自定义热点后恢复对应系统 AP。
 - ❌ systemd-networkd / dhcpcd 管理任何接口（Debian 安装阶段即禁用）
 - ❌ systemd-resolved 占用 :53（禁用，DNS 统一交给 dnsmasq）
 - ❌ firewalld / ufw（不安装，nftables 为唯一防火墙）
@@ -184,7 +194,7 @@ LAN（eth0，远离电源的 2.5G 口，192.168.88.1/24）
             └── Wi-Fi 客户端从 LAN DHCP 获取地址、使用 LAN 网关
 ```
 
-**Wi-Fi 与 LAN 同网段**：Wi-Fi AP（MT7992 2.4G/5G）作为 `br-lan` 的从属接口（NM 连接 `H5000M-AP-2G/5G`，AP 模式由 wpa_supplicant 提供），与有线 LAN 处于同一二层网络；由同一 dnsmasq 分配 192.168.88.x 地址，可访问 Internet 和 LAN 内设备，不存在独立的 Wi-Fi NAT 网络。Linux-Router 的自定义热点也桥接至 `br-lan`，而非使用它上游默认的 `ipv4.method=shared`，DHCP/DNS/NAT 继续由系统网络栈统一负责。
+**Wi-Fi 与 LAN 同网段**：Wi-Fi AP（MT7992 2.4G/5G）作为 `br-lan` 的从属接口（NM 连接 `ROUTER-AP-2G/5G`，AP 模式由 wpa_supplicant 提供），与有线 LAN 处于同一二层网络；由同一 dnsmasq 分配 192.168.88.x 地址，可访问 Internet 和 LAN 内设备，不存在独立的 Wi-Fi NAT 网络。Linux-Router 的自定义热点也桥接至 `br-lan`，而非使用它上游默认的 `ipv4.method=shared`，DHCP/DNS/NAT 继续由系统网络栈统一负责。
 
 > Wi-Fi AP 后端说明：Linux-Router 与开机初始化均通过 NetworkManager 管理 Wi-Fi AP（wpa_supplicant 实现 AP 模式）。`hostapd` 已预装，作为独立 AP 后端备用（用户可禁用 NM AP 后改用 `hostapd@.service`），但系统默认不启用 hostapd.service，避免与 NM 争抢接口。
 
@@ -195,12 +205,12 @@ LAN（eth0，远离电源的 2.5G 口，192.168.88.1/24）
   ↓
 systemd
  ├── sys-kernel 固件加载（mt7992 / mt7987 phy 固件，由内核按需加载）
- ├── h5000m-grow-rootfs.service（oneshot：首启 findfs + resize2fs 在线扩容 p5 至 ~7.2 GiB，marker 防重复）
- ├── h5000m-fancontrol.service（sysinit.target：PWM 风扇温控，温度曲线/手动/故障保护）
+ ├── router-grow-rootfs.service（oneshot：首启 findfs + resize2fs 在线扩容 p5 至 ~7.2 GiB，marker 防重复）
+ ├── router-fancontrol.service（sysinit.target：PWM 风扇温控，温度曲线/手动/故障保护）
  ├── NetworkManager（WAN/LAN 网口管理）
- ├── h5000m-router-init.service（OneShot：创建 WAN/eth2 备用 WAN/LAN/br-lan/Wi-Fi profiles，装配 nftables）
+ ├── router-init.service（OneShot：创建 WAN/eth2 备用 WAN/LAN/br-lan/Wi-Fi profiles，装配 nftables）
  │    └─ 不阻塞：每步失败仅告警继续，绝不阻止后续步骤
- ├── dnsmasq.service（After/Requires=h5000m-router-init：其完成后启动；DHCP + DNS + IPv6 RA）
+ ├── dnsmasq.service（After/Requires=router-init：其完成后启动；DHCP + DNS + IPv6 RA）
  ├── router-panel-agent.service（Linux-Router 代理，root 权限执行网络操作）
  ├── router-panel.service（WebUI，Gunicorn :80；Requires=router-panel-agent）
  └── ssh / systemd-timesyncd
@@ -213,7 +223,7 @@ systemd
 关键点：
 
 - **WAN 获取失败不阻塞 LAN**：NetworkManager 对 WAN 使用 DHCP，失败时 LAN 侧服务照常运行。
-- **Wi-Fi 失败不阻塞有线**：Wi-Fi AP 为独立 NM 连接（H5000M-AP-2G/5G），创建或启动失败仅告警。
+- **Wi-Fi 失败不阻塞有线**：Wi-Fi AP 为独立 NM 连接（ROUTER-AP-2G/5G），创建或启动失败仅告警。
 - **DHCP 失败不阻塞 WebUI**：dnsmasq 独立服务，WebUI 服务依赖的是 agent，不依赖 dnsmasq。
 - **WebUI 失败不阻塞转发**：内核转发由 sysctl + nftables 生效，与 WebUI 无关。
 - **USB WAN 晚到**：`WAN-5G` profile 首启即创建并设为 autoconnect；MT5700 hook 只请求 NetworkManager 激活，不启动第二个 DHCP 客户端。
@@ -225,7 +235,7 @@ systemd
 | 层 | 归属 |
 | --- | --- |
 | Web 管理面 | Linux-Router（WebUI → agent → 调用网络服务） |
-| 首启编排 | `h5000m-router-init.service`（默认 NetworkManager profiles 与 nftables 规则） |
+| 首启编排 | `router-init.service`（默认 NetworkManager profiles 与 nftables 规则） |
 | 运行环境 | Debian 13 / systemd |
 | 数据面 | Linux kernel（转发、NAT 由 nftables 注入） |
 | 底层执行组件 | NetworkManager、wpa_supplicant、dnsmasq、nftables、iproute2（hostapd 预装备用） |

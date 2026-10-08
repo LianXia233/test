@@ -1,14 +1,24 @@
 # 首次启动指南（复用现有 eMMC 分区，U-Boot 不改）
 
-> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
-> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
->   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
-> - **H5000M (MT7987A)：⚠️ 云编译通过，但实机尚未验证** —— `c21fc66` 只是"能构建出镜像"，
->   刷写后能否正常启动、网络能否连通、功能是否正常**均未验收**。多板化改造后的
->   回归同样未做。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159` 的**内核 job 已通过**）；③ **RootFS 构建阶段**
+>   失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺 `mediatek/mt7981_*.bin` 而非
+>   子目录；且漏了主固件 `mt7981_wm.bin`），**根因已定位并已修复**（实跑拉取 3/3 成功），
+>   待重跑 CI 复验。**当前无任何可用产物**。
+> - **H5000M**：全链路云编译通过（`c21fc66`），但该镜像**从未在真机刷写验收** ——
+>   能否启动、网络能否连通、功能是否正常**均未验证**；多板化改造后的回归同样未做。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
 > `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
@@ -23,7 +33,7 @@ Debian 13 与 OpenWrt 共用完全相同的分区布局与启动链：
 p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层 ext4：init + busybox + SquashFS + overlay）
 ```
 
-- 主引导：现有 U-Boot 从 **p4** 读取 `H5000M-debian13-kernel.bin`（FIT）并 `bootm`；
+- 主引导：现有 U-Boot 从 **p4** 读取 `<BOARD_UPPER>-debian13-kernel.bin`（FIT）并 `bootm`；
 - 根分区：内核以 `root=PARTLABEL=rootfs` 挂载 **p5**（引导层 ext4），随后 p5 上的
   `/sbin/init` 挂载只读基础系统 `rootfs.squashfs`、组装 OverlayFS（可写层 = p5 剩余空间，
   重启持久）后交棒 systemd。
@@ -38,8 +48,8 @@ p1 u-boot-env | p2 factory | p3 fip | p4 kernel（FIT） | p5 rootfs（引导层
 在 Linux 构建机生成刷写包（见 [docs/build-guide.md](build-guide.md)）：
 
 ```
-out/H5000M-debian13-kernel.bin        # → p4
-out/H5000M-debian13-rootfs.bin   # → p5（引导层：init + busybox + rootfs.squashfs + overlay）
+out/<BOARD_UPPER>-debian13-kernel.bin        # → p4
+out/<BOARD_UPPER>-debian13-rootfs.bin   # → p5（引导层：init + busybox + rootfs.squashfs + overlay）
 out/rootfs/rootfs.squashfs           # 只读基础系统（在线升级用，包含在 rootfs.bin 内）
 out/rootfs/initial-credentials.txt
 ```
@@ -67,19 +77,19 @@ sgdisk --backup=/tmp/bk/gpt.bin /dev/mmcblk0
 ```bash
 # 方法一：引导层 ext4 镜像（推荐，SquashFS+OverlayFS 完整架构）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
-  --rootfs-img /path/to/out/H5000M-debian13-rootfs.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
+  --rootfs-img /path/to/out/<BOARD_UPPER>-debian13-rootfs.bin \
   --dev /dev/mmcblk0 --yes
 
 # 方法二：rootfs tar.zst（兼容模式：p5 直接展开纯 Debian 树，无只读根/在线升级能力）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs /path/to/out/rootfs/debian13-arm64-rootfs.tar.zst \
   --dev /dev/mmcblk0 --yes
 
 # 方法三：在线升级（仅当设备已在运行 SquashFS+OverlayFS 架构；不重启、配置/数据全保留）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit /path/to/out/H5000M-debian13-kernel.bin \
+  --kernel-fit /path/to/out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs-squashfs /path/to/out/rootfs/rootfs.squashfs \
   --dev /dev/mmcblk0 --yes
 ```
@@ -103,10 +113,10 @@ sudo bash scripts/install-emmc.sh \
       → 组装 OverlayFS（lower=SquashFS，upper/work=/overlay）
       → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
   → systemd（Debian 13）
-  → h5000m-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
-  → NetworkManager + h5000m-router-init（创建 eth1 WAN、eth2 备用 WAN、br-lan、eth0 LAN 与 Wi-Fi profiles；装配 nftables）
-  → dnsmasq（After/Requires h5000m-router-init；其 oneshot 完成后启动，提供 DHCP + DNS + IPv6 RA）
-  → h5000m-fancontrol（PWM 风扇温控）
+  → router-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
+  → NetworkManager + router-init（创建 eth1 WAN、eth2 备用 WAN、br-lan、eth0 LAN 与 Wi-Fi profiles；装配 nftables）
+  → dnsmasq（After/Requires router-init；其 oneshot 完成后启动，提供 DHCP + DNS + IPv6 RA）
+  → router-fancontrol（PWM 风扇温控）
   → Linux-Router（router-panel-agent + router-panel WebUI）
   → http://192.168.88.1
 ```
@@ -123,7 +133,7 @@ sudo bash scripts/install-emmc.sh \
 | Wi-Fi | 双频 AP profiles（NetworkManager/wpa_supplicant，桥接进 br-lan）：2.4G / 5G 同名 `OWRT`，密码 `12345678`；接口/驱动晚到时由 autoconnect 重试 |
 | WebUI | http://192.168.88.1 （admin / password，见 /etc/h5000m-initial-credentials） |
 | SSH | 端口 22，root / password（仅局域网访问，WAN 侧不放行；见 /etc/h5000m-initial-credentials） |
-| LED | 参考官方固件：启动早期蓝色状态灯快闪；系统就绪后熄灭（h5000m-led.service 编排） |
+| LED | 参考官方固件：启动早期蓝色状态灯快闪；系统就绪后熄灭（router-led.service 编排） |
 
 ## 6. 首次登录
 
@@ -146,7 +156,7 @@ findmnt /sq                  # /dev/mmcblk0p5[/squashfs/rootfs.squashfs] squashf
 df -h /                      # 根可写容量 ≈ p5 引导层剩余空间（首启扩容后 ~7.2 GiB）
 lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
 ip -br addr                 # eth0 / eth1 / br-lan
-systemctl status h5000m-grow-rootfs h5000m-fancontrol h5000m-router-init dnsmasq router-panel
+systemctl status router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
 nmcli connection show
 ip route
 curl -sI http://192.168.88.1
@@ -169,10 +179,10 @@ dd if=/tmp/bk/p5.img of=/dev/mmcblk0p5 bs=4M conv=fsync status=progress
 
 ### 方式 A：USB 盘
 
-> 默认刷写包（`H5000M-debian13-kernel.bin` + `H5000M-debian13-rootfs.bin`）面向 **eMMC 复用现有分区**，
+> 默认刷写包（`<BOARD_UPPER>-debian13-kernel.bin` + `<BOARD_UPPER>-debian13-rootfs.bin`）面向 **eMMC 复用现有分区**，
 > 不再生成通用 USB/SD 镜像。如需 USB 试运行，按下述手动步骤制作（仅用于临时验证盘）。
 > 注意：tar 直接解压为**纯 Debian 树（兼容模式）**，无引导层/只读根；
-> 如需在 USB 上体验完整 SquashFS+OverlayFS 架构，可 `dd if=H5000M-debian13-rootfs.bin of=/dev/sdX1`。
+> 如需在 USB 上体验完整 SquashFS+OverlayFS 架构，可 `dd if=<BOARD_UPPER>-debian13-rootfs.bin of=/dev/sdX1`。
 
 ```bash
 # 在 PC 上制作 USB 试运行盘（警告：以下命令仅针对临时 USB 盘 /dev/sdX，

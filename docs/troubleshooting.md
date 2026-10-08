@@ -1,14 +1,24 @@
 # 故障排查
 
-> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
-> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
->   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
-> - **H5000M (MT7987A)：⚠️ 云编译通过，但实机尚未验证** —— `c21fc66` 只是"能构建出镜像"，
->   刷写后能否正常启动、网络能否连通、功能是否正常**均未验收**。多板化改造后的
->   回归同样未做。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159` 的**内核 job 已通过**）；③ **RootFS 构建阶段**
+>   失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺 `mediatek/mt7981_*.bin` 而非
+>   子目录；且漏了主固件 `mt7981_wm.bin`），**根因已定位并已修复**（实跑拉取 3/3 成功），
+>   待重跑 CI 复验。**当前无任何可用产物**。
+> - **H5000M**：全链路云编译通过（`c21fc66`），但该镜像**从未在真机刷写验收** ——
+>   能否启动、网络能否连通、功能是否正常**均未验证**；多板化改造后的回归同样未做。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
 > `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
@@ -28,7 +38,7 @@
 
 ## 2. 风扇控制
 
-> 脚本名自 2026-10-09 起为 **`router-fancontrol`**（原 `h5000m-fancontrol`）；
+> 脚本名自 2026-10-09 起为 **`router-fancontrol`**（原 `router-fancontrol`）；
 > 配置为 `/etc/default/router-fancontrol`，服务为 `router-fancontrol.service`。
 > 关键前置：`/usr/local/sbin/router-fancontrol-modprobe` 由 unit 的 `ExecStartPre` 调用。
 
@@ -63,7 +73,7 @@
 | 串口日志 `System is deadlocked on memory` panic（启动后 ~2 分钟） | 串口 OOM dump：`kmalloc-4k` 是否占数百 MB；loop 设备编号是否暴涨（loop4xx） | 2026-10-06 实机实锤并已修复：旧版救援路径无限重执行 init（437 轮 × 每轮 SquashFS 挂载泄漏）→ OOM。现版本**救援只尝试 1 次**（SquashFS 为根 + tmpfs 可写上层），失败即转串口应急 shell；见到 `降级为串口应急 shell` 提示就直接在串口手动排查 |
 | distro boot 兜底引导报 `File not found: /boot/Image` | `ls /boot/Image`（在 p5 引导层 `/boot` 内；可挂载 `/dev/mmcblk0p5` 查看） | 这属**预期**行为：该文件仅在构建时加 `make-sd-image.sh --keep-boot-image` 才落盘（默认不生成，避免镜像 +60 MiB）。需要兜底引导就带该参数重建，不需要则走主路径 p4 FIT。2026-10-09 之前是真缺陷：`extlinux.conf` 恒被写入却从不落 Image，兜底引导 100% 失败（未加参数时现已不写 extlinux.conf，二者同进同退） |
 | 根分区只读、写入报 Read-only | `findmnt /` 看 upperdir；`mount \| grep overlay` | upper/work 未挂上（引导层 p5 只读挂载？）：检查 `dmesg \| grep -i "EXT4-fs error"`，必要时 e2fsck 修复 |
-| `/overlay` 空间不足 | `df -h /`（overlay 容量 = p5 剩余）；`du -xsh /var/* \| sort -h` | 清理日志/缓存；确认 `h5000m-grow-rootfs.service` 已跑过（`systemctl status h5000m-grow-rootfs`；marker `/var/lib/h5000m-rootfs-grown`） |
+| `/overlay` 空间不足 | `df -h /`（overlay 容量 = p5 剩余）；`du -xsh /var/* \| sort -h` | 清理日志/缓存；确认 `router-grow-rootfs.service` 已跑过（`systemctl status router-grow-rootfs`；marker `/var/lib/router-rootfs-grown`） |
 | 重启后配置丢失 | overlay upper 是否持久：`ls /overlay/upper/etc/`（经 `/tmpold` 视角） | 正常情况下 `/etc` `/var` 写入自动落 upper；若为空说明 overlay 未组装成功（见救援模式行） |
 | 在线升级失败（--rootfs-squashfs） | 脚本输出；`/tmpold/squashfs/` 是否可见；`ls -la /tmpold/squashfs/rootfs.squashfs*` | 仅当系统本身是 SquashFS+OverlayFS 架构才可用（脚本会探测）；空间不足会提前报 df 检查；失败时旧版未动，`.bak` 存在则 `mv` 回退 |
 | 在线升级后想回退旧版本 | `ls /tmpold/squashfs/rootfs.squashfs.bak` | 挂载 p5：`mount /dev/mmcblk0p5 /mnt` → `mv /mnt/squashfs/rootfs.squashfs.bak /mnt/squashfs/rootfs.squashfs` → `umount /mnt` → `reboot` |
@@ -82,7 +92,7 @@
 
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| LAN 无 192.168.88.1 | `ip -br addr show br-lan`；`journalctl -u h5000m-router-init` | `systemctl restart h5000m-router-init.service`；再检查 `nmcli connection show br-lan` 与 `LAN` |
+| LAN 无 192.168.88.1 | `ip -br addr show br-lan`；`journalctl -u router-init` | `systemctl restart router-init.service`；再检查 `nmcli connection show br-lan` 与 `LAN` |
 | 客户端无 IP | `systemctl status dnsmasq`；`journalctl -u dnsmasq` | 确认仅一个 dnsmasq 实例（`pgrep -a dnsmasq`） |
 | DNS 不通 | `dig @192.168.88.1 example.com` | dnsmasq 上游：WAN DNS 或 8.8.8.8 兜底；检查 53 端口占用（`ss -lunp \| grep :53`），确保 systemd-resolved 已禁用 |
 | LAN 无法上网 | `nft list ruleset` | 确认 masquerade 规则存在；`sysctl net.ipv4.ip_forward` = 1 |
@@ -93,10 +103,10 @@
 | --- | --- | --- |
 | 无 wlan 接口 | `lspci -nnk`；`dmesg -T \| grep -Ei 'mt799|firmware|eeprom|pcie'` | 检查 PCIe/mt76 驱动绑定及固件加载；再检查 `rfkill list`。OpenWrt 上的硬件观测不代表 Debian 已验收 |
 | 固件加载失败 | `find /usr/lib/firmware/mediatek -type f -size 0`；`dmesg -T \| grep -i firmware` | 确认 MT7992 6 个文件及 MT7987 PHY 2 个文件均随 rootfs 打包；重新构建 RootFS，不是在设备上运行仓库的下载脚本 |
-| AP 未启动 | `nmcli connection show H5000M-AP-2G`；`nmcli connection show H5000M-AP-5G`；`journalctl -u NetworkManager` | 默认 AP 由 NetworkManager/wpa_supplicant 提供，不是 hostapd；检查 `wlan0`/`wlan1` 是否出现、profile 是否 autoconnect、`iw reg get` 及内核日志 |
-| 面板误报无热点 / 自定义热点和默认 AP 切换异常 | `nmcli connection show --active`；`journalctl -u router-panel-agent` | 面板通过 `LINUX_ROUTER_BRIDGED_AP_PROFILES` 识别系统 AP；`DebianRouterHotspot` 桥接到 `br-lan`，停止后恢复对应 `H5000M-AP-*` profile。确认 agent unit 环境变量与 NetworkManager profile 名称一致 |
-| Wi-Fi 客户端没有地址或重复 DHCP | `systemctl status dnsmasq`；`cat /var/lib/misc/dnsmasq.leases`；`nmcli -f connection.master,ipv4.method connection show H5000M-AP-2G` | AP 应从属 `br-lan` 且 IPv4 disabled；LAN DHCP 唯一由 dnsmasq 提供。桥接热点不要使用 `ipv4.method=shared` |
-| 客户端连不上 | `iw dev`；`iw dev <iface> station dump`；`rfkill list` | 对照 `/etc/default/h5000m-router` 的 SSID/密码与 AP profile；确认射频未软/硬阻断，并查看 NetworkManager 日志 |
+| AP 未启动 | `nmcli connection show ROUTER-AP-2G`；`nmcli connection show ROUTER-AP-5G`；`journalctl -u NetworkManager` | 默认 AP 由 NetworkManager/wpa_supplicant 提供，不是 hostapd；检查 `wlan0`/`wlan1` 是否出现、profile 是否 autoconnect、`iw reg get` 及内核日志 |
+| 面板误报无热点 / 自定义热点和默认 AP 切换异常 | `nmcli connection show --active`；`journalctl -u router-panel-agent` | 面板通过 `LINUX_ROUTER_BRIDGED_AP_PROFILES` 识别系统 AP；`DebianRouterHotspot` 桥接到 `br-lan`，停止后恢复对应 `ROUTER-AP-*` profile。确认 agent unit 环境变量与 NetworkManager profile 名称一致 |
+| Wi-Fi 客户端没有地址或重复 DHCP | `systemctl status dnsmasq`；`cat /var/lib/misc/dnsmasq.leases`；`nmcli -f connection.master,ipv4.method connection show ROUTER-AP-2G` | AP 应从属 `br-lan` 且 IPv4 disabled；LAN DHCP 唯一由 dnsmasq 提供。桥接热点不要使用 `ipv4.method=shared` |
+| 客户端连不上 | `iw dev`；`iw dev <iface> station dump`；`rfkill list` | 对照 `/etc/default/router.conf` 的 SSID/密码与 AP profile；确认射频未软/硬阻断，并查看 NetworkManager 日志 |
 | Wi-Fi EEPROM/校准告警 | `dmesg -T \| grep -Ei 'eeprom|calibration|mt799'` | 实机 OpenWrt 曾出现 `eeprom load fail, use default bin`；需在目标 Debian 上核查 factory NVMEM 与校准，不要把默认 bin 工作模式当成校准验收通过 |
 
 ## 8. WebUI / Linux-Router
@@ -128,13 +138,13 @@ dd if=/dev/mmcblk0 of=/path/to/backup/mmcblk0.img bs=4M conv=sync status=progres
 
 # 全新刷写：仅写 p4（FIT）+ p5（引导层 ext4），其余区域（GPT / p1-p3 / U-Boot / eMMC 硬件配置）不动
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/H5000M-debian13-kernel.bin \
-  --rootfs-img out/H5000M-debian13-rootfs.bin \
+  --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
+  --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin \
   --dev /dev/mmcblk0 [--backup-full /tmp/emmc-full.img] [--yes]
 
 # 在线升级（系统运行中执行，仅原子替换 p5 上的 SquashFS + 刷新 p4 FIT，配置/数据保留）
 sudo bash scripts/install-emmc.sh \
-  --kernel-fit out/H5000M-debian13-kernel.bin \
+  --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
   --rootfs-squashfs out/rootfs/rootfs.squashfs \
   --dev /dev/mmcblk0 [--yes]
 ```
@@ -149,16 +159,24 @@ sudo bash scripts/install-emmc.sh \
 
 - overlay 是否正常组装：`findmnt /` 应显示 overlay（否则见 §4 只读救援模式）
 - `/var/lib/linux-router/network.json` 是否存在
-- NetworkManager `nmcli connection show` 中 `H5000M-AP-2G`、`H5000M-AP-5G`、`WAN`、`WAN-5G`、`LAN` 与 `br-lan` profiles 是否存在并按预期 autoconnect
+- NetworkManager `nmcli connection show` 中 `ROUTER-AP-2G`、`ROUTER-AP-5G`、`WAN`、`WAN-5G`、`LAN` 与 `br-lan` profiles 是否存在并按预期 autoconnect
 
 ## 12. 云编译（GitHub Actions）
 
+> 当前真实状态（含 run id / job / 步骤级证据）见 [ci-status.md](ci-status.md)。
+> 排查时先看**失败的是哪个 job 的哪个步骤** —— 例如「内核 job ✅ 通过、RootFS job ❌ 失败」
+> 与「整轮 run 失败」是完全不同的两件事；三次失败的阶段各不相同，不要套用上次根因。
+
 | 症状 | 检查 | 处理 |
 | --- | --- | --- |
-| Actions 页面没有可触发的运行 | workflow 仅 `workflow_dispatch` | 手动 Run workflow，或 `gh workflow run build.yml`（推送不会自动编译） |
+| Actions 页面没有可触发的运行 | workflow 仅 `workflow_dispatch` / `workflow_call` | 手动 Run workflow，或 `gh workflow run build-h5000m.yml` / `gh workflow run build-ap3000m.yml`（推送不会自动编译） |
+| 触发瞬间报 `Invalid input` / 输入为空 | 薄壳 `with:` 传了 `build.yml` 的 `workflow_call.inputs` 未声明的项 | `workflow_call` 的 inputs **不会**从 `workflow_dispatch` 继承，必须在 `build.yml` 里逐个重新声明；由 `scripts/tests/test-workflow-board-callchain.sh` 在质量门拦截 |
+| 薄壳触发的 Release 步骤 403 / 无权限 | 薄壳 job 的 `permissions.contents` | 调用方必须显式 `contents: write`（`workflow_call` 权限只收窄不放大）；测试已钉住 |
 | ARM64 runner 一直排队 / 拉不起来 | job 长时间 queued | 勾选 `force_x86_runner` 重跑（回退 x86_64：交叉编译 + qemu 第二阶段，耗时回到 2 小时量级） |
 | RootFS 步骤日志 `构建模式：foreign` | 期望 native 却走了 qemu 路径 | job 实际跑在 x86 runner 上（`uname -m` 非 arm64）；确认未勾选回退且 runner 标签为 `ubuntu-24.04-arm` |
 | `Unknown suite trixie` / debootstrap 报套件不存在 | runner 镜像自带 debootstrap 过旧 | workflow 内置预检会自动装 Debian 上游 debootstrap；若仍失败检查能否访问 `deb.debian.org` |
+| **`[WARN] CONFIG_<SYM> 未启用` 且 40 余秒即终止** | 板级内核源码层的符号是否真的存在 | **这是最坑的一类**：符号不存在时 `make olddefconfig` 会**静默丢弃** `.config` 里的 `=m`，报错文案还指向"补丁未生效"，方向是错的。逐项核对：①`drivers/<subsys>/Kconfig` 里是否有 `source` 该驱动的 Kconfig（**只注册 Makefile 不够**）；②`depends on` 里的每个符号是否真是 Kconfig 符号（如 `HRTIMER` **不是**，内核只有 `HIGH_RES_TIMERS`）—— `grep -r '^config <SYM>' --include=Kconfig` 实证 |
+| 同类 WARN 改一次仍复现 | 两次根因**可能不同而症状完全相同** | 2026-10-09 实测：第一次是缺 Kconfig 注册，修完第二次是 `depends` 引用非 Kconfig 符号，报错一字不差。不要假设"同一个原因"，每次都要重新实证。`scripts/tests/test-board-kconfig-registration.sh` 已把两类陷阱都钉住 |
 | 内核编译耗时没有下降 | 日志末尾 `ccache 统计` | 看 Hits/Cacheable 比例：首次必然 miss；若二次仍为 0 命中，检查 cache key（补丁/dts/配置/脚本任一改动都会换 key） |
 | `.deb` 下载仍然很慢 | 日志是否有「预置 N 个缓存 .deb」 | 无则说明 apt 缓存未命中（`packages.list` 变更会换 key）；属首次或清单变更后的正常行为 |
 | artifact 上传报 EACCES | 产物属主 | workflow 已有 chown 步骤；本地复现时 `sudo chown -R $(id -u):$(id -g) out` |

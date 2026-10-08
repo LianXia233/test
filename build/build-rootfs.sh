@@ -317,12 +317,16 @@ case "$BOARD" in
       mt7987/i2p5ge-phy-pmb.bin
     ) ;;
   ap3000m)
-    # MT7981B 内置 wmac：驱动按 SOC 名在 mediatek/mt7981/ 下查找 WA 与 ROM patch。
-    # EEPROM（MAC / 校准数据）不经固件文件，由 DTS nvmem-cells 从 eMMC factory
-    # 分区读取（dts/mt7981b-airpi-ap3000m.dts 的 &wifi nvmem-cells）。
+    # MT7981B 内置 wmac：驱动按**字面常量**在 mediatek/ 下**平铺**查找
+    # （mainline mt7915.h：MT7981_FIRMWARE_WA / _WM / MT7981_ROM_PATCH），
+    # 即 mediatek/mt7981_wa.bin —— **不是** mediatek/mt7981/ 子目录。
+    # 三者缺一不可：WA 是常驻固件、WM 是主固件、ROM patch 是启动补丁。
+    # EEPROM（MAC / 校准）不经固件文件，由 DTS nvmem-cells 从 eMMC factory 读取
+    # （dts/mt7981b-airpi-ap3000m.dts 的 &wifi nvmem-cells）。
     REQUIRED_FIRMWARE=(
-      mt7981/mt7981_wa.bin
-      mt7981/mt7981_rom_patch.bin
+      mt7981_wa.bin
+      mt7981_wm.bin
+      mt7981_rom_patch.bin
     ) ;;
   *) die "板级 $BOARD 缺少固件白名单，请在 build-rootfs.sh 的 case 中补充" ;;
 esac

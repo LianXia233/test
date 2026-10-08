@@ -4,6 +4,263 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 修复 AP3000M 第三次云编译失败（MT7981 固件路径 + 清单双错）+ docs 全面按实际更新
+
+**触发**：用户要求「docs 里所有文档，根据实际更新」。
+
+核对远端真实 CI 的过程中，不但发现**文档与事实相反**，还**查出了第三次失败的真根因**，
+并顺手建立了防止再次漂移的机制。
+
+#### 一、结论反转 + 三次失败的精确画像
+
+查 GitHub Actions API 逐 job 核对：
+
+| run | 提交 | 真实结论 |
+| --- | --- | --- |
+| 37840375623 | `a8e73ce` | ❌ 内核 job 失败（46 s） |
+| 37841719136 | `e9c1594` | ❌ 内核 job 失败（44 s） |
+| **37843516159** | **`c3f861d`** | **内核 job ✅ 通过**（前两次修复生效）；**RootFS + 刷写包 job ❌ 失败**（`构建 Debian 13 RootFS` 步骤，1 min 46 s） |
+
+即：**三次失败、三个阶段各不相同**。文档当时仍写着「内核编译阶段连续失败两次」，
+既漏了内核已通过这一关键进展，也漏了新增的 RootFS 阶段失败。全部 10 处按 job 维度重写。
+
+> 期间还实测到一次「文档刚写完就过期」：本轮中途文档写的是「RootFS 进行中」，
+> 随后该 job 转为失败 —— 这恰好印证了「状态必须收敛到单一真源 + 机械校验」的必要性。
+
+#### 二、🔴 修复第三次失败根因：MT7981 固件「路径 + 清单」双错
+
+`scripts/fetch-firmware.py` 的 `ap3000m` 固件集有两处真实错误，构成 404：
+
+| # | 错误 | 实证 | 后果 |
+| --- | --- | --- | --- |
+| 1 | 路径写成 `mediatek/mt7981/mt7981_*.bin`（**子目录**） | 内核 `mt7915.h` 用**字面常量**：`#define MT7981_FIRMWARE_WA "mediatek/mt7981_wa.bin"` —— **平铺在 `mediatek/` 下**。gitlab 上游对子目录路径返回 **404** | 固件拉取失败、RootFS 构建终止 |
+| 2 | 清单**漏了 `mt7981_wm.bin`**（**主固件**） | 同上头文件：`MT7981_FIRMWARE_WM "mediatek/mt7981_wm.bin"` 为驱动加载必需 | 即便路径修对仍缺件 → 实机 `mt7915e` probe 必报 `-ENOENT` |
+
+**修复**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/fetch-firmware.py` | 路径改平铺；清单补齐 3 件（`wa` / `wm` / `rom_patch`）；`dest` 改 `mediatek`；补入三个文件的**真实 sha256** 白名单（494256 / 2054688 / 9824 字节）；写明「内核用字面常量，不是按 SoC 建子目录」的根因注释 |
+| `build/build-rootfs.sh` | `REQUIRED_FIRMWARE` 的 `ap3000m` 分支同步为平铺 3 件，并注明「缺一不可：WA 常驻固件 / WM 主固件 / ROM patch 启动补丁」 |
+
+**验证**：实跑 `fetch-firmware.py --board ap3000m` → **3/3 下载成功，sha256 与白名单逐项匹配**。
+
+> **反直觉点（已写入注释与 docs）**：文件不在子目录，而在 `mediatek/` 平铺 ——
+> 与 H5000M 的 MT7992（`mediatek/mt7996/` 子目录）命名习惯不同。靠"看起来合理"猜路径必翻车，
+> 必须回查内核头文件的字面常量、并对上游逐项 HEAD 核实存在性。
+
+#### 三、建立 CI 状态单一真源 `docs/ci-status.md`
+
+**根因不是"忘了改"，而是结构问题**：一条状态结论散落在 README + 7 篇 docs + 2 个
+workflow 注释里，一次 CI 变化要改 10 处，必然漂移。
+
+新增 `docs/ci-status.md`（含稳定锚点 `<a id="ci-status">`）：当前结论三维状态表 /
+Run 明细（含 **job 级结论**）/ 历史参照 Run / 三次失败根因对照 / 待验证清单 / 维护约定。
+
+#### 四、新增回归测试 `scripts/tests/test-docs-ci-status.sh`（16 项）
+
+**五轮负向验证打回，暴露五个"看似正确实则漏检"的写法**（全部记录在脚本注释里）：
+
+| 轮 | 错误写法 | 后果 | 修正 |
+| --- | --- | --- | --- |
+| 1 | 同行出现 run id 与 ✅ 即判乐观表述 | 误伤 README 里「内核 job 已 ✅ 通过」这条**正确**陈述 | 黑名单只留「实机/生产/跑通/基线」语义 |
+| 2 | 把「云编译成功 ≠ 实机可用」当乐观表述 | 误伤**安全警告本身** | 排除否定式结构 |
+| 3 | `实机可用[^性]` | 连「不等于实机可用」都匹配 | 该规则废弃 |
+| 4 | 乐观表述的否定词过滤按**整行**判定 | 表格右列写「实机未验证」，把左列新注入的「✅ 实机已验证，已跑通」一起放行 | 判定窗口**锚定在命中词 ±16 字符** |
+| 5 | scope 守卫「含 ❌/失败 且无通过语义」即违规 | 误伤「三次失败，三个阶段各不相同…内核 job 已通过」这类**正确叙述** | 只匹配「(云编译\|整轮)\s*(失败\|❌)」断言句式 |
+| 6 | 板卡状态表「含 ❌ 即违规」 | 把**正确内容**「内核 ✅ \| RootFS ❌」判为违规 | **按列切分**，只看内核列 |
+
+> 教训（已写入脚本头注）：**测试因误报被绕过，比没有测试更糟**；漏检的守卫等于没写。
+> 本脚本 5 项负向全部实测可拦住，且基线不被误伤。
+
+#### 五、板级无关化收尾：修正大量单体名残留
+
+| 类别 | 文档旧值（错） | 实际值（已改） |
+| --- | --- | --- |
+| systemd unit | `h5000m-router-init.service` / `h5000m-fancontrol` / `h5000m-grow-rootfs` / `h5000m-led(-boot)` | `router-*.service`（与 `rootfs-overlay/etc/systemd/system/` 实际文件比对确认） |
+| NM profile | `H5000M-AP-2G` / `H5000M-AP-5G` | `ROUTER-AP-2G` / `ROUTER-AP-5G`（据 `router-init.sh` 的 `add_ap` 实参确认） |
+| 脚本 | `h5000m-router-init.sh` / `h5000m-led.sh` | `router-init.sh` / `router-led.sh` |
+| 配置 / marker | `/etc/default/h5000m-router`、`/var/lib/h5000m-rootfs-grown` | `/etc/default/router.conf`、`/var/lib/router-rootfs-grown` |
+| 产物 | `H5000M-debian13-*.bin` | `<BOARD_UPPER>-debian13-*.bin` |
+
+`H5000M-AP-2G → ROUTER-AP-2G` 是**真实文档 bug**：按旧文档排查 AP 问题会走空
+（`nmcli connection show H5000M-AP-2G` 不存在）。已由测试钉住。
+
+#### 六、其余按实际更新
+
+| 文档 | 改动 |
+| --- | --- |
+| `README.md` | 状态表拆三维三列；云编译章节重写为三层入口表（+ 为什么用薄壳）；目录结构重写（补 `boards/`、`kernel/files-boards/`、`docs/ci-status.md`、3 workflow、`scripts/tests/`） |
+| `docs/build-guide.md` | §3.7 三层入口 + 薄壳权限；§6 验证清单按**通用 / 板级 / 待实机复核**重构；§3.2 / §4 / §5 按双板改写（固件分板清单、`BOARD_EXTRA_FIRMWARE`） |
+| `docs/troubleshooting.md` | §12 新增 4 条真实症状：`Invalid input`（薄壳传参未声明）、Release 403（薄壳缺 `contents: write`）、**符号被 `olddefconfig` 静默丢弃**、**固件路径/清单错**（含"三次根因各不相同，勿套用上次"的警告） |
+| 5 篇 docs + `armbian-evaluation.md` | 警告块改三维状态表；单体名批量修正 |
+| `.github/workflows/build-ap3000m.yml` | 头部状态注释按三次失败的实际进展重写 |
+
+**验证**：
+
+- 全量回归 **6 组全绿**（16 + 15 + 15 + 18 + 23 项 + 1 组无汇总行）；
+- **5 项负向验证全部实测可拦住**（内核列写回 ❌ / 未登记 run id / 表格注入乐观表述 /
+  单体名残留 / 断言整轮失败），且基线不被误伤；
+- `bash -n` 21 个脚本 FAIL=0；`py_compile` / 4 个 workflow YAML 全 OK；
+- 新增文件 LF 行尾；`grep` 复检单体名残留 **0**；
+- 文档引用的 5 个 unit 名与 `rootfs-overlay` 实际文件**一一对应**；
+- `fetch-firmware.py --board ap3000m` 实跑 **3/3 成功**（修复的直接证据）。
+
+**待办**：重跑 AP3000M 云编译，确认 RootFS 阶段转绿。
+
+### 2026-10-09 — docs 全面按实际更新：AP3000M 结论反转 + 建立 CI 状态单一真源
+
+**触发**：用户要求「docs 里所有文档，根据实际更新」。核对远端真实 CI 后发现
+**文档与事实相反** —— 这不是措辞问题，是结论错误：读者据此会误判「当前根本构建不出东西」，
+而真实情况是**内核已能编过**（进展被掩盖）、**RootFS 阶段另有新根因**（未被记录）。
+
+#### 一、结论反转：AP3000M 内核已编过，RootFS 阶段失败
+
+查 GitHub Actions API 实测（**job / step 级结论**）：
+
+| run | 提交 | 真实结论 |
+| --- | --- | --- |
+| 37840375623 | `a8e73ce` | ❌ 内核 job 失败（`编译 Linux 内核` 步骤，46 s） |
+| 37841719136 | `e9c1594` | ❌ 内核 job 失败（`编译 Linux 内核` 步骤，44 s） |
+| **37843516159** | **`c3f861d`** | 内核 6.18 (ap3000m) job ✅ 通过；**RootFS + 刷写包 job ❌ 失败**（`构建 Debian 13 RootFS` 步骤，1 min 46 s） |
+
+即：**前两次修复均已生效，内核已能编译通过；但此前文档写「RootFS 进行中 ⏳」的期间，
+该 job 实测转为失败** —— 这是第三次失败，且换了阶段、根因又是新的。
+
+据此把全部 10 处按 job 维度改写（内核 / RootFS 分列），并显式提示 scope：
+**「内核 job ✅」与「RootFS job ❌」不可互相替代** —— 既不能笼统写「AP3000M 云编译失败」
+（会掩盖「内核已能编过」这个关键进展），也不能写「失败两次」（实际是**三次失败、
+三个阶段各不相同**）。
+
+#### 一之二、第三次失败根因：MT7981 固件「路径 + 清单」双错（**真实代码缺陷**）
+
+**症状**：`RootFS + 刷写包（ap3000m）` job 的 `构建 Debian 13 RootFS` 步骤 exit 1。
+
+**根因**（三条独立证据交叉确认）：
+
+1. **路径错**：脚本按 H5000M 的 `mediatek/mt7996/` 子目录习惯写成
+   `mediatek/mt7981/mt7981_wa.bin`，**上游该路径不存在**。
+   实测（GitLab API HEAD，no-redirect）：
+
+   | 路径 | 结果 |
+   | --- | --- |
+   | `mediatek/mt7981/mt7981_wa.bin` | **404** |
+   | `mediatek/mt7981_wa.bin` | **OK 494256 B** |
+   | `mediatek/mt7996/mt7992_wa_23.bin`（H5000M 对照） | OK 517552 B |
+
+   对照项可用，证明不是 API/网络问题，而是**路径确实错了**。
+
+2. **内核权威依据**：`drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h` 的字面常量
+   ```
+   MT7981_FIRMWARE_WA    "mediatek/mt7981_wa.bin"
+   MT7981_FIRMWARE_WM    "mediatek/mt7981_wm.bin"
+   MT7981_ROM_PATCH      "mediatek/mt7981_rom_patch.bin"
+   ```
+   —— MT7981 固件**平铺在 `mediatek/` 下**，无 `mt7981/` 子目录
+   （`mt7996/` 那种子目录是 MT7992 的另一回事，不可类推）。
+
+3. **清单不全**：除路径错外还**漏了主固件** `mt7981_wm.bin`。只补前两件则 `mt7915e`
+   probe 时主固件 `-ENOENT`，Wi-Fi 起不来但构建不报错 —— **静默故障**，比构建失败更危险。
+
+**修复**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/fetch-firmware.py` | `FIRMWARE_SETS["ap3000m"]` 键改为平铺路径 `mediatek/mt7981_{wa,wm,rom_patch}.bin`，`dest` 由 `mediatek/mt7981` 改为 `mediatek`；**补入主固件 `mt7981_wm.bin`**；`EXPECTED_SHA256` 补 3 条实测值（`5b838a85…` 494256 B / `e09cecd2…` 2054688 B / `1cd38eaa…` 9824 B），任一不匹配即构建失败 |
+| `build/build-rootfs.sh` | `REQUIRED_FIRMWARE` 的 `ap3000m)` 分支由 2 件改 **3 件**且去子目录前缀；该分支后逐项 `[[ -s ]] \|\| die`，缺任一即报明板级 |
+
+注释同时写明内核字面常量依据与「实机 -ENOENT」后果，防止后续再按 MT7992 习惯改回子目录。
+
+**端到端验证**（实跑，非仅静态检查）：
+
+```
+$ python3 scripts/fetch-firmware.py --board ap3000m --out /tmp/fwtest
+[fetch-firmware] 板级    : ap3000m（3 个固件项）
+  [OK]   mediatek/mt7981_wa.bin (5b838a854838…)
+  [OK]   mediatek/mt7981_wm.bin (e09cecd2931d…)
+  [OK]   mediatek/mt7981_rom_patch.bin (1cd38eaa6882…)
+[fetch-firmware] 完成: 新下载 3，已存在 0，失败 0
+```
+sha256 三项逐项匹配白名单 —— 修复有效，**待重跑 CI 复验**。
+
+#### 二、建立 CI 状态单一真源 `docs/ci-status.md`
+
+**根因不是"忘了改"，而是结构问题**：一条状态结论散落在 README + 7 篇 docs + 2 个
+workflow 注释里，一次 CI 变化要改 10 处，必然漂移。
+
+新增 `docs/ci-status.md`（含稳定锚点 `<a id="ci-status">`），分节记录：
+
+| 节 | 内容 |
+| --- | --- |
+| 当前结论 | 两板 × 「内核云编译 / RootFS 云编译 / 实机验证」三维状态表 |
+| Run 明细 | 4 个 run 的 id / 提交 / 事件 / 结果 / **关键 job 结论**（含失败步骤与耗时） |
+| 历史参照 Run | 3 个仅用于性能基线或已修复事故的 run（登记以便追溯） |
+| 三次失败根因 | 对照表（前两次症状相同、根因不同；第三次换阶段、又是新根因） |
+| 待验证清单 | run 剩余部分 + 实机复核项 |
+| 维护约定 | 5 条引用规则 |
+
+#### 三、新增回归测试 `scripts/tests/test-docs-ci-status.sh`（16 项）
+
+把「文档状态必须与真源一致」前置到质量门：
+
+- **A** 真源存在 + 锚点 + 状态表结构
+- **B** 文档中出现的**每个 run id** 必须已在真源登记（禁凭空引用）
+- **C** scope 混淆：run 级（不得把 `37843516159` 表述为整轮失败）+ **板卡状态表行级**
+      （真源说内核 ✅，文档就不得在该行写 ❌；RootFS 列允许 ❌）
+- **D** 肯定式乐观表述黑名单
+- **E** 单体名残留 + **反向确认**实际 unit 文件确实叫 `router-*`
+- **F** 真源引用闭环
+
+**四轮负向验证打回，暴露四个"看似正确实则漏检"的写法**（全部记录在脚本注释里）：
+
+| 轮 | 错误写法 | 后果 | 修正 |
+| --- | --- | --- | --- |
+| 1 | 同行出现 run id 与 ✅ 即判乐观表述 | 误伤 README 里「内核 job 已 ✅ 通过」这条**正确**陈述 | 黑名单只留「实机/生产/跑通/基线」语义 |
+| 2 | 把「云编译成功 ≠ 实机可用」当乐观表述 | 误伤**安全警告本身** | 排除否定式结构 |
+| 3 | `实机可用[^性]` | 连「不等于实机可用」都匹配 | 该规则整体废弃 |
+| 4 | 乐观表述的否定词过滤按**整行**判定 | 表格右列写「实机未验证」，把左列新注入的「✅ 实机已验证，已跑通」一起放行 | 判定窗口**锚定在命中词 ±16 字符** |
+
+> 教训（已写入脚本头注）：**测试因误报被绕过，比没有测试更糟**；而"漏检"的守卫
+> 等于没写。每个守卫都必须有对应的负向验证，本脚本 4 项负向全部实测可拦住。
+
+#### 四、板级无关化收尾：修正大量单体名残留
+
+文档（含 README）仍大量使用 H5000M 单体名，与实际代码不符（属**误导性文档**）：
+
+| 类别 | 文档旧值（错） | 实际值（已改） |
+| --- | --- | --- |
+| systemd unit | `h5000m-router-init.service` / `h5000m-fancontrol` / `h5000m-grow-rootfs` / `h5000m-led(-boot)` | `router-*.service`（与 `rootfs-overlay/etc/systemd/system/` 实际文件比对确认） |
+| NM profile | `H5000M-AP-2G` / `H5000M-AP-5G` | `ROUTER-AP-2G` / `ROUTER-AP-5G`（据 `router-init.sh` 的 `add_ap` 实参确认） |
+| 脚本 | `h5000m-router-init.sh` / `h5000m-led.sh` | `router-init.sh` / `router-led.sh` |
+| 配置 / marker | `/etc/default/h5000m-router`、`/var/lib/h5000m-rootfs-grown` | `/etc/default/router.conf`、`/var/lib/router-rootfs-grown` |
+| 产物 | `H5000M-debian13-*.bin` | `<BOARD_UPPER>-debian13-*.bin` |
+
+`H5000M-AP-2G → ROUTER-AP-2G` 是**真实文档 bug**：按旧文档排查 AP 问题会走空
+（`nmcli connection show H5000M-AP-2G` 不存在）。已由测试 E 项钉住。
+
+#### 五、其余按实际更新
+
+| 文档 | 改动 |
+| --- | --- |
+| `README.md` | 状态表拆「云编译（内核）/ 云编译（RootFS+刷写包）/ 实机验证」三列（AP3000M RootFS 列 ❌）；**云编译章节重写**为三层入口表（`build-h5000m.yml` / `build-ap3000m.yml` / `build.yml` + 为什么用薄壳）；失败记录表补第三行并改标题为「三次失败，三个阶段各不相同」；产物名去写死后补 `BOARD_UPPER` 说明；**目录结构重写**（补 `boards/`、`kernel/files-boards/`、`docs/ci-status.md`、3 个 workflow、`scripts/tests/`） |
+| `docs/build-guide.md` | §3.7 补三层入口 + 触发命令 + 薄壳权限说明；§6 验证清单按**通用项 / 板级项 / 待实机复核**三类重构（原为 H5000M 硬编码，AP3000M 无法照用）；§3.2 / §4 / §5 按双板改写（固件清单分板且 AP3000M 已改平铺 3 件、`BOARD_EXTRA_FIRMWARE`、NVMe→nvmem 说明） |
+| `docs/troubleshooting.md` | §12 新增 4 条真实症状：`Invalid input`（薄壳传参未声明）、Release 403（薄壳缺 `contents: write`）、**符号被 `olddefconfig` 静默丢弃**（含"两次根因不同而报错相同"的警告）；补前置提示「先看是哪个 job 的哪个步骤，三次失败阶段不同，不要套用上次根因」 |
+| `docs/architecture.md`、`hardware.md`、`first-boot.md`、`debian13-partition-plan.md`、`armbian-evaluation.md` | 警告块改为三维状态表 + AP3000M 三次失败说明；单体名批量修正 |
+| `.github/workflows/build-ap3000m.yml` | 头部状态注释更新（原写「云编译失败 … 验证中」→ 内核已通过 / RootFS 阶段失败（MT7981 固件路径/清单双错，已修复）） |
+
+**验证**：
+
+- `scripts/tests/test-docs-ci-status.sh` 16/16 通过；**4 项负向验证全部实测可拦住**
+  （写回失败结论 / 未登记 run id / 表格注入乐观表述 / 单体名残留），每轮修完重新验证；
+- 全量回归 6 组全绿（16 + 23 + 15 + 15 + 9 + 18 项）；
+- `bash -n` 全量 FAIL=0；新增脚本 LF 行尾、0755；
+- **MT7981 固件修复端到端实跑**：`fetch-firmware.py --board ap3000m` 新下载 3、失败 0，
+  sha256 逐项匹配（非仅静态检查）；
+- `grep` 复检：docs + README + workflows 中 `h5000m-{router-init,fancontrol,grow-rootfs,led}`、
+  `H5000M-AP*`、`H5000M-debian13` 残留 **0**；
+- 文档引用的 5 个 unit 名与 `rootfs-overlay/etc/systemd/system/` 实际文件**一一对应**；
+- **待办**：重跑 AP3000M 云编译以复验第 3 次修复；两板实机验收仍全部未做。
+
 ### 2026-10-09 — 警告修正：H5000M 实机尚未通过（此前误标为「已跑通」）
 
 **问题**：上一轮文档加警告时，把 H5000M 写成了「✅ 已跑通 / 可作参考基线」，并向读者

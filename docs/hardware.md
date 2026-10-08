@@ -1,14 +1,24 @@
 # Hiveton H5000M 硬件适配说明
 
-> ## ⚠️ 警告：项目仍在测试中，尚未跑通
+> ## ⚠️ 警告：项目仍在测试中，**两板实机均未通过**
 >
-> - **AP3000M (MT7981B)：❌ 未跑通** —— 内核编译连续失败两次（缺 Kconfig 注册 →
->   修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`）。最新修复仍在等待 CI 验证。
-> - **H5000M (MT7987A)：⚠️ 云编译通过，但实机尚未验证** —— `c21fc66` 只是"能构建出镜像"，
->   刷写后能否正常启动、网络能否连通、功能是否正常**均未验收**。多板化改造后的
->   回归同样未做。
+> | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
+> | --- | --- | --- | --- |
+> | H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
+> | AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（根因已定位并修复，待重跑） | ⚠️ **未验证** |
+>
+> - **AP3000M**：曾**三次失败，三个阶段各不相同** —— ① ② 内核编译阶段（缺
+>   `drivers/hwmon/Kconfig` 注册 → 修复后 `depends` 引用了非 Kconfig 符号 `HRTIMER`），
+>   两者**均已修复**（run `37843516159` 的**内核 job 已通过**）；③ **RootFS 构建阶段**
+>   失败 —— MT7981 固件「路径 + 清单」双错（路径应为平铺 `mediatek/mt7981_*.bin` 而非
+>   子目录；且漏了主固件 `mt7981_wm.bin`），**根因已定位并已修复**（实跑拉取 3/3 成功），
+>   待重跑 CI 复验。**当前无任何可用产物**。
+> - **H5000M**：全链路云编译通过（`c21fc66`），但该镜像**从未在真机刷写验收** ——
+>   能否启动、网络能否连通、功能是否正常**均未验证**；多板化改造后的回归同样未做。
 >
 > **⚠️ 云编译成功 ≠ 实机可用。本项目至今没有任何一块板卡完成实机验收。**
+>
+> 状态单一真源见 [ci-status.md](ci-status.md)（run id / job / 步骤级证据）。
 >
 > 本文档中的 AP3000M 相关内容（`boards/ap3000m.board`、`dts/mt7981b*`、
 > `build/kernel-conf/ap3000m-6.18.config`、`kernel/files-boards/ap3000m/`、
@@ -30,8 +40,8 @@
 - LED：GPIO3（amber，WLAN 2.4G）、GPIO4（blue，WLAN 5G）（gpio-leds）
   - 软件可控制两个指示灯（GPIO3/GPIO4）；LED1（5G 模块）、LED5（电源）为硬件直控
   - DTS aliases：`led-boot=led-4`（蓝）、`led-failsafe/upgrade=led-3`（琥珀），与官方固件一致
-  - 控制脚本：`/usr/local/sbin/h5000m-led.sh`（复刻官方 diag.sh/leds.sh 方案）
-  - systemd：`h5000m-led-boot.service`（启动早期蓝灯快闪）→ `h5000m-led.service`（就绪后熄灯）
+  - 控制脚本：`/usr/local/sbin/router-led.sh`（复刻官方 diag.sh/leds.sh 方案）
+  - systemd：`router-led-boot.service`（启动早期蓝灯快闪）→ `router-led.service`（就绪后熄灯）
 - 网络：
   - `gmac0`：2500base-x，PHY handle = `phy0`（RTL8221B，mdio addr 1，GPIO42 reset）
   - `gmac1`：internal，PHY handle = `phy1`（内置 2.5G PHY，mdio addr 15）
@@ -45,7 +55,7 @@
 > `&{/thermal-zones/cpu-thermal/cooling-maps}` 的 `/delete-node/` 片段，移除
 > `cpu-active-high` / `cpu-active-low` / `cpu-passive` 三个**风扇**冷却映射，保留
 > `cpu-active-hot`（CPU 频率缩放）与 hot/critical trips。原因：PWM 输出由用户空间
-> `h5000m-fancontrol` 独占管理，避免内核 thermal governor 与用户空间争抢同一 PWM；
+> `router-fancontrol` 独占管理，避免内核 thermal governor 与用户空间争抢同一 PWM；
 > CPU 保护（频率缩放 + critical 关机）不受影响。
 
 ### 1.1 新增 DTS 需要的配套 dtsi
@@ -154,7 +164,7 @@ CONFIG_WIREGUARD=m（可选）
 ## 5. WAN / LAN 与 MAC
 
 - LAN MAC / WAN MAC：由**用户空间**按板载 eMMC CID 派生（LAN = `02:<sha256(cid)[0:3]>:00:00`，
-  WAN = LAN + 1），实现在 `/usr/local/sbin/h5000m-router-init.sh` 的 `derive_base_mac()`，
+  WAN = LAN + 1），实现在 `/usr/local/sbin/router-init.sh` 的 `derive_base_mac()`，
   并通过 NetworkManager 的 `ethernet.cloned-mac-address` 应用；首次算出的结果持久化在
   `/etc/h5000m-mac.conf`，后续开机直接复用。
 - **不使用** OpenWrt 的 `macaddr_generate_from_mmc_cid`：这是 ImmortalWrt/OpenWrt 用户空间的
@@ -165,7 +175,7 @@ CONFIG_WIREGUARD=m（可选）
 
 ## 6. 风扇控制（router-fancontrol，多板）
 
-通用层脚本名为 `router-fancontrol`（2026-10-09 由 `h5000m-fancontrol` 更名，见 CHANGELOG），
+通用层脚本名为 `router-fancontrol`（2026-10-09 由 `router-fancontrol` 更名，见 CHANGELOG），
 所有板卡共用一套控制策略；**差异只在 PWM 后端**，由板级的 `PWM_BACKEND` 选择。
 
 ### 6.1 后端选型（三选一）

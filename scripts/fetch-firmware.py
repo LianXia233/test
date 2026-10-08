@@ -76,12 +76,25 @@ FIRMWARE_SETS = {
     },
     # ---- Airpi AP3000M（MT7981B）----
     "ap3000m": {
-        # MT7981B 内置 wmac（MT7915 IP，mt7915e 驱动）：WA / ROM patch 双件套。
-        # 驱动在 /lib/firmware/mediatek/mt7981/ 下按 SOC 名查找（mt7981_wa.bin /
-        # mt7981_rom_patch.bin）；EEPROM 不走固件文件，由 DTS 的 nvmem-cells
-        # 从 eMMC factory 分区（eeprom@0）读取（见 dts/mt7981b-airpi-ap3000m.dts）。
-        "mediatek/mt7981/mt7981_wa.bin": {"dest": "mediatek/mt7981", "required": True},
-        "mediatek/mt7981/mt7981_rom_patch.bin": {"dest": "mediatek/mt7981", "required": True},
+        # MT7981B 内置 wmac（MT7915 IP，mt7915e 驱动）。
+        #
+        # 【路径必须扁平，不能放 mediatek/mt7981/ 子目录 —— 2026-10-09 实测事故】
+        # 内核 mt7915 驱动用**字面常量**指定路径（mainline
+        # drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h）：
+        #     #define MT7981_FIRMWARE_WA   "mediatek/mt7981_wa.bin"
+        #     #define MT7981_FIRMWARE_WM   "mediatek/mt7981_wm.bin"
+        #     #define MT7981_ROM_PATCH     "mediatek/mt7981_rom_patch.bin"
+        # 即**平铺在 mediatek/ 下**，而非按 SoC 建子目录（MT7992 那种
+        # mediatek/mt7996/ 是另一回事）。此前误写成 mediatek/mt7981/，
+        # 后果：① 上游 404 → 拉取失败；② 即便放对也没用，驱动只会去
+        # mediatek/mt7981_wa.bin 找 → 实机 Wi-Fi probe 必报 -ENOENT。
+        #
+        # EEPROM（MAC / 校准数据）不走固件文件：由 DTS nvmem-cells 从 eMMC
+        # factory 分区读取（dts/mt7981b-airpi-ap3000m.dts 的 &wifi nvmem-cells）。
+        # 内核另有 MT7981_EEPROM_MT7976_DEFAULT_DBDC 兜底，本项目不打包。
+        "mediatek/mt7981_wa.bin": {"dest": "mediatek", "required": True},
+        "mediatek/mt7981_wm.bin": {"dest": "mediatek", "required": True},
+        "mediatek/mt7981_rom_patch.bin": {"dest": "mediatek", "required": True},
     },
 }
 
@@ -108,6 +121,14 @@ EXPECTED_SHA256 = {
         "1f7b7fd1c243576e04c16b98c649db1e3326f6a715556c2a56094bcd7d300d71",
     "mediatek/mt7987/i2p5ge-phy-pmb.bin":
         "941e3118493d5cb14323968ebc1193b23411d7c330a566014eeeb51c5ea7ed45",
+    # ---- Airpi AP3000M（MT7981B）----
+    # 路径为 mediatek/ 下**平铺**（见上方 FIRMWARE_SETS 注释：内核 mt7915.h 用字面常量）。
+    "mediatek/mt7981_wa.bin":
+        "5b838a854838b978a4b846628daf4fdf329d8fe44b5819532d8c6f525122905d",
+    "mediatek/mt7981_wm.bin":
+        "e09cecd2931d537c78b3dbda4a1afc10677535616cda1e1336f65f06c1b24ca8",
+    "mediatek/mt7981_rom_patch.bin":
+        "1cd38eaa68820ee35fbe58863b3e14d4f47be3b2e74d1d8b6ca279cb6bb5f07d",
 }
 
 
