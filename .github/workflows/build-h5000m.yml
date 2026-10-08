@@ -41,10 +41,23 @@ on:
         default: false
         type: boolean
 
-# 【最小权限】调用方声明只读，写权限由被调用的 build.yml 内各 job 单独声明
-# （GitHub 要求：workflow_call 时权限只能收窄不能放大，故这里保持只读）。
+# 【权限 —— 这里是真实踩过的坑，务必看完再改】
+# workflow_call 的权限取「调用方 ∩ 被调用方」，且**调用方的权限是所有被调用 job 的硬上限**：
+# 调用方没声明的权限，在被调用方一律降为 none —— 被调用 job 里写再高的 permissions 也没用。
+#
+# 本壳最初只声明了 contents: read + job 级 contents: write，结果首次触发即 startup_failure：
+#     The nested job 'cache-cleanup' is requesting 'actions: write',
+#     but is only allowed 'actions: none'.
+# 原因：build.yml 的 cache-cleanup job 需要 actions: write（删除 Actions 缓存），
+# 而壳的顶层没声明 actions → 上限为 none → 整个 workflow 在校验阶段就被拒（0 job 创建）。
+#
+# 因此这里必须把 build.yml 各 job 用到的权限**全部在上限里放开**：
+#   actions: write   —— cache-cleanup
+#   contents: write  —— build-image 创建/覆盖 Release
+# 其余（如 build-kernel / quality-gate）只用默认的 contents: read，无需额外声明。
 permissions:
-  contents: read
+  actions: write
+  contents: write
 
 concurrency:
   # 板卡写死在 group 里，与 AP3000M 入口并发独立；同一板重复点击则排队保护。
@@ -61,8 +74,8 @@ jobs:
       skip_release: ${{ inputs.skip_release }}
       keep_releases: ${{ inputs.keep_releases }}
       clear_cache: ${{ inputs.clear_cache }}
-    # 【为什么必须显式提权】被调用的 build.yml 里 build-image job 需要 contents: write
-    # 才能创建 Release。workflow_call 的权限取「调用方 ∩ 被调用方」，调用方若只给 read，
-    # 被调用方即使声明 write 也会被收窄 → Release 会失败。
+    # 【注意】job 级 permissions 只能在此**收窄**，放大无效（上限由上面的顶层决定）。
+    # 这里保持与顶层一致，避免读者误以为靠 job 级就能提权。
     permissions:
+      actions: write
       contents: write

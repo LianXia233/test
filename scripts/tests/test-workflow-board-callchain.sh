@@ -191,6 +191,28 @@ for path, d, job in caller_shells:
     else:
         bad(f"{name}: 调用方 contents={perm!r}，被调用方建 Release 会被收窄为只读而失败")
 
+    # 7b. 【真实事故】调用方还必须是 actions: write —— 被调的 cache-cleanup job 需要它。
+    #
+    # 为什么必须单独查这里：workflow_call 的权限取「调用方 ∩ 被调用方」，且**调用方是硬上限**。
+    # 被调用 job 里写 permissions: actions: write 没用，壳的顶层没放开就会被降为 none，
+    # 整个 workflow 在校验阶段直接 startup_failure（连 job 都不创建，日志里什么都没有，
+    # 只有 run 页面的 Annotations 里一行 "Invalid workflow file"）。
+    #
+    # 这一项是补上去的：原守卫只看 contents，漏了 actions，导致 3054c00 首次触发两板薄壳
+    # 双双 startup_failure。教训——**每个被调用 job 用到的每种权限，都要有对应守卫**，
+    # 只查其中一种等于没查。
+    missing_perms = []
+    for jname, jdef in (base.get("jobs") or {}).items():
+        for pkey, pval in ((jdef or {}).get("permissions") or {}).items():
+            if pval in ("write", "read"):
+                if (job.get("permissions") or {}).get(pkey) != pval:
+                    missing_perms.append(f"{jname} 需要 {pkey}: {pval}")
+    if missing_perms:
+        bad(f"{name}: 调用方权限上限不足，以下被调 job 的权限会被收窄为 none → "
+            f"startup_failure：{missing_perms}")
+    else:
+        ok(f"{name}: 调用方权限覆盖全部被调 job 所需（无收窄风险）")
+
     # 8. 并发组须按板卡隔离（两板不应互相排队）
     grp = str((d.get("concurrency") or {}).get("group") or "")
     if b and b in grp:
