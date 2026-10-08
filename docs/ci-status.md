@@ -16,7 +16,7 @@
 | 板卡 | 云编译（内核） | 云编译（RootFS+刷写包） | **实机验证** |
 | --- | --- | --- | --- |
 | Hiveton H5000M (MT7987A) | ✅ 成功 | ✅ 成功 | ⚠️ **未验证** |
-| Airpi AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（第 4 次：`生成刷写包` 步骤 `BB: unbound variable`，已修复待复验） | ⚠️ **未验证** |
+| Airpi AP3000M (MT7981B) | ✅ 成功 | ❌ **失败**（第 5 次：`封装 sysupgrade-tar` 步骤 `--board` 误传 sysupgrade 板名，已修复待复验） | ⚠️ **未验证** |
 
 > ## ⚠️ 本项目至今没有任何一块板卡完成实机验收
 >
@@ -29,6 +29,7 @@
 
 | run id | 提交 | 事件 | 结果 | 关键 job 结论 |
 | --- | --- | --- | --- | --- |
+| [37853148758](https://github.com/LianXia233/test/actions/runs/37853148758) | `6ce92f8` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`封装 sysupgrade-tar 单文件固件` 步骤，`未知板级 "airpi_ap3000m"`） |
 | [37851849934](https://github.com/LianXia233/test/actions/runs/37851849934) | `9e8f8f7` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ✅ / **RootFS + 刷写包 (ap3000m) ❌**（`生成刷写包` 步骤，23 s，`BB: unbound variable`） |
 | [37851638744](https://github.com/LianXia233/test/actions/runs/37851638744) | `76edd3a` | `workflow_dispatch`（AP3000M 薄壳） | ❌ failure | **未进入 job**：并发组死锁被取消（`deadlock ... between a top level workflow and 'build'`） |
 | [37851376164](https://github.com/LianXia233/test/actions/runs/37851376164) | `3054c00` | `workflow_dispatch`（AP3000M 薄壳） | ❌ startup_failure | **未进入 job**：`cache-cleanup` 需 `actions: write`，壳的上限只给了 `contents` → 降为 `none` |
@@ -37,9 +38,15 @@
 | [37840375623](https://github.com/LianXia233/test/actions/runs/37840375623) | `a8e73ce` | `workflow_dispatch` | ❌ failure | 质量门 ✅ / 内核 6.18 (ap3000m) ❌（`编译 Linux 内核` 步骤，46 s） |
 | [37825051627](https://github.com/LianXia233/test/actions/runs/37825051627) | `c21fc66` | `workflow_dispatch` | ✅ success | H5000M 全链路（多板化改造**之前**的最后一轮） |
 
-> **scope 说明**：`37851849934` 与 `37843516159` 都是**部分成功** —— 内核 job 通过、RootFS job 失败。
+> **scope 说明**：`37853148758`、`37851849934` 与 `37843516159` 都是**部分成功** ——
+> 内核 job 通过、RootFS job 失败。
 > 不要笼统写成「AP3000M 云编译失败」，那会掩盖「内核已能编过」这个关键进展；
 > 也不要说「失败两次」，实际是**多次失败、每个阶段各不相同**（见 §4）。
+>
+> **进展链条**（每修一次，失败点就往下推一步，这是判断修复是否生效的唯一依据）：
+> `37843516159` 挂在 `构建 RootFS` → `37851849934` 挂在 `生成刷写包` →
+> `37853148758` 挂在 `封装 sysupgrade-tar`。前三步（`构建 RootFS`、`生成 SquashFS`、
+> `生成刷写包`）在 `37853148758` 中**均已转绿**，证明第 3、4 次修复真实生效。
 >
 > 另外 `37851376164` / `37851638744` 是**薄壳 workflow 自身的缺陷**（根本没进 job），
 > 与构建逻辑无关，单独归类见 §4.1。
@@ -58,7 +65,7 @@
 ## 4. 失败根因（按阶段分组）
 
 **每一次症状都不同、根因都不一样** —— 这是本问题最难排查之处：每修完一次都必须
-**重新实证**，不能假设"还是老原因"。截至当前共 **4 次构建阶段失败 + 2 次薄壳缺陷**。
+**重新实证**，不能假设"还是老原因"。截至当前共 **5 次构建阶段失败 + 2 次薄壳缺陷**。
 
 | # | run | 失败阶段 | 根因 | 修复 |
 | --- | --- | --- | --- | --- |
@@ -66,8 +73,9 @@
 | 2 | 37841719136 | 内核编译（44 s） | 补了 Kconfig，但 `depends on GPIOLIB && HRTIMER` —— **`HRTIMER` 不是 Kconfig 符号**（内核里只有 `HIGH_RES_TIMERS`；hrtimer 是核心基础设施，无条件编入） → 依赖项恒为 `n` → 符号恒不可见 → `=m` **第二次被静默丢弃** | 改为 `depends on GPIOLIB`；Kconfig 内补入可复用规则注释；`scripts/tests/test-board-kconfig-registration.sh` 13 → 15 项，加入 `depends` 符号可达性双向校验 |
 | 3 | 37843516159 | **RootFS 构建**（1 min 46 s） | **MT7981 固件「路径 + 清单」双错**：① 路径写成 `mediatek/mt7981/mt7981_*.bin`（子目录），而上游与内核均用**平铺** `mediatek/mt7981_*.bin` → 上游 **404**；② 清单漏了 `mt7981_wm.bin`（**主固件**，驱动加载必需） | 路径改平铺、清单补齐 3 件（`wa` / `wm` / `rom_patch`）、`dest` 改 `mediatek`；补入真实 sha256 白名单；`build/build-rootfs.sh` 的 `REQUIRED_FIRMWARE` 同步并写明「缺一不可」 |
 | 4 | 37851849934 | **生成刷写包**（23 s） | **`build/make-sd-image.sh` heredoc 分隔符漏引号**：生成引导层 `/sbin/init` 用的是 `<<INIT_EOF`（未加引号），外层 shell 先做变量展开；而内嵌脚本含大量**外层不存在的自赋值变量**（`BB` / `SQ` / `MERGED` / `RETRY_FILE` / `N` / `_m`）→ `set -Eeuo pipefail` 下 407 行 `BB: unbound variable` 直接退出 | 分隔符改 `<<'INIT_EOF'`（内层变量一律字面保留）；板级值改 `@BOARD_NAME@` 等占位符，生成后显式替换 + **残留即 `die`** 兜底；新增 `scripts/tests/test-boot-init-heredoc.sh`（18 项） |
+| 5 | 37853148758 | **封装 sysupgrade-tar**（27 s） | **`--board` 传错了值**：`build.yml` 把 `steps.board.outputs.sysupgrade_board`（**CONTROL 里的设备名** `airpi_ap3000m`）当成板级 ID 传给 `make-sysupgrade-tar.sh`，撞上 `board_load` 白名单 → `[board-lib] ERROR: 未知板级 "airpi_ap3000m"。可用：ap3000m h5000m` | `--board` 改传 `steps.board.outputs.id`（板级 ID `ap3000m`）；CONTROL 板名由脚本**自己**从板级文件的 `BOARD_SYSUPGRADE_BOARD` 读出，不需外部传入；`test-workflow-board-callchain.sh` 新增「全部 `--board` 必须传 `outputs.id`」守卫（26 项，经负向验证） |
 
-**三次共同教训**：
+**五次共同教训**：
 
 - **第 1、2 次**：`Makefile` 只回答「怎么编」，`Kconfig` 才决定「符号是否存在、能否被选中」，
   两者必须同时提供。`olddefconfig` 对**未知符号不报错**，只静默丢弃。
@@ -80,6 +88,12 @@
   还没有 `BB` 这类变量（后来才加）。**"修一半"更危险**：只把 `BB` 挪到外层，后面
   `MERGED`/`N`/`RETRY_FILE` 会连环爆；若外层变量恰好为空则被**静默替换成空串**，
   生成一个能跑但行为错误的 init —— 实机表现为莫名启动失败，比直接报错难查得多。
+- **第 5 次**：**同名不同义的值是最大的隐形陷阱**。本仓库有两个都叫「板名」的值：
+  `id`（`ap3000m`，板级 ID，脚本参数用）与 `sysupgrade_board`（`airpi_ap3000m`，
+  CONTROL 设备名）。两者在 `boards/ap3000m.board` 里紧挨着定义，读代码时极易混用。
+  判定方法是**看消费方怎么用**：`board_load` 对 `--board` 做白名单校验 → 它要的必然是
+  板级 ID；而 CONTROL 的 `BOARD=` 由脚本从板级文件自行读出 → 外部根本不该传。
+  actionlint / YAML 校验**完全查不出**这类语义错，只有语义级守卫能拦。
 
 ### 4.1 薄壳 workflow 自身缺陷（未进入 job，与构建逻辑无关）
 
@@ -115,10 +129,13 @@
 
 ## 5. 待验证清单
 
-- [ ] **重跑 AP3000M 云编译**：确认 RootFS + 刷写包 job 转绿（第 4 次修复的效果验证）
+- [ ] **重跑 AP3000M 云编译**：确认 `封装 sysupgrade-tar` 步骤转绿（第 5 次修复的效果验证）
 - [ ] RootFS job 全绿（构建 RootFS 树 / SquashFS / 引导层镜像 / sysupgrade 包 / Release）
 - [ ] `out/AP3000M-debian13-kernel.bin` 首 4 字节为 FIT 魔数且 < 30 MiB
   （注：run 37851849934 中该文件已生成，12389511 字节，FIT 魔数校验通过 —— **待下次 run 复现确认**）
+- [ ] `out/AP3000M-debian13-sysupgrade.bin` 产出且 CONTROL 内 `BOARD=airpi_ap3000m`
+  （**这是第 5 次修复的直接确认点**：CONTROL 值必须仍是 `airpi_ap3000m`，
+  不能因为 `--board` 改传 `ap3000m` 就变成 `ap3000m` —— 后者会让设备侧 sysupgrade 拒绝刷写）
 - [ ] `out/AP3000M-debian13-rootfs.bin` 通过 `e2fsck -fn`
 - [ ] **实机**：真实 GPT 分区表（`sgdisk -p`）与 U-Boot `bdinfo` 的 `kernel_addr_r`
 - [ ] **实机**：16GB 版 `modprobe airpi_gpio_fan` 后 `/sys/kernel/duty_cycle` 是否出现、

@@ -672,11 +672,23 @@ jobs:
       - name: 封装 sysupgrade-tar 单文件固件（≤600 MiB 内存约束）
         # OpenWrt 标准 sysupgrade-tar 格式（CONTROL + kernel FIT + root 引导层 ext4），
         # 与官方 sysupgrade.bin 同构：目标设备 sysupgrade -n 一条命令完成 p4/p5 写入。
+        #
+        # 【--board 必须传板级 ID，不是 sysupgrade 板名】（第 5 次 CI 失败的真实教训）
+        # 本仓库有两个不同语义的"板名"，混用会直接让构建失败：
+        #   · steps.board.outputs.id              = 板级 ID，如 "ap3000m"
+        #     → 所有 --board 参数都用它；board_load 会对它做白名单校验。
+        #   · steps.board.outputs.sysupgrade_board = CONTROL 内的设备名，如 "airpi_ap3000m"
+        #     → **只**由 make-sysupgrade-tar.sh 自己从板级文件读出后写进 CONTROL，
+        #       绝不作为 --board 传入。
+        # 事故记录：曾误传 sysupgrade_board，make-sysupgrade-tar.sh 的 board_load
+        # 白名单校验直接拒绝并终止：
+        #   [board-lib] ERROR: 未知板级 "airpi_ap3000m"。可用：ap3000m h5000m
+        # 该不变量由 scripts/tests/test-workflow-board-callchain.sh 第 9 项机械守卫。
         run: |
           bash build/make-sysupgrade-tar.sh \
             --kernel "out/${{ steps.board.outputs.fit_out }}" \
             --root "out/${{ steps.board.outputs.rootfs_out }}" \
-            --board "${{ steps.board.outputs.sysupgrade_board }}" \
+            --board "${{ steps.board.outputs.id }}" \
             --out "out/${{ steps.board.outputs.sysupgrade_out }}"
           ls -lh "out/${{ steps.board.outputs.sysupgrade_out }}"
 

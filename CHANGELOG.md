@@ -4,6 +4,105 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 第 5 次构建失败修复（`--board` 误传 sysupgrade 板名），AP3000M 推进到「封装 sysupgrade-tar」
+
+**背景**：继第 4 次修复（引导层 init heredoc）后触发复验 run `37853148758`（提交 `6ce92f8`），
+失败点**再次下移一步** —— 这本身证明前一次修复真实生效，但也暴露出第 5 个独立缺陷。
+
+#### 一、第 4 次修复的实证确认
+
+run `37853148758` 步骤级结论（来自 `/actions/runs/<id>/jobs`）：
+
+```
+质量门                                    ✅ success
+内核 6.18 (ap3000m)                       ✅ success
+RootFS + 刷写包 (ap3000m)                 ❌ failure
+  构建 Debian 13 RootFS                   ✅
+  生成只读基础系统 SquashFS（zstd）        ✅
+  生成刷写包                               ✅   ← 第 4 次修复生效
+  封装 sysupgrade-tar 单文件固件           ❌   ← 新的失败点
+```
+
+#### 二、第 5 次失败根因：两个「板名」值被混用
+
+```
+bash build/make-sysupgrade-tar.sh \
+  --kernel "out/AP3000M-debian13-kernel.bin" \
+  --root "out/AP3000M-debian13-rootfs.bin" \
+  --board "airpi_ap3000m" \
+  --out "out/AP3000M-debian13-sysupgrade.bin"
+[board-lib] ERROR: 未知板级 "airpi_ap3000m"。可用：ap3000m h5000m
+```
+
+本仓库有**两个都叫「板名」但语义完全不同**的值，在 `boards/ap3000m.board` 里紧挨着定义，
+极易混用：
+
+| 值 | 例子 | 语义 | 消费方 |
+| --- | --- | --- | --- |
+| `BOARD` / `outputs.id` | `ap3000m` | **板级 ID** | 所有 `--board` 参数；`board_load` 对它做白名单校验 |
+| `BOARD_SYSUPGRADE_BOARD` / `outputs.sysupgrade_board` | `airpi_ap3000m` | **sysupgrade CONTROL 内的设备名** | **只**写进 CONTROL，供设备侧防刷错校验 |
+
+`make-sysupgrade-tar.sh` 的契约很明确：
+
+- `--board` 收的是**板级 ID**（:46 行 `BOARD_ID`，:69 行 `board_load "$BOARD_ID"` 校验）；
+- CONTROL 的板名由**脚本自己**从板级文件读出（:77 行 `SYSUP_BOARD="$BOARD_SYSUPGRADE_BOARD"`，
+  :103 行写进 CONTROL）—— 外部根本不该传。
+
+workflow 却把 `sysupgrade_board` 喂给了 `--board`，直接撞上白名单。
+**基座里其余 4 处 `--board` 本来就传的是 `outputs.id`，唯独这一处写错** ——
+典型的「复制粘贴时顺手改了值」型缺陷。
+
+#### 三、修复
+
+| 文件 | 改动 |
+| --- | --- |
+| `.github/workflows/build.yml:691` | `--board "${{ steps.board.outputs.sysupgrade_board }}"` → `--board "${{ steps.board.outputs.id }}"` |
+| 同上，步骤注释 | 补入两个值的语义对照 + 事故原文 + 「该不变量由测试第 3b 项守卫」 |
+
+> **注意 CONTROL 值不受影响**：脚本仍从板级文件自行读 `BOARD_SYSUPGRADE_BOARD`，
+> 产物 CONTROL 里依然是 `BOARD=airpi_ap3000m`（设备侧校验所需），
+> **不会**因为 `--board` 改传 `ap3000m` 就变成 `ap3000m`。这一点已写入
+> `docs/ci-status.md` §5 作为复验时的确认点。
+
+#### 四、新增守卫（第 3b 项）
+
+`scripts/tests/test-workflow-board-callchain.sh`：扫描 `build.yml` **原文**里每一处
+`--board ${{ steps.board.outputs.X }}`，**只认 `outputs.id`**，其余一律判 FAIL。
+（用原文而非 YAML 解析值，是因为原文匹配能一眼看出传的是哪个 output。）
+
+**负向验证已实测**：把缺陷改回 `sysupgrade_board` → 测试报
+
+```
+[FAIL] build.yml 有 1 处 --board 传了非板级 ID 的 outputs.sysupgrade_board ——
+       --board 必须是板级 ID（outputs.id）；sysupgrade_board 是 CONTROL 设备名，
+       由脚本自行从板级文件读取，不可作为 --board 传入
+通过 25 项，失败 1 项
+```
+
+项数 25 → **26**。
+
+**这类缺陷 actionlint / YAML 校验完全查不出** —— 它既不是语法错也不是表达式错，
+只有语义级守卫能拦。
+
+#### 五、真源与文档同步
+
+`docs/ci-status.md`：
+
+- 状态表 AP3000M RootFS 列 → 第 5 次失败；
+- §2 Run 明细补 `37853148758`（11 个 run id 全部登记），并新增**进展链条**说明
+  （`构建 RootFS` → `生成刷写包` → `封装 sysupgrade-tar`，失败点逐步下移）；
+- §4 补第 5 行根因表 + 「第 5 次」教训（同名不同义的值）；
+- §5 新增确认点：产物 CONTROL 必须仍是 `BOARD=airpi_ap3000m`。
+
+**验证**：
+
+- 全量回归 **7 组全绿**（15 + 18 + 15 + 16 + 15+18 + **26** 项）；
+- `bash -n` FAIL=0；actionlint 无错误（仅 `clean-cache.yml` 一条 info 级 SC2015，不阻断）；
+- 4 个 workflow YAML 可解析；`test-docs-ci-status.sh` 16 项通过。
+
+**当前状态**：AP3000M 质量门 ✅ / 内核 ✅ / RootFS ✅ / 刷写包 ✅ /
+**`封装 sysupgrade-tar` ❌（第 5 次，已修复待复验）**。两板实机验收仍全部未做。
+
 ### 2026-10-09 — 薄壳触发问题 + 第 4 次构建失败（引导层 init heredoc）修复，AP3000M 推进到「生成刷写包」
 
 **背景**：文档按实际更新并推送到远端后，首次真正触发薄壳 workflow，连续暴露

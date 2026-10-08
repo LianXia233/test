@@ -83,6 +83,9 @@ if not base_path.is_file():
     raise SystemExit(1)
 
 base = load(base_path)
+# 保留一份原文：下面的 --board 传值守卫要按字面文本扫，
+# 因为 YAML 解析后 ${{ }} 只是普通字符串，但原文匹配能一眼看出传的是哪个 output。
+base_text = base_path.read_text()
 
 # ---------------------------------------------------------------- 基座: 双触发
 on = base.get("on") or {}
@@ -126,6 +129,33 @@ if not caller_shells:
     bad("未找到任何板卡薄壳（build-<board>.yml 中用 uses 调用 build.yml）")
 else:
     ok(f"发现 {len(caller_shells)} 个板卡薄壳: {[p.name for p, _, _ in caller_shells]}")
+
+# ------------------------------------------------- 基座: --board 参数语义守卫
+# 【真实事故 · 第 5 次 CI 失败（run 37853148758，commit 6ce92f8）】
+# 基座里有个步骤把 sysupgrade 板名当板级 ID 传给 make-sysupgrade-tar.sh：
+#     --board "airpi_ap3000m"      ← 错，这是 CONTROL 的设备名
+# 脚本侧 board_load 的白名单校验直接拒绝并终止构建：
+#     [board-lib] ERROR: 未知板级 "airpi_ap3000m"。可用：ap3000m h5000m
+#
+# 两个值的语义必须严格区分：
+#   · steps.board.outputs.id               = 板级 ID（"ap3000m"）
+#     → 所有 --board 参数都用它；board_load 对它做白名单校验。
+#   · steps.board.outputs.sysupgrade_board = CONTROL 内的设备名（"airpi_ap3000m"）
+#     → 只由 make-sysupgrade-tar.sh 自己从板级文件读出写进 CONTROL，
+#       **绝不**作为 --board 传入。
+#
+# 本守卫直接扫基座 YAML 原文里每一处 --board 取值，只认 outputs.id。
+board_args = re.findall(r"--board\s+[\"']?\$\{\{\s*steps\.board\.outputs\.([A-Za-z_]+)", base_text)
+if not board_args:
+    bad("build.yml 未找到任何 --board ${{ steps.board.outputs.* }} 传值，守卫失去意义")
+else:
+    wrong = sorted({a for a in board_args if a != "id"})
+    if wrong:
+        bad(f"build.yml 有 {len(wrong)} 处 --board 传了非板级 ID 的 outputs.{', outputs.'.join(wrong)} —— "
+            f"--board 必须是板级 ID（outputs.id）；sysupgrade_board 是 CONTROL 设备名，"
+            f"由脚本自行从板级文件读取，不可作为 --board 传入")
+    else:
+        ok(f"build.yml 全部 {len(board_args)} 处 --board 均传板级 ID（outputs.id）")
 
 boards_seen = set()
 for path, d, job in caller_shells:
