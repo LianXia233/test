@@ -4,16 +4,30 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — H5000M 启动卡住复核与伪 NMI 诊断参数
+
+用户确认 `boot-20261009-090607.log` 对应设备启动卡住。两段日志都只到 `basic.target`，没有到达
+`multi-user.target`；第一段约 10 秒后串口沉默，约 90 秒后出现下一次启动，第二段录制也在约 11 秒处结束。
+这不是成功启动，先前将“basic.target 已到达”表述为恢复进展不足以说明系统可用。
+
+- 已有内核片段包含 `CONFIG_ARM64_PSEUDO_NMI=y`，但 H5000M 实际启动参数缺少
+  `irqchip.gicv3_pseudo_nmi=1`；日志同时出现 `NMI not fully supported` 和硬件 lockup watchdog 被禁用。
+- 将该参数加入板级生成的启动参数、H5000M DTS 与备用 `boot.cmd`，以便下一版镜像启用 GICv3 伪 NMI，
+  改善 RCU/CPU 锁死时的诊断回溯。Linux 内核文档说明该参数需配合 `CONFIG_ARM64_PSEUDO_NMI`。
+- **这不是卡死根因修复**：本次日志没有足够的后半段输出来确认 RCU stall 是否发生，也没有栈信息定位
+  卡死源头。需构建并实机启动新镜像，再依据回溯确定后续修复。
+
 ### 2026-10-09 — H5000M 新串口日志复核风扇修复
 
-复核现场日志 `boot-20261009-090607.log`：文件含两段启动。两段均成功启动 `router-fancontrol.service`，并在
+复核现场日志 `boot-20261009-090607.log`：文件含两段启动。两段均启动 `router-fancontrol.service`，并在
 约 10 秒到达 `basic.target`；eMMC 均识别为 14.6 GiB 并挂载 p5，未见 CMD18、块设备 I/O 或 EXT4 错误。
 MT7996 仍输出 `eeprom load fail, use default bin`，第二段 Wi-Fi 接口完成重命名。
 
 - 在本次捕获范围内，未见 `mt7996_thermal_temp_show`、MT76 MCU 等待栈、hung-task 或 RCU stall 报告，
   与上一版日志相比，风扇服务启动不再显示被 Wi-Fi 温度读取卡住。
-- **验证边界**：第一段在内核启动约 10 秒、到达 `basic.target` 后串口无后续输出，约 90 秒后出现下一次启动；
-  第二段仅录到内核启动约 11 秒。因此本日志不能证明 RCU stall 已消失，也不能确定第一段重启原因。
+- **验证边界**：用户确认设备卡在启动过程中；第一段在到达 `basic.target` 后约 10 秒处无后续串口输出，约
+  90 秒后出现下一次启动。第二段仅录到内核启动约 11 秒。因此本日志不能证明 RCU stall 已消失，第一段后续
+  启动/复位原因仍待确认。
 
 ### 2026-10-09 — H5000M 风扇控制避开 MT7996 温度读取阻塞
 

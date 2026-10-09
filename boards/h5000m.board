@@ -28,6 +28,7 @@ BOARD_CPU_CORES="4"
 # 内核串口基址：MT7987A 为 0x11000000（MT7981B 为 0x11002000，勿混用）
 BOARD_UART_MMIO="0x11000000"
 BOARD_PCI="1"                          # 是否有 PCIe（决定 bootargs 是否带 pci=pcie_bus_perf）
+BOARD_BOOTARGS_EXTRA="irqchip.gicv3_pseudo_nmi=1" # 内核已启用 PSEUDO_NMI；显式开启以获取锁死回溯
 
 # ---- 分区布局（与设备现存 OpenWrt GPT 完全一致，不重建）----
 # FIT 内核 load/entry：MT7987A 的 U-Boot（bl-mt798x, mt7987_airpi_h5000m_defconfig）

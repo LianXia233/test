@@ -17,7 +17,8 @@
 
 	chosen {
 		bootargs = "earlycon=uart8250,mmio32,0x11000000 \
-			    root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf";
+			    root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf \
+			    irqchip.gicv3_pseudo_nmi=1";
 		stdout-path = "serial0:115200n8";
 	};
 
