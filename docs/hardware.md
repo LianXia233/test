@@ -78,21 +78,24 @@ mediatek/mt7987a-hiveton-h5000m.dtb
 
 ### 1.2 eMMC 降频 48MHz → 25MHz（2026-10-09）
 
-`&mmc0` 的 `max-frequency` 由 **48MHz 降至 25MHz**，用于规避本项目长期跟踪的
-「msdc 写挂死」。
+`&mmc0` 的 `max-frequency` 由 **48MHz 降至 25MHz**，用于增加 eMMC CMD/DATA
+采样余量；同时声明 `no-sd` 与 `no-sdio`，让控制器只探测板载 eMMC。
 
 **依据**（实机串口日志 `boot-20261009-073542.log`）：48MHz 下内核启动 **15 秒**即出现
 eMMC 数据面命令超时，随后升级为卡彻底失去响应——`mmc0: cache flush error -110`、
 `mmc0: tried to HW reset card, got error -110`、`mmcblk0: recovery failed!`；
 回写线程 `flush-179:0` 被封死在 `mmc_blk_rw_wait`，CPU3 软中断计数冻结拖垮 RCU，
-全系统在同一启动内冻结。超时命令里 CMD6 的两次入参按位拆解为
-`EXT_CSD[32]=1`（FLUSH_CACHE）与 `EXT_CSD[179]=72`（BKOPS_EN），**均为写/维护类操作**，
-指向 eMMC 写路径而非读路径。
+全系统在同一启动内冻结。首个超时命令是 `CMD18` 读取；之后才出现 `CMD6`。
+其中 `0x03200101` 是 `EXT_CSD[32]=1`（FLUSH_CACHE），`0x03B34801` 是
+`EXT_CSD[179]=0x48`（PARTITION_CONFIG，恢复用户数据分区选择），并不是 BKOPS。
+这说明卡或控制器的通讯链路失效，现有日志不足以将根因限定为写入路径。
 
 **改法与边界**：
 
 - 本轮**只改频率**，保留 `cap-mmc-highspeed`（仍走 high speed 时序，仅限制时钟），
   便于把「频率」与「时序模式」两个变量隔离开做对照。
+- H5000M 与 AP3000M 一样是焊接式 eMMC，没有 SD 卡槽或 SDIO 外设；`no-sd` / `no-sdio`
+  去除启动时必然失败的 CMD52、CMD5、CMD8、CMD55 探测，避免这些无关失败污染诊断。
 - 若 25MHz 下仍挂死，下一步再去掉 `cap-mmc-highspeed` 退回 default speed。
 - 本改动是**规避手段，不是根因修复**：它增大 CMD/DATA 线的采样时序余量，
   不改变 eMMC 内部的 cache / BKOPS 行为。根因定位仍需内核侧可诊断性支持

@@ -174,9 +174,12 @@
 	/*
 	 * 2026-10-09 降频规避「msdc 写挂死」。
 	 *
-	 * 实机串口实证（boot-20261009-073542.log）：48MHz 下 eMMC 写路径持续超时——
-	 *   CMD6 arg=0x03200101 → EXT_CSD[32]=1  FLUSH_CACHE
-	 *   CMD6 arg=0x03B34801 → EXT_CSD[179]=72 BKOPS_EN
+	 * 实机串口实证（boot-20261009-073542.log）：48MHz 下首个致命超时是
+	 * CMD18 读取，随后卡不再响应恢复命令。后续可见：
+	 *   CMD6 arg=0x03200101 → EXT_CSD[32]=1    FLUSH_CACHE
+	 *   CMD6 arg=0x03B34801 → EXT_CSD[179]=0x48 PARTITION_CONFIG
+	 * 第二个命令恢复用户数据分区的选择，不能误判为 BKOPS。故日志证明的是
+	 * eMMC 通讯链路失效，不能仅据此归因到写入路径。
 	 * 随后升级为 mmc0: cache flush error -110、tried to HW reset card -110，
 	 * 直至 mmcblk0: recovery failed!；回写线程 flush-179:0 被封死在 mmc_blk_rw_wait，
 	 * CPU3 软中断冻结拖垮 RCU，全系统在同一启动内冻结。
@@ -189,6 +192,9 @@
 	max-frequency = <25000000>;
 	cap-mmc-highspeed;
 	vmmc-supply = <&reg_3p3v>;
+	/* 这是焊接式 eMMC；禁止无意义的 SD / SDIO 探测命令。 */
+	no-sd;
+	no-sdio;
 	non-removable;
 	status = "okay";
 

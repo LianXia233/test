@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — H5000M eMMC 探测限定与故障归因修正
+
+- `dts/mt7987a-hiveton-h5000m.dts`：为焊接式 eMMC 增加 `no-sd` 与 `no-sdio`，禁止内核
+  在同一控制器上探测不存在的 SD / SDIO 设备。现场日志中的 CMD52、CMD5、CMD8、CMD55 均来自
+  这些必然失败的探测；移除后，启动日志只保留真实 eMMC 协议流量。
+- 修正串口日志解读：首个致命超时是 **CMD18 读取**（约 15.1 秒），不是扩容写入；
+  `CMD6 0x03B34801` 写入的是 `EXT_CSD[179] PARTITION_CONFIG=0x48`，并非 `BKOPS_EN`。
+  现有证据指向 eMMC 卡或 MSDC 控制器通讯失效，尚不能把根因限定在写路径。
+- 保留 25 MHz 降频和 4 GiB 扩容上限。两项均可降低负载或增加时序余量，但现在明确作为规避手段，
+  不再将其描述为已经证实的根因修复。
+
 ### 2026-10-09 — eMMC 降频 25MHz + 扩容目标限定 4 GiB（针对「msdc 写挂死」的两项规避）
 
 **实机现场（第二轮串口录制 `boot-20261009-073542.log`，1510 行，COM3 115200 8N1）**：设备经 U-Boot
@@ -13,8 +24,9 @@ Web 界面（`POST /upload` 267.8 MiB + `/flashing.html`）刷写后启动，根
 - **命令层**：`CMD18`(15.1s) → `CMD13` → `CMD12` → `CMD6`(23 次) → 连 `CMD0`/`CMD1` 复位也超时；
   `host->error=0x00000002`（mtk-sd 的 `REQ_CMD_TMO`）；`mmc0: cache flush error -110`、
   `mmc0: tried to HW reset card, got error -110`、**`mmcblk0: recovery failed!`**。
-  CMD6 两次入参按位拆解：`0x03200101` → `EXT_CSD[32]=1`（**FLUSH_CACHE**）、`0x03B34801` →
-  `EXT_CSD[179]=72`（**BKOPS_EN**）—— **两条都是写/维护操作，不是读**。
+  首个超时是读取命令 `CMD18`。后续 CMD6 中，`0x03200101` → `EXT_CSD[32]=1`
+  （**FLUSH_CACHE**），`0x03B34801` → `EXT_CSD[179]=0x48`（**PARTITION_CONFIG**，恢复用户
+  数据分区选择）；后者不是 BKOPS，二者均发生在卡失去响应后的恢复流程中。
 - **块层**：`kworker/1:1H`(PID 101, `Workqueue: mmc_complete mmc_blk_mq_complete_work`) 卡在
   `mmc_wait_for_req_done` 持锁不放 → `flush-179:0`（`Workqueue: writeback wb_workfn`）卡在
   `mmc_blk_rw_wait` → 脏页刷不出 → `ext4_journal_check_start: Detected aborted journal`(t=201s)
@@ -52,7 +64,7 @@ Web 界面（`POST /upload` 267.8 MiB + `/flashing.html`）刷写后启动，根
   （那等于扩满分区）。**10 项全通过**。
 
 > **这两项是规避手段，不是根因修复**：改变的是 eMMC 的时序余量与写入规模，不改变卡内部
-> cache / BKOPS 行为。根因定位仍依赖内核侧可诊断性——`CONFIG_ARM64_PSEUDO_NMI` 等已在 config 中，
+> cache 或分区配置行为。根因定位仍依赖内核侧可诊断性——`CONFIG_ARM64_PSEUDO_NMI` 等已在 config 中，
 > 但**尚未进入实机镜像**（本轮实机仍报 `watchdog: NMI not fully supported` /
 > `watchdog: Hard watchdog permanently disabled`），导致 CPU3 的调用栈无法 dump，
 > 是本次诊断中唯一靠推理而非直证的环节。
