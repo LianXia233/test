@@ -78,6 +78,7 @@ SYSUP_BOARD="$BOARD_SYSUPGRADE_BOARD"
 
 [[ -f "$KERNEL_BIN" ]] || die "缺少 FIT 内核：$KERNEL_BIN（先运行 build/make-sd-image.sh）"
 [[ -f "$ROOT_IMG"   ]] || die "缺少 rootfs 镜像：$ROOT_IMG（先运行 build/make-sd-image.sh）"
+bash "$PROJECT_ROOT/scripts/check-boot-rootfs-image.sh" "$ROOT_IMG"
 
 OUT_BIN="$(mkdir -p "$(dirname "$OUT_BIN")" && cd "$(dirname "$OUT_BIN")" && pwd)/$(basename "$OUT_BIN")"
 

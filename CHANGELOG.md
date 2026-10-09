@@ -25,8 +25,9 @@ SquashFS 挂载，说明两个启动环境使用了不同的 p5 内容/文件系
 
 - 参考仓库与本项目的 p5 布局不同：参考仓库放完整 Debian ext4 根文件系统；本项目放 `/sbin/init` + busybox + SquashFS
   的引导层 ext4。二者都使用 `root=PARTLABEL=rootfs`，刷写时必须让 FIT 内核与正确布局的 p5 配对。
-- `scripts/install-emmc.sh --rootfs-img` 现在在写盘前检查引导层 `/sbin/init`、busybox、SquashFS 文件及 init shebang；
-  误把缺少本项目引导入口的 ext4 镜像写入 p5 时会中止，并指出这是镜像布局不匹配。
+- 新增 `scripts/check-boot-rootfs-image.sh`，统一检查引导层 `/sbin/init` 可执行属性和 shebang、busybox、SquashFS 文件；
+  ext4 镜像在构建结束、打包 sysupgrade、以及 `install-emmc.sh --rootfs-img` 写盘前都会经过此检查，避免不匹配的 p5 镜像进入产物或写入设备。
+- **验证**：`git diff --check` 通过；未运行完整镜像构建或设备刷写，需用新固件实机确认。
 - **验证边界**：此串口日志没有输出各 init 尝试的 errno，尚不能区分 p5 缺文件、内容错配或文件损坏；需检查设备当前 p5
   实际内容。日志尾部 OpenWrt 使用 SquashFS 成功继续启动，表明它的 p5 与 ext4 Debian 启动阶段不是同一文件系统布局。
 

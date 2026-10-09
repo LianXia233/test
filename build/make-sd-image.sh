@@ -601,8 +601,7 @@ mkfs.ext4 -q -F -L rootfs -d "$STAGE" "$ROOTFS_IMG"
 # 镜像自检（免挂载：debugfs 读取 + e2fsck）
 log "校验引导层镜像："
 e2fsck -fn "$ROOTFS_IMG" >/dev/null && log "  [OK] e2fsck 检查通过" || die "e2fsck 未通过"
-debugfs -R 'stat /sbin/init' "$ROOTFS_IMG" 2>/dev/null | grep -q 'Size:' \
-  && log "  [OK] /sbin/init 就位" || die "镜像内 /sbin/init 缺失"
+bash "$PROJECT_ROOT/scripts/check-boot-rootfs-image.sh" "$ROOTFS_IMG"
 debugfs -R 'stat /squashfs/rootfs.squashfs' "$ROOTFS_IMG" 2>/dev/null | grep -q "Size: $SQ_BYTES" \
   && log "  [OK] /squashfs/rootfs.squashfs 就位（$SQ_BYTES 字节）" || die "镜像内 squashfs 文件异常"
 debugfs -R 'stat /usr/bin/busybox' "$ROOTFS_IMG" 2>/dev/null | grep -q "Size: $BB_SIZE" \

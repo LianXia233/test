@@ -155,10 +155,6 @@ for tool in dd mkfs.ext4 sgdisk; do
   command -v "$tool" >/dev/null 2>&1 || \
     die "缺少 $tool。请安装：sudo apt-get install gdisk e2fsprogs"
 done
-if [[ -n "$ROOTFS_IMG" ]]; then
-  command -v debugfs >/dev/null 2>&1 || \
-    die "缺少 debugfs（刷写前校验引导层 ext4 需要）。请安装：sudo apt-get install e2fsprogs"
-fi
 if [[ -n "$ROOTFS_TAR" ]]; then
   for tool in tar zstd losetup; do
     command -v "$tool" >/dev/null 2>&1 || \
@@ -171,18 +167,7 @@ fi
 # 必须执行脚本 /sbin/init，由它挂载 SquashFS 并 pivot_root。仅校验 ext4 魔数
 # 会让格式正确但内容不匹配的镜像被写入，随后以 "No working init found" panic。
 if [[ -n "$ROOTFS_IMG" ]]; then
-  for _path in /sbin/init /usr/bin/busybox; do
-    _meta=$(debugfs -R "stat $_path" "$ROOTFS_IMG" 2>/dev/null || true)
-    [[ "$_meta" == *"Type: regular"* && "$_meta" == *"Mode: 0755"* ]] || \
-      die "ext4 镜像缺少可执行的 $_path；它不是本项目的引导层 rootfs，拒绝写入 p5"
-  done
-  _meta=$(debugfs -R 'stat /squashfs/rootfs.squashfs' "$ROOTFS_IMG" 2>/dev/null || true)
-  [[ "$_meta" == *"Type: regular"* && "$_meta" == *"Size:"* ]] || \
-    die "ext4 镜像缺少 /squashfs/rootfs.squashfs；它不是本项目的引导层 rootfs，拒绝写入 p5"
-  _shebang=$(debugfs -R 'cat /sbin/init' "$ROOTFS_IMG" 2>/dev/null | head -n 1 || true)
-  [[ "$_shebang" == '#!/usr/bin/busybox sh' ]] || \
-    die "ext4 镜像 /sbin/init 入口与本项目引导层不匹配（预期 busybox 脚本），拒绝写入 p5"
-  log "  [OK] p5 镜像包含可执行 /sbin/init、busybox 与 SquashFS 根文件系统"
+  bash "$SCRIPT_DIR/check-boot-rootfs-image.sh" "$ROOTFS_IMG"
 fi
 
 # ---------------------------------------------------------------- 1. 校验现有分区布局（只读）
