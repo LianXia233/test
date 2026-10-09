@@ -16,8 +16,21 @@
 	};
 
 	chosen {
-		bootargs = "earlycon=uart8250,mmio32,0x11000000 \
-			    root=PARTLABEL=rootfs rootwait pci=pcie_bus_perf \
+		/*
+		 * 【为什么这里的字符串必须与 boards/board-lib.sh 的 BOARD_BOOTARGS 语义一致】
+		 * 正常路径下 U-Boot 会把 env bootargs 写进 /chosen/bootargs 覆盖本值，
+		 * 所以本行只在「U-Boot 未提供 bootargs」的兜底路径下生效（例如手动
+		 * booti + 自带 DTB、或 env 被清空）。
+		 *
+		 * 2026-10-09 对齐时发现本行此前缺少 console= 与 rw，与 BOARD_BOOTARGS
+		 * （console=ttyS0,115200n8 … rootwait rw …）不一致。两者分歧的后果在校验过：
+		 * 缺 rw 时 p5 会只读挂载，引导层 /sbin/init 的 overlay 组装失败
+		 * （2026-10-06 实机已实锤过该故障，见 boot/h5000m/boot.cmd 注释）。
+		 * 兜底路径恰恰是最需要正确的路径，因此这里补齐，不再留一个「比主路径更弱」的默认值。
+		 */
+		bootargs = "console=ttyS0,115200n8 \
+			    earlycon=uart8250,mmio32,0x11000000 \
+			    root=PARTLABEL=rootfs rootwait rw pci=pcie_bus_perf \
 			    irqchip.gicv3_pseudo_nmi=1";
 		stdout-path = "serial0:115200n8";
 	};
@@ -254,8 +267,27 @@
 };
 
 &pcie1 {
-	/* 与已验证镜像的 DTB 保持一致（该槽位未挂设备，启用无副作用） */
-	status = "okay";
+	/*
+	 * 2026-10-09 实测回退为 disabled（推翻 2026-10-06 的「启用无副作用」结论）。
+	 *
+	 * 2026-10-06 曾按「与已验证厂商 DTB 保持一致」把本节点从 disabled 改为 okay。
+	 * 但 H5000M 实机串口日志（boot-20261009-090607.log，6.18 内核）证明该控制器
+	 * 在空槽下并不会静默启用：
+	 *   mtk-pcie-gen3 11290000.pcie: PCIe link down, current LTSSM state: detect.quiet (0x0)
+	 *   mtk-pcie-gen3 11290000.pcie: probe with driver mtk-pcie-gen3 failed with error -110
+	 * 并在 fw_devlink 阶段额外留下
+	 *   /soc/pcie@11290000: Fixed dependency cycle(s) with /soc/pcie@11290000/interrupt-controller
+	 * 而能完整启动到 br-lan forwarding 的 OpenWrt 6.18.54 固件，其 DTB 里只有
+	 * 11280000 的控制台输出、没有 11290000 的任何一行，即该控制器处于 disabled。
+	 *
+	 * 【为什么不能直接外推厂商 DTB】厂商那套 okay 是 6.6.94 出货内核下的状态；
+	 * 本仓库 mt7992（[14c3:7992]）挂在 11280000（PCI host bridge to bus 0000:00，
+	 * endpoint 0000:01:00.0），11290000 上没有任何设备。空槽启用只会换来一条
+	 * probe 失败、一个 fw_devlink 循环和一份 IRQ 资源占用，没有任何功能收益。
+	 *
+	 * 未来若该槽位实际插卡，再依据实机枚举结果恢复 okay。
+	 */
+	status = "disabled";
 };
 
 &pio {

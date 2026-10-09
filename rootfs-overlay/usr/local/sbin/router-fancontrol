@@ -35,6 +35,14 @@ is_uint() {
 # 守护进程每轮都要读十几个 sysfs 节点，用 cat 意味着每轮十几次 fork+exec；
 # 这里用 shell 内建的 read 完成，进程数降到 0。文件不存在或不可读时返回空串，
 # 与原来的 "$(cat ... || true)" 行为一致。
+#
+# 【2026-10-09 为什么不能改用 `timeout N cat` 来防阻塞】
+# sysfs 的 show 函数若在内核态等一把不可中断的 mutex，被阻塞的是 read() 系统调用
+# 本身。此时即使用 `timeout N cat file` 杀掉用户态进程，内核里的等待也不会因为
+# 收到信号而退出（mutex_lock 不可中断），结果是这个进程变成 D 状态僵尸：既拿不到
+# 数据、也回收不掉，反而多泄一个进程，且每轮循环再泄一个。所以本脚本不能靠
+# "超时兜底"来防挂死，只能靠"根本不读会阻塞的节点"——即 read_sensors 的传感器
+# 白名单，以及 TEMP_SOURCE 内建默认取 cpu（见 load_config）。
 sysfs_read() {
 	local value=""
 	[ -r "$1" ] && IFS= read -r value < "$1" 2>/dev/null
@@ -102,8 +110,18 @@ load_config() {
 	case "$MODE" in auto|manual|kernel) ;; off) MODE="kernel" ;; *) MODE="auto" ;; esac
 	PROFILE="$(cfg_string CURVE balanced)"
 	case "$PROFILE" in silent|balanced|performance|custom) ;; *) PROFILE="balanced" ;; esac
-	TEMP_SOURCE="$(cfg_string TEMP_SOURCE max)"
-	case "$TEMP_SOURCE" in max|cpu) ;; *) TEMP_SOURCE="max" ;; esac
+	# 【为什么内建默认是 cpu 而不是 max】
+	# 板级默认（boards/overlay.d/<board>/etc/default/router-fancontrol）已把
+	# TEMP_SOURCE 定为 cpu，但那是"配置层"的默认：一旦 /etc/default/router-fancontrol
+	# 丢失、被清空或被用户改坏，cfg_string 会回落到本行的内建值。内建值若仍是 max，
+	# 就等于在这条兜底路径上重新打开 WiFi 温度读取——2026-10-09 的 hung-task dump
+	# 已直接证实其后果：max 模式下 hwmon 遍历会读到 mt7996e 的 temp1_input，
+	# 该 sysfs show 函数（mt7996_thermal_temp_show）要抢 mt76 的 mcu.mutex，而持锁的
+	# kworker/u16:0（phy0 mt7996_init_work → mt7996_mcu_set_eeprom →
+	# mt76_mcu_get_response）在等一个不应答的 MCU，于是这次读取无限阻塞。
+	# 安全默认必须与板级一致，故同步改为 cpu：宁可少读一路温度，也不读会挂死的节点。
+	TEMP_SOURCE="$(cfg_string TEMP_SOURCE cpu)"
+	case "$TEMP_SOURCE" in max|cpu) ;; *) TEMP_SOURCE="cpu" ;; esac
 	MANUAL_PWM="$(cfg_uint MANUAL_PWM 160 0 255)"
 	INTERVAL="$(cfg_uint INTERVAL 5 2 60)"
 	HYSTERESIS="$(cfg_uint HYSTERESIS 2 0 10)"

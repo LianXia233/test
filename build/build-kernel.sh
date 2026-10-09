@@ -390,6 +390,10 @@ case "$BOARD_SYSUPGRADE_BOARD" in
       CONFIG_PINCTRL_MT7987 CONFIG_COMMON_CLK_MT7987 CONFIG_COMMON_CLK_MT7987_ETHSYS
       CONFIG_PCS_MTK_LYNXI CONFIG_MEDIATEK_2P5GE_PHY
       CONFIG_MT7996E CONFIG_PCIE_MEDIATEK_GEN3 CONFIG_MTK_LVTS_THERMAL
+      # PCI 层调试可见性（说明见 h5000m-6.18.config 的 CONFIG_PCI_DEBUG 段）：
+      # 缺它时启动日志里没有 assign IRQ / msi# / save config 三组行，无法从
+      # 日志判定 MSI 向量与设备 IRQ 是否真正建立，PCIe 侧没有任何观测手段。
+      CONFIG_PCI_DEBUG
     ) ;;
   airpi_ap3000m)
     REQUIRED_SYMBOLS+=(

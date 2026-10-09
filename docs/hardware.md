@@ -35,7 +35,8 @@
 ## 1. 设备树（DTS）
 
 直接复用已验证的 `mt7987a-hiveton-h5000m.dts`，除 2026-10-09 的 **eMMC 降频**
-（`&mmc0` 的 `max-frequency` 48MHz → 25MHz，见 §1.2）外，**未改动**任何已验证定义：
+（`&mmc0` 的 `max-frequency` 48MHz → 25MHz，见 §1.2）与 **`pcie1` 回退 `disabled`**
+（空槽，见 §1.3）外，**未改动**任何已验证定义：
 
 - GPIO 按键：reset = GPIO1，wps = GPIO0（gpio-keys）
 - LED：GPIO3（amber，WLAN 2.4G）、GPIO4（blue，WLAN 5G）（gpio-leds）
@@ -48,7 +49,8 @@
   - `gmac1`：internal，PHY handle = `phy1`（内置 2.5G PHY，mdio addr 15）
 - eMMC：`mmc0` 8 线 **25MHz**（2026-10-09 由 48MHz 降频，见 §1.2），
   `card@0` 分区含 `factory` NVMEM（Wi-Fi EEPROM，0x0 0x1e00）
-- PCIe：`pcie0`（GPIO36 reset），下游 `mt7992@0,0` 引用 `eeprom_factory_0`
+- PCIe：`pcie0`（GPIO36 reset），下游 `mt7992@0,0` 引用 `eeprom_factory_0`；
+  `pcie1`（11290000）为空槽，2026-10-09 回退 `disabled`（见 §1.3）
 - PWM 风扇：`pwm1` 50kHz（pwm-fan，`/sys/class/hwmon/*/pwm1`）
 - USB：`ssusb` + `tphyu3port0`
 - UART0：115200n8 earlycon
@@ -104,6 +106,32 @@ eMMC 数据面命令超时，随后升级为卡彻底失去响应——`mmc0: ca
 > **不要误判方向**：`mmc0` 只协商到 high speed（日志明确为
 > `mmc0: new high speed MMC card`），**从未进入 HS200/HS400**，
 > 因此本次挂死不应归因于 HS200/HS400 高速时序问题。
+
+### 1.3 pcie1 回退 disabled（2026-10-09）
+
+`&pcie1`（`pcie@11290000`）由 `status = "okay"` 改回 **`disabled`**。SoC dtsi
+（`mt7987.dtsi`）对该节点的默认值本就是 `disabled`，本次只是回到默认值。
+
+**依据**（实机串口日志，6.18 内核）：启用后的实际输出为
+
+```
+mtk-pcie-gen3 11290000.pcie: PCIe link down, current LTSSM state: detect.quiet (0x0)
+mtk-pcie-gen3 11290000.pcie: probe with driver mtk-pcie-gen3 failed with error -110
+/soc/pcie@11290000: Fixed dependency cycle(s) with /soc/pcie@11290000/interrupt-controller
+```
+
+作为对照，能完整启动到 `br-lan` forwarding 的 OpenWrt 6.18.54 固件，其 DTB 里
+**只有** 11280000 的 host bridge 输出，没有 11290000 的任何一行——即该控制器
+处于 `disabled`。
+
+**为什么推翻 2026-10-06 的依据**：当时按「与参考仓库厂商 DTB 保持一致」把它改为
+`okay`，理由是「空槽无副作用」。但那份 DTB 来自 6.6.94 出货内核，实机（6.18）证明
+空槽启用**有**副作用：一条必然失败的 probe、一个 fw_devlink 循环依赖、一份 IRQ
+资源占用。本机 mt7992（`[14c3:7992]`）挂在 11280000（PCI host bridge to bus
+`0000:00`，端点 `0000:01:00.0`），11290000 上没有任何设备。
+
+**边界**：此项属于「与可工作的配置对齐 + 消除实测错误」，**不声称**它是 t≈10.1 s
+冻结的根因。未来该槽位若插卡，按实机枚举结果恢复 `okay`。
 
 ## 2. 内核补丁（来自 ImmortalWrt patches-6.18）
 

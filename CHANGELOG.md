@@ -4,6 +4,60 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 回退 pcie1、补齐 PCI 层可见性、收紧风扇兜底默认
+
+对照本轮完整串口缓冲（27 次内核启动 / 3 套固件）逐项复核后，**修正一处此前的错误结论**，
+并落下三项有直接实证支撑的改动。
+
+**结论修正（重要）**：本项目此前把「正常 OpenWrt 有 `assign IRQ: got 72`、`msi#0x0..0x1f`、
+`pci 0000:00:00.0: save config 0x00: ...`，而本项目固件一行都没有」判读为「PCIe MSI 中断路径
+未建立」。**该判读是错的**：这些输出全部来自 PCI 层的 dbg 路径，上游 ImmortalWrt 的 6.18
+mt7987 基线正是 `CONFIG_PCI_DEBUG=y`，本项目配置缺该符号，因此**等于没有观测手段**，
+不能据此反推 MSI 未工作。反证：两套固件的**非 debug** 行完全对应
+（`mtk-pcie-gen3 11280000.pcie: PCI host bridge to bus 0000:00`、
+`pcieport ... PME: Signaling with IRQ N`、`mt7996e ... HW/SW Version` 等），
+说明控制器与端点都正常枚举并绑定，差异只在日志详细度。
+
+**改动 1 — `dts/mt7987a-hiveton-h5000m.dts`：`&pcie1` 由 `okay` 回退为 `disabled`。**
+2026-10-06 曾依据「与已验证厂商 DTB 一致（空槽无副作用）」把它改为 `okay`。实机日志反证了
+「无副作用」这个前提：
+
+```
+mtk-pcie-gen3 11290000.pcie: PCIe link down, current LTSSM state: detect.quiet (0x0)
+mtk-pcie-gen3 11290000.pcie: probe with driver mtk-pcie-gen3 failed with error -110
+/soc/pcie@11290000: Fixed dependency cycle(s) with /soc/pcie@11290000/interrupt-controller
+```
+
+而能完整启动到 `br-lan` forwarding 的 OpenWrt 6.18.54 固件，其 DTB 中该控制器不产生任何输出
+（只有 11280000），即处于 `disabled`。厂商那套 `okay` 属于 6.6.94 出货内核；本仓库 mt7992
+（`[14c3:7992]`）挂在 11280000（bus `0000:00`，端点 `0000:01:00.0`），11290000 上无设备。
+空槽启用只换来一条 probe 失败、一个 fw_devlink 循环和一份 IRQ 占用，故回退。
+详见 `docs/hardware.md` §1.3。
+
+**改动 2 — 内核配置：关闭 `CONFIG_PCIE_MEDIATEK`、开启 `CONFIG_PCI_DEBUG`。**
+前者是老一代控制器驱动（MT7621 / MT7622 / MT7629），MT7987 走 `PCIE_MEDIATEK_GEN3`；
+上游基线显式 `# CONFIG_PCIE_MEDIATEK is not set`，本项目此前两者同时编入，属于零收益冗余。
+后者对齐上游，用来消除改动 1 之前提到的观测盲区；并把 `CONFIG_PCI_DEBUG` 加入
+`build/build-kernel.sh` 的板级 `REQUIRED_SYMBOLS`，防止后续换环境重编时丢符号。
+
+**改动 3 — `rootfs-overlay/usr/local/sbin/router-fancontrol`：收紧兜底默认。**
+`TEMP_SOURCE` 的**内建**默认值此前仍是 `max`（板级配置已改 `cpu`，但配置文件丢失 / 被清空 /
+被改坏时 `cfg_string` 会回落到内建值），等于在这条兜底路径上重新打开 WiFi 温度读取。
+改为 `cpu`，并在代码里写清后果链：`mt7996_thermal_temp_show` 要抢 mt76 的 `mcu.mutex`，
+而持锁的 `kworker/u16:0`（`phy0 mt7996_init_work` → `mt7996_mcu_set_eeprom` →
+`mt76_mcu_get_response`）在等一个不应答的 MCU，于是该次读取无限阻塞。
+同时在 `sysfs_read` 处记录**为什么不能用 `timeout` 兜底**：被阻塞的是内核态不可中断
+`mutex_lock`，杀用户态进程只会留下 D 状态僵尸，每轮循环再泄一个。
+
+- **验证**：`git diff --check` 通过；改动文件全部保持 LF（逐字节确认无 CRLF / 孤立 CR）；
+  `bash -n` 校验 `build-kernel.sh` 与 `router-fancontrol` 通过；DTS 经自建静态校验器确认
+  括号 / 引号 / 块注释全部平衡。未运行内核或镜像构建，未刷机。
+- **验证边界**：**以上三项都不声称是 t≈10.1 s 冻结的根因**。CPU3 冻结的直接原因仍未定位——
+  t=77.87 s 的 hung-task dump 只证明了 `mt7996_init_work` 持锁等 MCU、且 `router-fancontrol`
+  阻塞其上，不能证明这条链导致 RCU 停摆。`CONFIG_PCI_DEBUG=y` 的作用是**让下一版镜像能自证**
+  PCIe / MSI 状态（`assign IRQ` / `msi#` / `save config` 三组行），而不是修复本身。
+  仍需构建并实机启动新镜像取证。
+
 ### 2026-10-09 — 根据启动代码复核修正启动卡住诊断
 
 完整日志包含三个不同启动阶段：
