@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — H5000M 风扇控制避开 MT7996 温度读取阻塞
+
+**现场日志**：`boot-20261009-083917.log` 中未再出现 eMMC 命令超时；但系统反复报告 CPU3 RCU stall。
+约 77.9 秒时，`router-fancontrol` 在读取 MT7996 温度（`mt7996_thermal_temp_show`）时等待驱动 MCU
+互斥锁，而 MT7996 初始化工作线程正等待 MCU 响应。日志没有 watchdog 调用栈，无法据此证明这条阻塞链
+就是 CPU3 RCU stall 的根因。
+
+- H5000M 将 `TEMP_SOURCE` 从 `max` 改为 `cpu`。
+- 修正 `router-fancontrol` 的 CPU 模式：按传感器类型筛选后再读取温度节点，并跳过 5G 模组温度查询，
+  避免仅仅不参与温度取最大值、却仍触发 Wi-Fi/PHY/5G 传感器读取的问题。
+- **限制**：这针对日志中已观察到的风扇守护进程阻塞；CPU3 RCU stall 是否随之消失仍需实机复测，根因未完全确认。
+
 ### 2026-10-09 — H5000M eMMC 探测限定与故障归因修正
 
 - `dts/mt7987a-hiveton-h5000m.dts`：为焊接式 eMMC 增加 `no-sd` 与 `no-sdio`，禁止内核
