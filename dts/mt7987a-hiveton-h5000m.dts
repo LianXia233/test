@@ -171,7 +171,22 @@
 	pinctrl-0 = <&mmc_pins_default>;
 	pinctrl-1 = <&mmc_pins_uhs>;
 	bus-width = <8>;
-	max-frequency = <48000000>;
+	/*
+	 * 2026-10-09 降频规避「msdc 写挂死」。
+	 *
+	 * 实机串口实证（boot-20261009-073542.log）：48MHz 下 eMMC 写路径持续超时——
+	 *   CMD6 arg=0x03200101 → EXT_CSD[32]=1  FLUSH_CACHE
+	 *   CMD6 arg=0x03B34801 → EXT_CSD[179]=72 BKOPS_EN
+	 * 随后升级为 mmc0: cache flush error -110、tried to HW reset card -110，
+	 * 直至 mmcblk0: recovery failed!；回写线程 flush-179:0 被封死在 mmc_blk_rw_wait，
+	 * CPU3 软中断冻结拖垮 RCU，全系统在同一启动内冻结。
+	 *
+	 * 降到 25MHz 以增大 CMD/DATA 线的采样时序余量。单变量对照：本轮只改频率，
+	 * 保留 cap-mmc-highspeed（仍走 high speed 时序、仅限时钟），便于隔离「频率」
+	 * 与「时序模式」两个变量。若 25MHz 无效，下一步再去掉 cap-mmc-highspeed
+	 * 退回 default speed。
+	 */
+	max-frequency = <25000000>;
 	cap-mmc-highspeed;
 	vmmc-supply = <&reg_3p3v>;
 	non-removable;

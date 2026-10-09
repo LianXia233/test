@@ -34,7 +34,8 @@
 
 ## 1. 设备树（DTS）
 
-直接复用已验证的 `mt7987a-hiveton-h5000m.dts`，**未改动**任何已验证定义：
+直接复用已验证的 `mt7987a-hiveton-h5000m.dts`，除 2026-10-09 的 **eMMC 降频**
+（`&mmc0` 的 `max-frequency` 48MHz → 25MHz，见 §1.2）外，**未改动**任何已验证定义：
 
 - GPIO 按键：reset = GPIO1，wps = GPIO0（gpio-keys）
 - LED：GPIO3（amber，WLAN 2.4G）、GPIO4（blue，WLAN 5G）（gpio-leds）
@@ -45,7 +46,8 @@
 - 网络：
   - `gmac0`：2500base-x，PHY handle = `phy0`（RTL8221B，mdio addr 1，GPIO42 reset）
   - `gmac1`：internal，PHY handle = `phy1`（内置 2.5G PHY，mdio addr 15）
-- eMMC：`mmc0` 8 线 48MHz，`card@0` 分区含 `factory` NVMEM（Wi-Fi EEPROM，0x0 0x1e00）
+- eMMC：`mmc0` 8 线 **25MHz**（2026-10-09 由 48MHz 降频，见 §1.2），
+  `card@0` 分区含 `factory` NVMEM（Wi-Fi EEPROM，0x0 0x1e00）
 - PCIe：`pcie0`（GPIO36 reset），下游 `mt7992@0,0` 引用 `eeprom_factory_0`
 - PWM 风扇：`pwm1` 50kHz（pwm-fan，`/sys/class/hwmon/*/pwm1`）
 - USB：`ssusb` + `tphyu3port0`
@@ -73,6 +75,32 @@ H5000M DTS `#include "mt7987a.dtsi"`。内核构建时需要把 ImmortalWrt 中�
 ```
 mediatek/mt7987a-hiveton-h5000m.dtb
 ```
+
+### 1.2 eMMC 降频 48MHz → 25MHz（2026-10-09）
+
+`&mmc0` 的 `max-frequency` 由 **48MHz 降至 25MHz**，用于规避本项目长期跟踪的
+「msdc 写挂死」。
+
+**依据**（实机串口日志 `boot-20261009-073542.log`）：48MHz 下内核启动 **15 秒**即出现
+eMMC 数据面命令超时，随后升级为卡彻底失去响应——`mmc0: cache flush error -110`、
+`mmc0: tried to HW reset card, got error -110`、`mmcblk0: recovery failed!`；
+回写线程 `flush-179:0` 被封死在 `mmc_blk_rw_wait`，CPU3 软中断计数冻结拖垮 RCU，
+全系统在同一启动内冻结。超时命令里 CMD6 的两次入参按位拆解为
+`EXT_CSD[32]=1`（FLUSH_CACHE）与 `EXT_CSD[179]=72`（BKOPS_EN），**均为写/维护类操作**，
+指向 eMMC 写路径而非读路径。
+
+**改法与边界**：
+
+- 本轮**只改频率**，保留 `cap-mmc-highspeed`（仍走 high speed 时序，仅限制时钟），
+  便于把「频率」与「时序模式」两个变量隔离开做对照。
+- 若 25MHz 下仍挂死，下一步再去掉 `cap-mmc-highspeed` 退回 default speed。
+- 本改动是**规避手段，不是根因修复**：它增大 CMD/DATA 线的采样时序余量，
+  不改变 eMMC 内部的 cache / BKOPS 行为。根因定位仍需内核侧可诊断性支持
+  （`CONFIG_ARM64_PSEUDO_NMI`，见 `build/kernel-conf/h5000m-6.18.config`）。
+
+> **不要误判方向**：`mmc0` 只协商到 high speed（日志明确为
+> `mmc0: new high speed MMC card`），**从未进入 HS200/HS400**，
+> 因此本次挂死不应归因于 HS200/HS400 高速时序问题。
 
 ## 2. 内核补丁（来自 ImmortalWrt patches-6.18）
 

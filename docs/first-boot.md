@@ -113,7 +113,7 @@ sudo bash scripts/install-emmc.sh \
       → 组装 OverlayFS（lower=SquashFS，upper/work=/overlay）
       → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
   → systemd（Debian 13）
-  → router-grow-rootfs（首启 resize2fs 在线扩容 p5 至 ~7.2 GiB）
+  → router-grow-rootfs（首启 resize2fs 在线扩容 p5 至 4 GiB；正常刷写已在刷写时离线扩好，此处只剩只读比对）
   → NetworkManager + router-init（创建 eth1 WAN、eth2 备用 WAN、br-lan、eth0 LAN 与 Wi-Fi profiles；装配 nftables）
   → dnsmasq（After/Requires router-init；其 oneshot 完成后启动，提供 DHCP + DNS + IPv6 RA）
   → router-fancontrol（PWM 风扇温控）
@@ -153,7 +153,7 @@ cat /etc/h5000m-initial-credentials
 cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
 findmnt /                    # overlay（upperdir=/overlay/upper ...），lowerdir 含 /sq
 findmnt /sq                  # /dev/mmcblk0p5[/squashfs/rootfs.squashfs] squashfs ro
-df -h /                      # 根可写容量 ≈ p5 引导层剩余空间（首启扩容后 ~7.2 GiB）
+df -h /                      # 根可写容量 ≈ p5 引导层 ext4 容量（首启扩容后 4 GiB）
 lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
 ip -br addr                 # eth0 / eth1 / br-lan
 systemctl status router-grow-rootfs router-fancontrol router-init dnsmasq router-panel

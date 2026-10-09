@@ -80,7 +80,8 @@ BOOT_DIR="$OUT_DIR/boot"
 # 【为什么必须是 128 而不是 24 —— 实机启动失败根因之一，勿随意调小】
 # 启动时序是：内核挂 p5 引导层 → /sbin/init 组装 OverlayFS → pivot_root → systemd →
 #             router-grow-rootfs.service（当时名 h5000m-grow-rootfs.service）才执行
-#             resize2fs 把 ext4 扩到 p5 实际大小（~7.2 GiB）。
+#             resize2fs 把 ext4 扩到 4 GiB（2026-10-09 起不再扩满 p5 的 ~7.24 GiB，
+#             见 scripts/install-emmc.sh 离线扩容段）。
 # 也就是说 systemd 冷启动阶段，OverlayFS 的 upper/work 只能落在**引导层镜像内**这点空间上；
 # 在 grow-rootfs 完成前，/var/log/journal、NetworkManager state、随机种子、tmp 等全部写这里。
 # EXTRA_MB=24 时实测引导层 152 MiB 仅剩 **2.8 MiB** 空闲（journal + 5% root 预留吃掉大半），
@@ -626,7 +627,7 @@ log "=========================================="
 log "刷写包生成完成（$BOARD_NAME / $BOARD_SOC）："
 log "  p4 ← $FIT_OUT（FIT 内核）"
 log "  p5 ← $ROOTFS_IMG（引导层 ext4：init + busybox + SquashFS + overlay 目录）"
-log "首启：/sbin/init 组装 OverlayFS → 首启扩容服务把 p5 扩满（~7.2 GiB，供 /etc /var 持久化）"
+log "首启：/sbin/init 组装 OverlayFS → 首启扩容服务把 p5 ext4 扩到 4 GiB（供 /etc /var 持久化）"
 log "封装 sysupgrade-tar 单文件（推荐）："
 log "  bash build/make-sysupgrade-tar.sh --board $BOARD --kernel $FIT_OUT --root $ROOTFS_IMG"
 log "分区级刷写方法（在目标设备上执行，保持分区布局不变）："

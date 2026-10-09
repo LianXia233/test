@@ -2,8 +2,10 @@
 # <board> — p5（PARTLABEL=rootfs）引导层 ext4 扩容**兜底**脚本
 #
 # 布局：p5 = 引导层 ext4（引导 init + SquashFS 文件 + /overlay upper/work）。
-# 固件内置的引导层镜像远小于 p5 分区（~7.24 GiB），需要把 ext4 扩满才能让
-# upper（/etc /var /opt 等持久化数据）用到 p5 的剩余空间。
+# 固件内置的引导层镜像远小于 p5 分区（~7.24 GiB），需要扩容才能让 upper
+#（/etc /var /opt 等持久化数据）有可用空间。
+# **扩容目标为 4 GiB，不扩满 p5**（2026-10-09 依用户要求调整；理由见下方
+# GROW_TARGET_BYTES 处注释：限制这次重量级 eMMC 写入的规模）。
 #
 # ============================ 2026-10-09 重要改造 ============================
 # 设计原则已从「首启必跑」改为「**正常刷写不跑、只在确有必要时兜底**」：
@@ -59,20 +61,33 @@ if [ -z "$FS_BLOCKS" ] || [ -z "$FS_BSIZE" ] || [ -z "$GRP_BLOCKS" ]; then
 fi
 FS_BYTES=$((FS_BLOCKS * FS_BSIZE))
 GRP_BYTES=$((GRP_BLOCKS * FS_BSIZE))
-SPARE=$((DEV_BYTES - FS_BYTES))
+# --------------------------- 扩容目标：4 GiB（2026-10-09） ---------------------------
+# 不再扩满 p5（~7.24 GiB）。原因：
+#   1) resize2fs 要为新增空间写块位图 / inode 表 / 组描述符 / 备份超级块，写入量大致
+#      与「新增容量」成正比。本机正在排查「msdc 写挂死」——把这次重量级写入的规模
+#      从 ~7.24 GiB 压到 4 GiB，是当前最直接的降风险手段。
+#   2) 4 GiB 对路由器持久化层（/etc /var /opt + 日志）已绰绰有余。
+# 目标取 min(4 GiB, 设备容量)，避免在更小的分区上越界。
+GROW_TARGET_BYTES=$((4096 * 1024 * 1024))
+if [ "$GROW_TARGET_BYTES" -gt "$DEV_BYTES" ]; then
+    GROW_TARGET_BYTES=$DEV_BYTES
+fi
+NEED_BYTES=$((GROW_TARGET_BYTES - FS_BYTES))
 
-echo "router: grow check $DEV — device=${DEV_BYTES}B fs=${FS_BYTES}B spare=${SPARE}B grp=${GRP_BYTES}B"
+echo "router: grow check $DEV — device=${DEV_BYTES}B fs=${FS_BYTES}B target=${GROW_TARGET_BYTES}B need=${NEED_BYTES}B grp=${GRP_BYTES}B"
 
-# 差额小于一个块组即视为「已经扩满」（resize2fs 扩到最后可能余下不足一个块组的
-# 零头，属正常）。此时**完全不调用 resize2fs**，确保正常刷写的设备上一次 eMMC 写都没有。
-if [ "$SPARE" -lt "$GRP_BYTES" ]; then
+# 已达目标、或差额不足一个块组（resize2fs 扩到最后可能余下不足一个块组的零头，属正常）
+# → **完全不调用 resize2fs**，确保正常刷写的设备上一次 eMMC 写都不产生。
+if [ "$NEED_BYTES" -lt "$GRP_BYTES" ]; then
     touch "$MARKER" 2>/dev/null || true
-    echo "router: already grown (spare < 1 block group), nothing to do"
+    echo "router: already at target (need < 1 block group), nothing to do"
     exit 0
 fi
 
-echo "router: growing $DEV by $SPARE bytes — 这是重写 eMMC 的操作；若在此处挂死，说明命中 msdc 写路径缺陷"
-if resize2fs "$DEV"; then
+# 按**块数**指定目标，避免把尺寸后缀交给 resize2fs 二次解释。
+WANT_BLOCKS=$((GROW_TARGET_BYTES / FS_BSIZE))
+echo "router: growing $DEV to ${GROW_TARGET_BYTES}B (${WANT_BLOCKS} blocks) by $NEED_BYTES bytes — 这是重写 eMMC 的操作；若在此处挂死，说明命中 msdc 写路径缺陷"
+if resize2fs "$DEV" "$WANT_BLOCKS"; then
     touch "$MARKER" && echo "router: data layer grown: $DEV"
 else
     # 失败不改启动状态：不写 marker，下次仍会重试（但不阻塞启动）。

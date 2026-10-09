@@ -135,8 +135,9 @@ systemctl enable router-init.service >/dev/null 2>&1 || true
 systemctl enable router-fancontrol.service >/dev/null 2>&1 || true
 # 【为什么这三个必须在此显式 enable】覆盖层只拷贝 .service 文件、不携带
 # .wants 软链，若不在此处 enable，首次启动 systemd 永远不会拉起它们：
-#   router-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩满分区
-#     （~7.2 GiB）。漏 enable 会让 /overlay 持久化空间永久锁死在镜像大小，
+#   router-grow-rootfs.service：首启 resize2fs 把 p5 引导层 ext4 扩到 4 GiB
+#     （2026-10-09 起不再扩满 ~7.24 GiB 的 p5）。漏 enable 会让 /overlay 持久化
+#     空间永久锁死在镜像大小，
 #     与 make-sd-image.sh / make-sysupgrade-tar.sh 注释描述的行为直接矛盾。
 #     unit 自带 ConditionPathExists=!/var/lib/router-rootfs-grown，天然只跑一次。
 #   router-led-boot.service（WantedBy=sysinit.target，早期蓝灯闪烁）与

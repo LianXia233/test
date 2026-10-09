@@ -9,7 +9,7 @@
 # 【为什么 SquashFS】sysupgrade 整包需上传到设备 /tmp（tmpfs 占 RAM）：
 #   ext4 固定尺寸镜像（历史 540 MiB / 更早 1.15 GiB）把"空闲空间"也封进固件；
 #   SquashFS 只装实际内容并整体压缩（本仓库 514 MiB 树 → zstd 约 120 MiB），
-#   p5 剩余空间（~7.2 GiB）在首启扩容后全部成为 OverlayFS 可写层。
+#   p5 的 ext4 在首启扩容后为 4 GiB（2026-10-09 起不再扩满 ~7.24 GiB），成为 OverlayFS 可写层。
 #
 # 压缩格式（--comp）：
 #   zstd（默认）体积略大（实测 ~120 MiB vs xz ~106 MiB），解压快 5-10 倍，

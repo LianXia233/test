@@ -219,8 +219,8 @@ out/<BOARD_UPPER>-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 
   - `/usr/bin/busybox`：静态 busybox（脚本自动从 Debian mirror 下载 busybox-static arm64
     并提取，支持 `--busybox` 指定本地文件，构建机缓存于 `out/rootfs/.cache/busybox`）；
   - `/squashfs/rootfs.squashfs`：只读基础系统；
-  - `/overlay/{upper,work,merged}`：OverlayFS 可写层（p5 剩余空间 = 持久化数据，首启由
-    `router-grow-rootfs` 在线扩容至 ~7.2 GiB）；
+  - `/overlay/{upper,work,merged}`：OverlayFS 可写层（p5 引导层 ext4 = 持久化数据，
+    首启由 `router-grow-rootfs` 在线扩容至 4 GiB）；
   - `/boot`：引导文件。`boot.scr` 与 DTB 始终落盘；`extlinux.conf` 与其引用的 `Image`
     仅在加 `--keep-boot-image` 时落盘（默认省空间不生成 ~60 MiB 的重复内核，二者同进同退）。
 
@@ -228,7 +228,7 @@ out/<BOARD_UPPER>-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 
   squashfs 逐项存在且大小与源一致）。
 
 > 引导层尺寸公式：`(SquashFS + busybox 字节数) 上取整 MiB + 24 MiB 余量`，再 8 MiB 对齐。
-> p5 实际容量（~7.2 GiB）与镜像尺寸无关——刷入后首启自动 `resize2fs` 扩满。
+> p5 实际容量（~7.2 GiB）与镜像尺寸无关——刷入后自动 `resize2fs` 扩容至 **4 GiB**（2026-10-09 起不再扩满；正常刷写路径在刷写时离线完成）。
 
 ### 3.5 U-Boot 启动脚本（备用引导，可选）
 

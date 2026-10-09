@@ -4,6 +4,59 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — eMMC 降频 25MHz + 扩容目标限定 4 GiB（针对「msdc 写挂死」的两项规避）
+
+**实机现场（第二轮串口录制 `boot-20261009-073542.log`，1510 行，COM3 115200 8N1）**：设备经 U-Boot
+Web 界面（`POST /upload` 267.8 MiB + `/flashing.html`）刷写后启动，根以 **ext4 r/w 挂 p5**，
+**t≈15.1s** 出现首个数据面 eMMC 命令超时，随后完整复现「msdc 写挂死」：
+
+- **命令层**：`CMD18`(15.1s) → `CMD13` → `CMD12` → `CMD6`(23 次) → 连 `CMD0`/`CMD1` 复位也超时；
+  `host->error=0x00000002`（mtk-sd 的 `REQ_CMD_TMO`）；`mmc0: cache flush error -110`、
+  `mmc0: tried to HW reset card, got error -110`、**`mmcblk0: recovery failed!`**。
+  CMD6 两次入参按位拆解：`0x03200101` → `EXT_CSD[32]=1`（**FLUSH_CACHE**）、`0x03B34801` →
+  `EXT_CSD[179]=72`（**BKOPS_EN**）—— **两条都是写/维护操作，不是读**。
+- **块层**：`kworker/1:1H`(PID 101, `Workqueue: mmc_complete mmc_blk_mq_complete_work`) 卡在
+  `mmc_wait_for_req_done` 持锁不放 → `flush-179:0`（`Workqueue: writeback wb_workfn`）卡在
+  `mmc_blk_rw_wait` → 脏页刷不出 → `ext4_journal_check_start: Detected aborted journal`(t=201s)
+  → 写 superblock 失败 → **`Remounting filesystem read-only`**(t=263s)。
+- **RCU**：`rcu: 3-...0 ... softirq=819/834`，该计数在多次 stall 报告间几乎不增长 → CPU3 软中断
+  冻结 → 所有 `synchronize_rcu()` 调用者转 D 态（d-logind / 多个 kworker）→ systemd 卡在等
+  d-logind 的 cgroup mutex（内核自报 `systemd:1 is blocked on a mutex likely owned by (d-logind):329`）。
+- **规律对照**（上一轮 5 次启动）：**ext4 r/w 根 → 挂死（3/3）；squashfs readonly 根 → 存活（2/2）**。
+
+**本次改动（两项规避，均单变量、可回退）**：
+
+- **eMMC 降频 48MHz → 25MHz**（`dts/mt7987a-hiveton-h5000m.dts` 的 `&mmc0` `max-frequency`）：
+  增大 CMD/DATA 线的采样时序余量。本轮**只改频率**、保留 `cap-mmc-highspeed`，把「频率」与
+  「时序模式」两个变量隔离开做对照；若 25MHz 仍挂死，下一步再去掉 `cap-mmc-highspeed`
+  退回 default speed。
+  > **不要误判方向**：`mmc0` 只协商到 high speed（日志明确 `mmc0: new high speed MMC card`），
+  > **从未进入 HS200/HS400**，故本次挂死不应归因于高速时序问题。
+- **扩容目标限定 4 GiB**（`rootfs-overlay/usr/local/sbin/router-grow-rootfs` 与
+  `scripts/install-emmc.sh` 离线扩容段）：不再扩满 p5（~7.24 GiB）。`resize2fs` 要为新增空间写
+  块位图 / inode 表 / 组描述符 / 备份超级块，写入量大致与「新增容量」成正比；把这次最重的 eMMC
+  写入从 ~7.24 GiB 压到 4 GiB，是当前最直接的降风险手段。目标取 `min(4 GiB, p5 容量)`；
+  已达目标（允许不足一个块组 128 MiB 的零头）时**一次 eMMC 写都不产生**。
+- **本改动经「多板化重基线」移植**：原实现基于多板化之前的 `h5000m-*` 命名结构（提交于
+  `fix/msdc-write-hang-and-wifi` 分支）；本次落在已多板化的 `main` 上，故扩容兜底脚本路径为
+  `rootfs-overlay/usr/local/sbin/router-grow-rootfs`、单元名 `router-grow-rootfs.service`，
+  新增回归测试引用的路径同步为 `router-*`。**两项改动的语义与旧结构版本逐字一致**。
+- **文档同步**：`docs/hardware.md`（新增 §1.2，记录降频依据、边界与不扩满的取舍）、
+  `docs/architecture.md`、`docs/build-guide.md`、`docs/first-boot.md`、
+  `docs/debian13-partition-plan.md`、`README.md`，以及 `build/make-sd-image.sh` /
+  `build/make-squashfs.sh` / `build/make-sysupgrade-tar.sh` / `build/rootfs/chroot-finalize.sh`
+  中涉及扩容尺寸的注释与 log 文案。
+- **新增回归测试** `scripts/tests/test-grow-target.sh`：从两处实现**抽取真实代码块**执行
+  （不复制逻辑），断言 p5 正常容量下目标恒为 4 GiB、小分区退化为设备容量、两处实现逐字节
+  一致、已达目标时判据确实触发跳过，并**静态禁止**退回「不带尺寸参数的裸 `resize2fs`」
+  （那等于扩满分区）。**10 项全通过**。
+
+> **这两项是规避手段，不是根因修复**：改变的是 eMMC 的时序余量与写入规模，不改变卡内部
+> cache / BKOPS 行为。根因定位仍依赖内核侧可诊断性——`CONFIG_ARM64_PSEUDO_NMI` 等已在 config 中，
+> 但**尚未进入实机镜像**（本轮实机仍报 `watchdog: NMI not fully supported` /
+> `watchdog: Hard watchdog permanently disabled`），导致 CPU3 的调用栈无法 dump，
+> 是本次诊断中唯一靠推理而非直证的环节。
+
 ### 2026-10-09 — ✅ AP3000M 云编译全链路首绿（run 37855852616）
 
 第 5 次修复推送后触发复验，run `37855852616`（提交 `2d9fe9f`）

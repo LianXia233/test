@@ -299,7 +299,7 @@ sudo bash scripts/install-emmc.sh \
 6. 故障隔离：WAN 断网、IPv6 失效、Wi-Fi 失败、单网口异常均不影响其他功能；
    agent / WebUI 等服务按各自 unit 的重启策略恢复；
 7. 持久化与可升级：`/etc` `/var` `/opt` 写入经 OverlayFS 落 p5 重启保留；`router-grow-rootfs`
-   服务首启在线扩容 p5 至 ~7.2 GiB；sysupgrade 整包 ≤ 600 MiB（当前 ≈164 MiB）；
+   服务首启在线扩容 p5 ext4 至 4 GiB；sysupgrade 整包 ≤ 600 MiB（当前 ≈164 MiB）；
    在线升级仅替换 SquashFS、配置零丢失、可回退；
 8. 回退能力：备份的 p4 / p5 可随时恢复，恢复后 ImmortalWrt 原样可用（p1-p3 未动）。
 

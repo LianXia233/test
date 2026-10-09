@@ -11,7 +11,7 @@
 #   ├── kernel    FIT 镜像                      ← sysupgrade 自动 dd 到 p4 kernel
 #   └── root      引导层 ext4 镜像              ← sysupgrade 自动 dd 到 p5 rootfs
 #                 （引导层 = init + busybox + SquashFS 只读根 + OverlayFS 目录；
-#                   首启自动组装 overlay 并扩满 p5 供持久化）
+#                   首启自动组装 overlay 并把 p5 ext4 扩到 4 GiB 供持久化）
 #
 # 刷写（目标设备运行 OpenWrt/ImmortalWrt 时，一条命令完成 p4+p5 写入并重启）：
 #   sysupgrade -n /tmp/H5000M-debian13-sysupgrade.bin
@@ -123,4 +123,4 @@ TAR_ROOT_SIZE=$(tar -tvf "$OUT_BIN" "${DIRNAME}/root" | awk '{print $3}')
 log "=========================================="
 log "sysupgrade-tar 单文件固件生成完成：$OUT_BIN（$(stat -c %s "$OUT_BIN") 字节）"
 log "刷写（目标设备 OpenWrt/ImmortalWrt）：sysupgrade -n -v /tmp/$(basename "$OUT_BIN")"
-log "首启：引导层 init 组装 OverlayFS；router-grow-rootfs.service 自动 resize2fs 扩满 p5（~7.2 GiB 持久化层）"
+log "首启：引导层 init 组装 OverlayFS；router-grow-rootfs.service 自动 resize2fs 扩容至 4 GiB 持久化层（2026-10-09 起不扩满 p5）"

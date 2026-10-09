@@ -32,7 +32,7 @@
 #     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
 #       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
 #       --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes] [--no-grow]
-#     （--rootfs-img 路径默认在写盘后**离线扩容** p5 到分区实际大小，见下方"离线扩容"说明；
+#     （--rootfs-img 路径默认在写盘后**离线扩容** p5 到 4 GiB，见下方"离线扩容"说明；
 #       加 --no-grow 可跳过，改由首启 router-grow-rootfs.service 兜底。）
 #   方式二：运行中在线升级（SquashFS + OverlayFS 架构；保留 /etc /var 等全部持久化数据）：
 #     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
@@ -403,20 +403,34 @@ else
   if command -v blockdev >/dev/null 2>&1; then blockdev --flushbufs "$P5_DEV" 2>/dev/null || true; fi
 
   P5_DEV_BYTES=$(( ${PART_SIZE[5]:-0} * 512 ))
-  FS_BYTES="$(fs_bytes_readonly "$P5_DEV" || true)"
-  log "p5 离线扩容：resize2fs $P5_DEV（p5 未挂载）"
-  if [[ -n "$FS_BYTES" ]]; then
-    log "  扩容前：文件系统 ${FS_BYTES} 字节 / p5 分区 ${P5_DEV_BYTES} 字节"
-  fi
-  resize2fs "$P5_DEV" || die "p5 离线扩容失败（resize2fs 非 0 退出）。启动链未被改动，可安全重试。"
+  # --------------------------- 扩容目标：4 GiB（2026-10-09） ---------------------------
+  # 不再扩满 p5（~7.24 GiB）：resize2fs 要为新增空间写块位图 / inode 表 / 组描述符 /
+  # 备份超级块，写入量大致与「新增容量」成正比。本机正在排查「msdc 写挂死」，
+  # 把这次最重的 eMMC 写入从 ~7.24 GiB 压到 4 GiB 是最直接的降风险手段。
+  # 目标取 min(4 GiB, p5 容量)；须与首启兜底脚本 router-grow-rootfs 保持一致。
+  GROW_TARGET_BYTES=$((4096 * 1024 * 1024))
+  (( GROW_TARGET_BYTES > P5_DEV_BYTES )) && GROW_TARGET_BYTES=$P5_DEV_BYTES
 
-  FS_BYTES_AFTER="$(fs_bytes_readonly "$P5_DEV" || true)"
-  if [[ -n "$FS_BYTES_AFTER" ]]; then
-    # 允许不足一个块组（128 MiB）的零头：resize2fs 扩到最后可能填不满最后一个块组。
-    if (( FS_BYTES_AFTER + 134217728 >= P5_DEV_BYTES )); then
-      log "  [OK] p5 已扩满：文件系统 ${FS_BYTES_AFTER} 字节"
-    else
-      log "  [WARN] 扩容后文件系统为 ${FS_BYTES_AFTER} 字节，明显小于 p5（${P5_DEV_BYTES} 字节），请复核"
+  FS_BYTES="$(fs_bytes_readonly "$P5_DEV" || true)"
+  if [[ -n "$FS_BYTES" ]]; then
+    log "  扩容前：文件系统 ${FS_BYTES} 字节 / p5 分区 ${P5_DEV_BYTES} 字节 / 目标 ${GROW_TARGET_BYTES} 字节"
+  fi
+
+  # 已达目标（允许不足一个块组 128 MiB 的零头）→ **一次 eMMC 写都不产生**。
+  if [[ -n "$FS_BYTES" ]] && (( FS_BYTES + 134217728 >= GROW_TARGET_BYTES )); then
+    log "  [OK] p5 文件系统已达 ${GROW_TARGET_BYTES} 字节目标，跳过 resize2fs（不产生写入）"
+  else
+    log "p5 离线扩容：resize2fs $P5_DEV 4G（p5 未挂载，目标 4 GiB）"
+    resize2fs "$P5_DEV" 4G || die "p5 离线扩容失败（resize2fs 非 0 退出）。启动链未被改动，可安全重试。"
+
+    FS_BYTES_AFTER="$(fs_bytes_readonly "$P5_DEV" || true)"
+    if [[ -n "$FS_BYTES_AFTER" ]]; then
+      # 允许不足一个块组（128 MiB）的零头：resize2fs 扩到最后可能填不满最后一个块组。
+      if (( FS_BYTES_AFTER + 134217728 >= GROW_TARGET_BYTES )); then
+        log "  [OK] p5 已扩至 ${FS_BYTES_AFTER} 字节（目标 ${GROW_TARGET_BYTES}）"
+      else
+        log "  [WARN] 扩容后文件系统为 ${FS_BYTES_AFTER} 字节，明显小于目标 ${GROW_TARGET_BYTES} 字节，请复核"
+      fi
     fi
   fi
   sync
