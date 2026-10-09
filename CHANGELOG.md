@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — H5000M 新串口日志复核风扇修复
+
+复核现场日志 `boot-20261009-090607.log`：文件含两段启动。两段均成功启动 `router-fancontrol.service`，并在
+约 10 秒到达 `basic.target`；eMMC 均识别为 14.6 GiB 并挂载 p5，未见 CMD18、块设备 I/O 或 EXT4 错误。
+MT7996 仍输出 `eeprom load fail, use default bin`，第二段 Wi-Fi 接口完成重命名。
+
+- 在本次捕获范围内，未见 `mt7996_thermal_temp_show`、MT76 MCU 等待栈、hung-task 或 RCU stall 报告，
+  与上一版日志相比，风扇服务启动不再显示被 Wi-Fi 温度读取卡住。
+- **验证边界**：第一段在内核启动约 10 秒、到达 `basic.target` 后串口无后续输出，约 90 秒后出现下一次启动；
+  第二段仅录到内核启动约 11 秒。因此本日志不能证明 RCU stall 已消失，也不能确定第一段重启原因。
+
 ### 2026-10-09 — H5000M 风扇控制避开 MT7996 温度读取阻塞
 
 **现场日志**：`boot-20261009-083917.log` 中未再出现 eMMC 命令超时；但系统反复报告 CPU3 RCU stall。
