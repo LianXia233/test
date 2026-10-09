@@ -6,18 +6,29 @@
 
 ### 2026-10-09 — 根据启动代码复核修正启动卡住诊断
 
-重新检查完整文件后，确认它包含两种不同启动阶段：09:06 与 09:08 的 Linux 6.18.54 到达 `basic.target`，但没有
-`multi-user.target` 或之后成功启动的证据；09:21 用户触发一次 Web 重启后，启动内核变为参考仓库构建的 Linux 6.12.103。
-该内核每次都成功挂载 p5 (`mmcblk0p5`) 为 ext4，却无法启动 `/sbin/init`、`/etc/init`、`/bin/init` 和 `/bin/sh`，随后报
-`Kernel panic - not syncing: No working init found` 并重启。日志最新的循环停在 systemd 启动之前；全文件没有 RCU stall 报告，
-因此不能用 `No working init found` 解释更早 6.18.54 阶段的停顿，也不能据此把旧停顿归因于 RCU 或 systemd 排序。
+完整日志包含三个不同启动阶段：
+
+1. 09:06 和 09:08：Linux 6.18.54（Ubuntu GCC 13.3），p5 以 ext4 r/w 挂载，进入 Debian/systemd 并到达
+   `basic.target`；没有到达 `multi-user.target` 的记录。
+2. 09:21–09:40：Linux 6.12.103（参考仓库构建），p5 仍为 ext4，但只读挂载；内核找不到 `/sbin/init`、`/etc/init`、
+   `/bin/init` 和 `/bin/sh`，反复报 `No working init found` 并重启。
+3. 09:42：切回 OpenWrt Linux 6.18.54（OpenWrt GCC 14.4），p5 以 SquashFS 只读挂载；OpenWrt `init`、`procd`、
+   Wi-Fi/USB 模块和网络桥接继续启动，最后日志到达 `eth0` 加入 `br-lan` 并进入 forwarding。
+
+第三阶段就是日志尾部的正常 OpenWrt 启动。相同 eMMC 分区设备 `179:5` 在失败阶段按 ext4 挂载，在 OpenWrt 阶段按
+SquashFS 挂载，说明两个启动环境使用了不同的 p5 内容/文件系统布局。正常 OpenWrt 阶段证明 U-Boot、内核启动、eMMC 读取、
+以太网和 Wi-Fi 能继续工作；日志只录到约 29.6 秒，不能证明后续所有服务或业务已完全就绪。全文件没有 RCU stall 报告，
+因此不能用 RCU 或 systemd 排序解释 6.12.103 明确报出的 init 缺失，也不能单凭此日志断定较早 Debian 阶段的停顿根因。
+
+- OpenWrt 启动中的 GPT 备份头 LBA 不匹配、`/etc/config/fstab` 未找到、`/etc/urandom.seed` 缺失及 MT7996 EEPROM
+  回退提示均未阻断启动；overlay F2FS 成功恢复挂载，`procd` 在约 11.6 秒运行，Wi-Fi AP 口和 eth0 随后进入桥接 forwarding。
 
 - 参考仓库与本项目的 p5 布局不同：参考仓库放完整 Debian ext4 根文件系统；本项目放 `/sbin/init` + busybox + SquashFS
   的引导层 ext4。二者都使用 `root=PARTLABEL=rootfs`，刷写时必须让 FIT 内核与正确布局的 p5 配对。
 - `scripts/install-emmc.sh --rootfs-img` 现在在写盘前检查引导层 `/sbin/init`、busybox、SquashFS 文件及 init shebang；
   误把缺少本项目引导入口的 ext4 镜像写入 p5 时会中止，并指出这是镜像布局不匹配。
 - **验证边界**：此串口日志没有输出各 init 尝试的 errno，尚不能区分 p5 缺文件、内容错配或文件损坏；需检查设备当前 p5
-  实际内容或用新构建镜像重新刷写确认。参考仓库的 6.12.103 内核已在本次日志中运行，单纯更换内核版本没有依据。
+  实际内容。日志尾部 OpenWrt 使用 SquashFS 成功继续启动，表明它的 p5 与 ext4 Debian 启动阶段不是同一文件系统布局。
 
 ### 2026-10-09 — 对齐参考仓库已实测的 MT7987 FE 中断分组修复
 
@@ -33,7 +44,7 @@
 ### 2026-10-09 — H5000M 启动卡住复核与伪 NMI 诊断参数
 
 用户确认设备启动卡住。该日志分阶段的完整复核见本 changelog 顶部「根据启动代码复核修正启动卡住诊断」：较早的 6.18.54
-启动到达 `basic.target`，随后切换到 6.12.103 后反复出现 `No working init found`；两种现象不能合并成一个原因。
+到达 `basic.target`，之后 6.12.103 因找不到 init 重启，最后正常 OpenWrt 6.18.54 从 SquashFS 启动并完成至少部分网络初始化。
 
 - 已有内核片段包含 `CONFIG_ARM64_PSEUDO_NMI=y`，但 H5000M 实际启动参数缺少
   `irqchip.gicv3_pseudo_nmi=1`；日志同时出现 `NMI not fully supported` 和硬件 lockup watchdog 被禁用。
@@ -57,8 +68,8 @@
 
 ### 2026-10-09 — H5000M 新串口日志复核风扇修复
 
-此前对该日志的阶段性复核把 6.18.54 的两段 service 输出与后续 6.12.103 的 panic 循环混为一谈。前两段确实到达
-`basic.target`；之后 Web 重启切换到 Linux 6.12.103，并反复出现 `No working init found`，未启动到 systemd。
+此前对该日志的阶段性复核没有读到尾部 OpenWrt 段。完整文件中，6.18.54 Debian 启动到 `basic.target`；之后 6.12.103
+因 `No working init found` 重启；09:42 正常 OpenWrt 6.18.54 从 SquashFS 启动，`procd` 启动并将 eth0 加入桥接。
 分阶段证据和验证边界见本 changelog 顶部的修正条目。
 
 ### 2026-10-09 — H5000M 风扇控制避开 MT7996 温度读取阻塞
