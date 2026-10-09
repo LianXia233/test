@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 根据启动代码复核修正启动卡住诊断
+
+重新检查完整文件后，确认它包含两种不同启动阶段：09:06 与 09:08 的 Linux 6.18.54 到达 `basic.target`，但没有
+`multi-user.target` 或之后成功启动的证据；09:21 用户触发一次 Web 重启后，启动内核变为参考仓库构建的 Linux 6.12.103。
+该内核每次都成功挂载 p5 (`mmcblk0p5`) 为 ext4，却无法启动 `/sbin/init`、`/etc/init`、`/bin/init` 和 `/bin/sh`，随后报
+`Kernel panic - not syncing: No working init found` 并重启。日志最新的循环停在 systemd 启动之前；全文件没有 RCU stall 报告，
+因此不能用 `No working init found` 解释更早 6.18.54 阶段的停顿，也不能据此把旧停顿归因于 RCU 或 systemd 排序。
+
+- 参考仓库与本项目的 p5 布局不同：参考仓库放完整 Debian ext4 根文件系统；本项目放 `/sbin/init` + busybox + SquashFS
+  的引导层 ext4。二者都使用 `root=PARTLABEL=rootfs`，刷写时必须让 FIT 内核与正确布局的 p5 配对。
+- `scripts/install-emmc.sh --rootfs-img` 现在在写盘前检查引导层 `/sbin/init`、busybox、SquashFS 文件及 init shebang；
+  误把缺少本项目引导入口的 ext4 镜像写入 p5 时会中止，并指出这是镜像布局不匹配。
+- **验证边界**：此串口日志没有输出各 init 尝试的 errno，尚不能区分 p5 缺文件、内容错配或文件损坏；需检查设备当前 p5
+  实际内容或用新构建镜像重新刷写确认。参考仓库的 6.12.103 内核已在本次日志中运行，单纯更换内核版本没有依据。
+
 ### 2026-10-09 — 对齐参考仓库已实测的 MT7987 FE 中断分组修复
 
 对照 [ctr54188/h5000m-debian 的以太网实机记录](https://github.com/ctr54188/h5000m-debian/blob/main/docs/ETHERNET-TX-NOTES.md)，
@@ -17,9 +32,8 @@
 
 ### 2026-10-09 — H5000M 启动卡住复核与伪 NMI 诊断参数
 
-用户确认 `boot-20261009-090607.log` 对应设备启动卡住。两段日志都只到 `basic.target`，没有到达
-`multi-user.target`；第一段约 10 秒后串口沉默，约 90 秒后出现下一次启动，第二段录制也在约 11 秒处结束。
-这不是成功启动，先前将“basic.target 已到达”表述为恢复进展不足以说明系统可用。
+用户确认设备启动卡住。该日志分阶段的完整复核见本 changelog 顶部「根据启动代码复核修正启动卡住诊断」：较早的 6.18.54
+启动到达 `basic.target`，随后切换到 6.12.103 后反复出现 `No working init found`；两种现象不能合并成一个原因。
 
 - 已有内核片段包含 `CONFIG_ARM64_PSEUDO_NMI=y`，但 H5000M 实际启动参数缺少
   `irqchip.gicv3_pseudo_nmi=1`；日志同时出现 `NMI not fully supported` 和硬件 lockup watchdog 被禁用。
@@ -43,15 +57,9 @@
 
 ### 2026-10-09 — H5000M 新串口日志复核风扇修复
 
-复核现场日志 `boot-20261009-090607.log`：文件含两段启动。两段均启动 `router-fancontrol.service`，并在
-约 10 秒到达 `basic.target`；eMMC 均识别为 14.6 GiB 并挂载 p5，未见 CMD18、块设备 I/O 或 EXT4 错误。
-MT7996 仍输出 `eeprom load fail, use default bin`，第二段 Wi-Fi 接口完成重命名。
-
-- 在本次捕获范围内，未见 `mt7996_thermal_temp_show`、MT76 MCU 等待栈、hung-task 或 RCU stall 报告，
-  与上一版日志相比，风扇服务启动不再显示被 Wi-Fi 温度读取卡住。
-- **验证边界**：用户确认设备卡在启动过程中；第一段在到达 `basic.target` 后约 10 秒处无后续串口输出，约
-  90 秒后出现下一次启动。第二段仅录到内核启动约 11 秒。因此本日志不能证明 RCU stall 已消失，第一段后续
-  启动/复位原因仍待确认。
+此前对该日志的阶段性复核把 6.18.54 的两段 service 输出与后续 6.12.103 的 panic 循环混为一谈。前两段确实到达
+`basic.target`；之后 Web 重启切换到 Linux 6.12.103，并反复出现 `No working init found`，未启动到 systemd。
+分阶段证据和验证边界见本 changelog 顶部的修正条目。
 
 ### 2026-10-09 — H5000M 风扇控制避开 MT7996 温度读取阻塞
 
