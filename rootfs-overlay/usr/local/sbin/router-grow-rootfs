@@ -18,7 +18,8 @@
 #    （CPU 0/1/3 softirq 计数冻结、CPU3 定时器停摆、NMI 取不到回栈），挂死起点与
 #    本服务首次执行时刻精确重合；本项目长期跟踪的「msdc 写挂死」指向 eMMC 写路径。
 #    在**运行中的根文件系统**上做全区 resize，是这台设备上最重的一次 eMMC 写操作，
-#    不应发生在启动关键路径上（对应 unit 已改为 After=multi-user.target）。
+#    不应发生在启动关键路径上；当前由 router-grow-rootfs.timer 延迟 2 分钟触发，
+#    不参与 multi-user.target 的排序。
 #
 # 3) 本脚本保留为兜底（sysupgrade 等确实只能在运行中扩容的场景），并做到：
 #    - 先只读比对 fs 容量与设备容量，**已扩容则一行都不写**（只 touch marker）；

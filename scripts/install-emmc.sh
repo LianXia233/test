@@ -33,7 +33,7 @@
 #       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
 #       --rootfs-img out/<BOARD_UPPER>-debian13-rootfs.bin [--dev /dev/mmcblk0] [--yes] [--no-grow]
 #     （--rootfs-img 路径默认在写盘后**离线扩容** p5 到 4 GiB，见下方"离线扩容"说明；
-#       加 --no-grow 可跳过，改由首启 router-grow-rootfs.service 兜底。）
+#       加 --no-grow 可跳过，改由首启 2 分钟后触发的 router-grow-rootfs.timer 兜底。）
 #   方式二：运行中在线升级（SquashFS + OverlayFS 架构；保留 /etc /var 等全部持久化数据）：
 #     sudo bash scripts/install-emmc.sh --board h5000m|ap3000m \
 #       --kernel-fit out/<BOARD_UPPER>-debian13-kernel.bin \
@@ -374,7 +374,8 @@ fi
 # 串口在 t≈10s 出现静默内核级冻结：CPU 0/1/3 的 softirq 计数冻结、CPU3 定时器停摆、
 # `Sending NMI` 取不到任何 per-CPU 回栈，系统永远到不了 multi-user.target；
 # 与本项目长期跟踪的「msdc 写挂死」特征一致。
-# 把扩容前移到刷写时，正常刷写的设备就**完全不再需要**运行中的兜底扩容。
+# 把扩容前移到刷写时，正常刷写的设备就**完全不再需要**运行中的兜底扩容。在线兜底由
+# 独立 timer 延迟 2 分钟触发，不参与 multi-user.target 的启动排序。
 #
 # 只读读取 ext4 容量（字节）；任何异常都返回空串——诊断信息不能把刷写流程带崩。
 fs_bytes_readonly() {
@@ -390,7 +391,7 @@ if [[ "$MODE_ONLINE" -eq 1 ]]; then
 elif [[ -z "$ROOTFS_IMG" ]]; then
   log "p5 扩容：mkfs.ext4 已按分区全尺寸创建文件系统，无需扩容"
 elif (( NO_GROW == 1 )); then
-  log "p5 扩容：已按 --no-grow 跳过。首启将由 router-grow-rootfs.service 兜底扩容"
+  log "p5 扩容：已按 --no-grow 跳过。首启 2 分钟后将由 router-grow-rootfs.timer 兜底扩容"
   log "          （注意：该路径会在运行中的根文件系统上做全区 resize，本设备有 msdc 写挂死风险）"
 else
   command -v resize2fs >/dev/null 2>&1 || \

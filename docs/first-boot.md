@@ -113,7 +113,8 @@ sudo bash scripts/install-emmc.sh \
       → 组装 OverlayFS（lower=SquashFS，upper/work=/overlay）
       → pivot_root（旧根保留于 /tmpold；失败则进入只读救援模式：SquashFS 根 + tmpfs，可 SSH 修复）
   → systemd（Debian 13）
-  → router-grow-rootfs（首启 resize2fs 在线扩容 p5 至 4 GiB；正常刷写已在刷写时离线扩好，此处只剩只读比对）
+  → router-grow-rootfs.timer（不阻塞启动；延迟 2 分钟触发兜底扩容，正常刷写路径已离线扩容）
+  → router-grow-rootfs.service（只读比对后，必要时在线扩容至 4 GiB）
   → NetworkManager + router-init（创建 eth1 WAN、eth2 备用 WAN、br-lan、eth0 LAN 与 Wi-Fi profiles；装配 nftables）
   → dnsmasq（After/Requires router-init；其 oneshot 完成后启动，提供 DHCP + DNS + IPv6 RA）
   → router-fancontrol（PWM 风扇温控）
@@ -156,7 +157,7 @@ findmnt /sq                  # /dev/mmcblk0p5[/squashfs/rootfs.squashfs] squashf
 df -h /                      # 根可写容量 ≈ p5 引导层 ext4 容量（首启扩容后 4 GiB）
 lsblk -o NAME,PARTLABEL,FSLABEL,SIZE,MOUNTPOINT
 ip -br addr                 # eth0 / eth1 / br-lan
-systemctl status router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
+systemctl status router-grow-rootfs.timer router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
 nmcli connection show
 ip route
 curl -sI http://192.168.88.1

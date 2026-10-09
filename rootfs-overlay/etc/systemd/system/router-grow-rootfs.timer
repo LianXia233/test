@@ -1,0 +1,12 @@
+[Unit]
+Description=Delayed fallback for p5 boot-layer ext4 growth
+
+[Timer]
+# Normal flashing expands p5 offline. Keep the runtime fallback well outside
+# the boot critical path for sysupgrade images that still need online growth.
+OnActiveSec=2min
+AccuracySec=5s
+Unit=router-grow-rootfs.service
+
+[Install]
+WantedBy=timers.target

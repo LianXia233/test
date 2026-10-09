@@ -220,7 +220,7 @@ out/<BOARD_UPPER>-debian13-rootfs.bin   → dd 到 p5（rootfs，引导层 ext4 
     并提取，支持 `--busybox` 指定本地文件，构建机缓存于 `out/rootfs/.cache/busybox`）；
   - `/squashfs/rootfs.squashfs`：只读基础系统；
   - `/overlay/{upper,work,merged}`：OverlayFS 可写层（p5 引导层 ext4 = 持久化数据，
-    首启由 `router-grow-rootfs` 在线扩容至 4 GiB）；
+    首启由 `router-grow-rootfs.timer` 延迟触发在线扩容至 4 GiB）；
   - `/boot`：引导文件。`boot.scr` 与 DTB 始终落盘；`extlinux.conf` 与其引用的 `Image`
     仅在加 `--keep-boot-image` 时落盘（默认省空间不生成 ~60 MiB 的重复内核，二者同进同退）。
 
@@ -409,7 +409,7 @@ python3 scripts/fetch-firmware.py --out build/rootfs/firmware [--board h5000m|ap
 - [ ] `<BOARD_UPPER>-debian13-rootfs.bin` 可 `e2fsck -fn` 通过；debugfs 确认含
       `/sbin/init`、`/usr/bin/busybox`、`/squashfs/rootfs.squashfs`、`/overlay/{upper,work,merged}`
 - [ ] rootfs 内 Linux-Router 服务已 enable；`/usr/local/sbin/router-grow-rootfs` 存在
-- [ ] 首启相关服务已 enable：`router-init` / `router-fancontrol` / `router-grow-rootfs` /
+- [ ] 首启相关服务已 enable：`router-init` / `router-fancontrol` / `router-grow-rootfs.timer` /
       `router-led-boot` / `router-led`（unit 名**不带板级前缀**，板级差异走同名内容覆盖）
 - [ ] `kernel/kernel-<board>-soc-options.txt` 存在（SoC 选项快照，按板隔离，避免 artifact 互相覆盖）
 - [ ] `<BOARD_UPPER>-debian13-sysupgrade.bin` 体积 ≤ 600 MiB（当前 ≈164 MiB）

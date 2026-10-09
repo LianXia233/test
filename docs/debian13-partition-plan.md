@@ -179,7 +179,7 @@ FIT 内 kernel 的 `load/entry = 0x46000000`（官方 FIT 为 0x40000000；因 U
 | **Kernel** | p4 `kernel` 分区：裸写入 FIT 镜像 `<BOARD_UPPER>-debian13-kernel.bin`（内核 LZMA 压缩 + H5000M DTB，bootm 自动解压）。备用副本：p5 引导层 `/boot/Image` + `/boot/mt7987a-hiveton-h5000m.dtb`（**Image 仅在 `make-sd-image.sh --keep-boot-image` 时落盘**；默认省空间不生成，此时 boot.scr 的 p5 分支与 extlinux 均不可用） |
 | **DTB** | 内嵌于 FIT（fdt 节点）；备用：`/boot/mt7987a-hiveton-h5000m.dtb`（p5 引导层内） |
 | **RootFS（只读基础系统）** | p5 引导层内 `/squashfs/rootfs.squashfs`（Debian 13 Trixie ARM64，zstd 压缩，~120 MiB，只读不可变） |
-| **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；首启 `router-grow-rootfs` 在线扩容 p5 至 4 GiB |
+| **RootFS（可写层/持久化）** | p5 引导层内 `/overlay/{upper,work}`（OverlayFS upper），`/etc` `/var` `/opt` 等写入全部落此，重启保留；`router-grow-rootfs.timer` 延迟触发兜底扩容至 4 GiB |
 | **引导脚本** | p5 引导层 `/sbin/init`（busybox 静态）：挂 SquashFS → 组装 OverlayFS → pivot_root → systemd；失败进入只读救援模式 |
 | **Data** | p5 引导层 overlay 内（`/var/lib/linux-router`、`/home`、用户数据等），不单独分区 |
 | **U-Boot 启动脚本（备用）** | p5 引导层 `/boot/boot.scr`（由 boot/boot.cmd 编译，始终落盘）+ `/boot/extlinux/extlinux.conf`（**仅在 `--keep-boot-image` 时落盘**：其 `KERNEL ../Image` 依赖同目录 Image，缺 Image 时不写该文件，避免留下引用不存在文件的配置） |
@@ -374,7 +374,7 @@ cat /proc/cmdline            # root=PARTLABEL=rootfs rootwait ...
 findmnt /                    # overlay（upperdir=/overlay/upper ...）
 findmnt /sq                  # squashfs ro
 df -h /                      # overlay 可写容量（首启扩容后 4 GiB）
-systemctl status router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
+systemctl status router-grow-rootfs.timer router-grow-rootfs router-fancontrol router-init dnsmasq router-panel
 
 # 5. 网络/服务自检
 curl -sI http://192.168.88.1    # WebUI 可达

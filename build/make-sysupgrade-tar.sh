@@ -123,4 +123,4 @@ TAR_ROOT_SIZE=$(tar -tvf "$OUT_BIN" "${DIRNAME}/root" | awk '{print $3}')
 log "=========================================="
 log "sysupgrade-tar 单文件固件生成完成：$OUT_BIN（$(stat -c %s "$OUT_BIN") 字节）"
 log "刷写（目标设备 OpenWrt/ImmortalWrt）：sysupgrade -n -v /tmp/$(basename "$OUT_BIN")"
-log "首启：引导层 init 组装 OverlayFS；router-grow-rootfs.service 自动 resize2fs 扩容至 4 GiB 持久化层（2026-10-09 起不扩满 p5）"
+log "首启：引导层 init 组装 OverlayFS；router-grow-rootfs.timer 延迟 2 分钟触发 resize2fs 扩容至 4 GiB 持久化层（不阻塞系统启动）"

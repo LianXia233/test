@@ -17,6 +17,19 @@
 - **这不是卡死根因修复**：本次日志没有足够的后半段输出来确认 RCU stall 是否发生，也没有栈信息定位
   卡死源头。需构建并实机启动新镜像，再依据回溯确定后续修复。
 
+### 2026-10-09 — 修复首启扩容服务与 multi-user.target 的排序环
+
+审查启动卡住路径时确认 `router-grow-rootfs.service` 原配置同时 `WantedBy=multi-user.target` 和
+`After=multi-user.target`。systemd 会为 target 的 Wants 自动补 `After=`，与 service 反向声明的排序冲突，
+形成 ordering cycle；该配置足以妨碍 `multi-user.target` 正常完成，和现场未到该 target 的现象一致。
+
+- 移除 service 的 `WantedBy=multi-user.target` / `After=multi-user.target`。
+- 新增 `router-grow-rootfs.timer`，由 `timers.target` 启动，延迟 2 分钟后再触发扩容 service；启动期间 timer
+  可快速激活，耗时的文件系统扩容不再参与 multi-user 启动排序。
+- RootFS 构建改为 enable timer；同步首启、架构、排障、分区和刷写文档。
+- **验证边界**：这是修复仓库中确认存在的 systemd 排序环，但仍需构建新镜像实机确认启动可达
+  `multi-user.target`；此前日志中 CPU3 RCU stall 的内核原因仍需通过已加入的伪 NMI 回溯判断。
+
 ### 2026-10-09 — H5000M 新串口日志复核风扇修复
 
 复核现场日志 `boot-20261009-090607.log`：文件含两段启动。两段均启动 `router-fancontrol.service`，并在

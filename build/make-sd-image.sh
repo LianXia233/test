@@ -79,7 +79,8 @@ BOOT_DIR="$OUT_DIR/boot"
 #
 # 【为什么必须是 128 而不是 24 —— 实机启动失败根因之一，勿随意调小】
 # 启动时序是：内核挂 p5 引导层 → /sbin/init 组装 OverlayFS → pivot_root → systemd →
-#             router-grow-rootfs.service（当时名 h5000m-grow-rootfs.service）才执行
+#             router-grow-rootfs.timer 触发 router-grow-rootfs.service（当时 unit 名
+#             为 h5000m-grow-rootfs.service）才执行
 #             resize2fs 把 ext4 扩到 4 GiB（2026-10-09 起不再扩满 p5 的 ~7.24 GiB，
 #             见 scripts/install-emmc.sh 离线扩容段）。
 # 也就是说 systemd 冷启动阶段，OverlayFS 的 upper/work 只能落在**引导层镜像内**这点空间上；

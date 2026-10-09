@@ -89,7 +89,7 @@ exec busybox env -i /sbin/init               # 交棒 systemd（Debian 正常启
 | 系统完整性 | 基础系统在 SquashFS 中**只读不可变**，意外断电/写坏不影响系统本体 |
 | 配置持久化 | `/etc` `/var` `/opt` 等全部写入经 OverlayFS 落 p5 upper，重启保留 |
 | 在线升级 | 仅替换 `/tmpold/squashfs/rootfs.squashfs` + 刷 p4 FIT；overlay 数据零丢失；旧版自动备份 `.bak`（mv 回即回退） |
-| 空间在线扩容 | `router-grow-rootfs.service`（oneshot）首启 `findfs PARTLABEL=rootfs` + `resize2fs` 把引导层扩到 **4 GiB**（2026-10-09 起不再扩满 p5） |
+| 空间在线扩容 | `router-grow-rootfs.timer` 延迟 2 分钟触发 oneshot `router-grow-rootfs.service`；扩到 **4 GiB**，不加入 `multi-user.target` 启动排序 |
 | 防砖救援 | OverlayFS 组装失败 → **只读救援模式**：直接以 SquashFS 为根 + tmpfs upper，可 SSH 登录修复 overlay |
 
 ### 2.4 体积收益
@@ -205,7 +205,8 @@ LAN（eth0，远离电源的 2.5G 口，192.168.88.1/24）
   ↓
 systemd
  ├── sys-kernel 固件加载（mt7992 / mt7987 phy 固件，由内核按需加载）
- ├── router-grow-rootfs.service（oneshot：首启 findfs + resize2fs 在线扩容 p5 至 4 GiB，marker 防重复）
+ ├── router-grow-rootfs.timer（timers.target：延迟 2 分钟触发 router-grow-rootfs.service，不阻塞 multi-user 启动）
+ │    └── router-grow-rootfs.service（oneshot：findfs + resize2fs 在线扩容 p5 至 4 GiB，marker 防重复）
  ├── router-fancontrol.service（sysinit.target：PWM 风扇温控，温度曲线/手动/故障保护）
  ├── NetworkManager（WAN/LAN 网口管理）
  ├── router-init.service（OneShot：创建 WAN/eth2 备用 WAN/LAN/br-lan/Wi-Fi profiles，装配 nftables）
