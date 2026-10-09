@@ -27,7 +27,7 @@ MODE=auto
 CURVE=balanced
 
 # 温度来源：max（CPU/PHY/WiFi/5G 取最高）| cpu（仅 CPU）
-TEMP_SOURCE=max
+TEMP_SOURCE=cpu
 
 # 手动模式 PWM（0~255）
 MANUAL_PWM=160

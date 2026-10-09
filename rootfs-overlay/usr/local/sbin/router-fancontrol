@@ -363,10 +363,13 @@ max_sensor() {
 }
 
 read_sensors() {
-	local zone type value hwmon name
+	local zone type value hwmon name is_cpu_sensor
 	CPU_TEMP=""; CPU_LABEL=""; PHY_TEMP=""; PHY_LABEL=""
 	WIFI1_TEMP=""; WIFI1_LABEL=""; WIFI2_TEMP=""; WIFI2_LABEL=""
-	MODULE_TEMP="$(find_module_temp 2>/dev/null || true)"
+	MODULE_TEMP=""
+	if [ "$TEMP_SOURCE" = "max" ]; then
+		MODULE_TEMP="$(find_module_temp 2>/dev/null || true)"
+	fi
 	CONTROL_TEMP=""; CONTROL_SENSOR=""
 
 	# 传感器类型/名称的匹配原先是 printf | tr（每个传感器两个子进程）。这里改成
@@ -374,6 +377,10 @@ read_sensors() {
 	for zone in /sys/class/thermal/thermal_zone*; do
 		[ -e "$zone/temp" ] || continue
 		type="$(sysfs_read "$zone/type")"
+		case "$type" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*) ;;
+			*) [ "$TEMP_SOURCE" = "max" ] || continue ;;
+		esac
 		value="$(read_temp_c "$zone/temp" 2>/dev/null || true)"
 		[ -n "$value" ] || continue
 		case "$type" in
@@ -386,6 +393,11 @@ read_sensors() {
 	for hwmon in /sys/class/hwmon/hwmon*; do
 		[ -d "$hwmon" ] || continue
 		name="$(sysfs_read "$hwmon/name")"
+		is_cpu_sensor=0
+		case "$name" in
+			*[Cc][Pp][Uu]*|*[Ss][Oo][Cc]*|*[Mm][Tt]798*|*[Tt][Hh][Ee][Rr][Mm][Aa][Ll]*) is_cpu_sensor=1 ;;
+		esac
+		[ "$TEMP_SOURCE" = "max" ] || [ "$is_cpu_sensor" -eq 1 ] || continue
 		value="$(read_temp_c "$hwmon/temp1_input" 2>/dev/null || true)"
 		[ -n "$value" ] || continue
 		case "$name" in
