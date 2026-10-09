@@ -5,28 +5,30 @@ Fixes reverse-engineered from the shipping vendor 6.6.94 kernel
 (see ctr54188/h5000m-debian docs/ETHERNET-TX-NOTES.md):
 1. mt7987 rx.irq_done_mask must include MTK_RX_DONE_INT0 (BIT(16));
    clearing only BIT(14) leaves RX done bits pending -> IRQ storm + RCU stall
-2. FE IRQ grouping: MT7987 (netsys v3, PPE1-class) must program
-   FE_INT_GRP = 0x210ffff2 and NOT touch pdma.int_grp grouping registers
+2. Keep the tested single-queue FE IRQ grouping (0x21021000 plus PDMA/QDMA
+   int_grp). The vendor's 0x210ffff2 grouping was tested in the reference
+   project and disabled Ethernet IRQ delivery in this configuration.
 3. Vendor registers a combined TX+RX handler on all eight IRQ lines;
    add mtk_handle_irq_fe (returns IRQ_NONE when unhandled) and hook it on
-   every line in mtk_probe; mtk_get_irqs fills TX=resource 1, RX=resource 2
-   per the vendor layout
+   every line in mtk_probe; mtk_get_irqs fills shared/TX/RX from resources
+   0/1/2 per the vendor layout
 ---
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
-@@ -3635,6 +3635,19 @@
+@@ -3635,6 +3635,20 @@
  {
  	int i;
  
-+	/* MT7987: the DTS provides eight interrupts.  Resource 1 is the real
-+	 * TX completion line and resource 2 the RX line (vendor layout);
-+	 * resource 0 is the combined line hooked separately in mtk_probe.
-+	 * Fill the classic TX/RX slots for napi wiring and display.
++	/* MT7987: the DTS provides eight interrupts.  Resources 0/1/2 map
++	 * to the shared/TX/RX slots; the combined handler is hooked on all
++	 * eight lines separately in mtk_probe.
 +	 */
 +	if (eth->soc->caps == MT7987_CAPS) {
++		eth->irq[MTK_FE_IRQ_SHARED] = platform_get_irq(pdev, 0);
 +		eth->irq[MTK_FE_IRQ_TX] = platform_get_irq(pdev, 1);
 +		eth->irq[MTK_FE_IRQ_RX] = platform_get_irq(pdev, 2);
-+		if (eth->irq[MTK_FE_IRQ_TX] < 0 || eth->irq[MTK_FE_IRQ_RX] < 0)
++		if (eth->irq[MTK_FE_IRQ_SHARED] < 0 ||
++		    eth->irq[MTK_FE_IRQ_TX] < 0 || eth->irq[MTK_FE_IRQ_RX] < 0)
 +			return -ENXIO;
 +		return 0;
 +	}
@@ -34,7 +36,7 @@ Fixes reverse-engineered from the shipping vendor 6.6.94 kernel
  	/* future SoCs beginning with MT7988 should use named IRQs in dts */
  	eth->irq[MTK_FE_IRQ_TX] = platform_get_irq_byname_optional(pdev, "fe1");
  	eth->irq[MTK_FE_IRQ_RX] = platform_get_irq_byname_optional(pdev, "fe2");
-@@ -3704,6 +3717,42 @@
+@@ -3704,6 +3718,42 @@
  	return IRQ_HANDLED;
  }
  
@@ -77,35 +79,7 @@ Fixes reverse-engineered from the shipping vendor 6.6.94 kernel
  static irqreturn_t mtk_handle_irq(int irq, void *_eth)
  {
  	struct mtk_eth *eth = _eth;
-@@ -4597,10 +4646,23 @@
- 
- 	/* FE int grouping */
- 	mtk_w32(eth, MTK_TX_DONE_INT, reg_map->pdma.int_grp);
--	mtk_w32(eth, eth->soc->rx.irq_done_mask, reg_map->pdma.int_grp + 4);
--	mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
--	mtk_w32(eth, eth->soc->rx.irq_done_mask, reg_map->qdma.int_grp + 4);
--	mtk_w32(eth, 0x21021000, MTK_FE_INT_GRP);
-+	if (eth->soc->caps == MT7987_CAPS) {
-+		/* MT7987 (netsys v3, PPE1-class) uses the vendor IRQ
-+		 * grouping: FE_INT_GRP = 0x210ffff2, and the pdma.int_grp
-+		 * grouping registers must NOT be touched (reverse-engineered
-+		 * from the shipping 6.6.94 kernel). */
-+		mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
-+		mtk_w32(eth, eth->soc->rx.irq_done_mask,
-+			reg_map->qdma.int_grp + 4);
-+		mtk_w32(eth, 0x210ffff2, MTK_FE_INT_GRP);
-+	} else {
-+		mtk_w32(eth, eth->soc->rx.irq_done_mask,
-+			reg_map->pdma.int_grp + 4);
-+		mtk_w32(eth, MTK_TX_DONE_INT, reg_map->qdma.int_grp);
-+		mtk_w32(eth, eth->soc->rx.irq_done_mask,
-+			reg_map->qdma.int_grp + 4);
-+		mtk_w32(eth, 0x21021000, MTK_FE_INT_GRP);
-+	}
- 
- 	if (mtk_is_netsys_v3_or_greater(eth)) {
- 		/* PSE dummy page mechanism */
-@@ -5818,7 +5880,29 @@
+@@ -5818,7 +5868,29 @@
  			goto err_deinit_hw;
  	}
  
@@ -136,7 +110,7 @@ Fixes reverse-engineered from the shipping vendor 6.6.94 kernel
  		err = devm_request_irq(eth->dev, eth->irq[MTK_FE_IRQ_SHARED],
  				       mtk_handle_irq, 0,
  				       dev_name(eth->dev), eth);
-@@ -6170,7 +6254,10 @@
+@@ -6170,7 +6242,10 @@
  	},
  	.rx = {
  		DESC_SIZE(struct mtk_rx_dma_v2),

@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 2026-10-09 — 对齐参考仓库已实测的 MT7987 FE 中断分组修复
+
+对照 [ctr54188/h5000m-debian 的以太网实机记录](https://github.com/ctr54188/h5000m-debian/blob/main/docs/ETHERNET-TX-NOTES.md)，
+发现本项目此前把厂商 `FE_INT_GRP=0x210ffff2` 直接移植到了单队列驱动。参考仓库记录该配置在其 v2 实机中
+导致所有以太网 IRQ 计数为 0；v3 随后回退到 `0x21021000` 和 PDMA/QDMA 分组寄存器写入。
+
+- 从 `kernel/patches/997-net-ethernet-mtk_eth_soc-mt7987-eth-irq-fixes.patch` 删除未经本项目验证的
+  `0x210ffff2` 特例，恢复原有单队列分组路径；保留 RX done mask 修复与 8 条 IRQ 安全 handler。
+- 将 MT7987 的 shared/TX/RX 槽分别映射到资源 0/1/2，与参考仓库最终补丁一致。
+- **验证边界**：这修正了有参考仓库实机证据支持的以太网 IRQ 配置错误；是否是本机启动卡住/RCU stall 的直接原因，仍需新内核实机确认。
+
 ### 2026-10-09 — H5000M 启动卡住复核与伪 NMI 诊断参数
 
 用户确认 `boot-20261009-090607.log` 对应设备启动卡住。两段日志都只到 `basic.target`，没有到达
@@ -1480,6 +1491,10 @@ p4 写 FIT 内核（魔数 `d00dfeed` 校验通过）、p5 写引导层 ext4（�
   p5 引导层至 ~7.2 GiB，作为 overlay 持久层）。
 
 ### 2026-10-06 — MT7987 以太网修复：内核 IRQ 三缺陷 + DTS 八中断/板级 MAC（参考 ctr54188/h5000m-debian 真机逆向）
+
+> **后续更正（2026-10-09）**：上文中「MT7987 必须使用 `FE_INT_GRP=0x210ffff2` 且不写
+> `pdma.int_grp`」的结论已被参考仓库单队列实机对照证伪。请以本 changelog 顶部
+> 「对齐参考仓库已实测的 MT7987 FE 中断分组修复」和当前 997 补丁为准。
 
 - **来源**：参考仓库 `ctr54188/h5000m-debian`（同型号设备，作者对厂商出货内核 6.6.94 做了
   真机逆向，见其 `docs/ETHERNET-TX-NOTES.md`——kallsyms + 反汇编 + live.dtb 交叉验证）。
