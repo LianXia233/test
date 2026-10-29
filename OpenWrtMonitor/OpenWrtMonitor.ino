@@ -712,6 +712,12 @@ static lv_obj_t* scrMain = nullptr;
 static lv_obj_t* panels[5] = {nullptr};
 static int curPage = 0;
 
+/* 投屏页实现在文件后半段的「投屏接收」里，这里先声明：
+   设置页的入口按钮和 /api 的 {"c":"ui","id":5} 都要用 */
+static lv_obj_t* scrCast = nullptr;      // 推屏专用页（整屏，无状态栏/导航栏）
+static void castPageOpen();
+static void castPageClose();
+
 static lv_obj_t* navItem[5] = {nullptr};
 static lv_obj_t* navIcon[5] = {nullptr};
 static lv_obj_t* navText[5] = {nullptr};
@@ -1265,6 +1271,15 @@ static void buildSettings(lv_obj_t* p) {
   ui_kv(c4, "地址", "—", UI_C_ACCENT, &cWeb);
   ui_kv(c4, "域名", MDNS_NAME ".local", UI_C_TEXT_DIM, nullptr);
 
+  /* 推屏专用页的入口：整屏铺满，投屏时连状态栏都不留 */
+  lv_obj_t* c5a = ui_card(p);
+  lv_obj_set_width(c5a, LV_PCT(100));
+  ui_title_row(c5a, &ic_flow, "投屏", UI_C_CYAN);
+  lv_obj_t* cb = ui_button(c5a, &ic_flow, "进入投屏页", UI_C_CARD_HI,
+                           [](lv_event_t*) { castPageOpen(); }, nullptr);
+  lv_obj_set_width(cb, LV_PCT(100));
+  lv_obj_set_height(cb, 28);
+
   lv_obj_t* c5 = ui_card(p);
   lv_obj_set_width(c5, LV_PCT(100));
   ui_title_row(c5, &ic_info, "关于", UI_C_TEXT_MUTE);
@@ -1770,6 +1785,9 @@ static void netAccept();
 static void wsPoll();
 static void castWatchdog();
 static void castExit(const char* why);
+static void castPageRefresh();
+static void castSnapshot(int* on, int* page, unsigned long* frames,
+                         unsigned long* errs, unsigned* w, unsigned* h);
 #define SSE_MAX 3
 static WiFiClient sseCli[SSE_MAX];
 static uint32_t sseLastPush = 0;
@@ -1852,6 +1870,21 @@ static String buildState() {
       o["rssi"] = apList[i].rssi;
       o["sec"] = apList[i].sec ? 1 : 0;
     }
+  }
+
+  /* 投屏状态：LuCI 的「状态」页拿这个显示投屏页开没开、收了多少帧 */
+  {
+    int on = 0, page = 0;
+    unsigned long cf = 0, ce = 0;
+    unsigned cw = 0, ch = 0;
+    castSnapshot(&on, &page, &cf, &ce, &cw, &ch);
+    JsonObject cj = d.createNestedObject("cast");
+    cj["on"]     = on;
+    cj["page"]   = page;
+    cj["frames"] = cf;
+    cj["errs"]   = ce;
+    cj["w"]      = cw;
+    cj["h"]      = ch;
   }
 
   String out;
@@ -1949,7 +1982,12 @@ static void handleApi() {
 
   } else if (!strcmp(c, "ui")) {
     int id = d["id"] | -1;
-    if (id >= 0 && id <= 4 && !scrProv && !scrOw) navGoto(id);
+    if (id == 5) {
+      castPageOpen();                       // 专用推屏页
+    } else if (id >= 0 && id <= 4) {
+      if (scrCast) castPageClose();         // 先收起推屏页
+      if (!scrProv && !scrOw) navGoto(id);
+    }
 
   } else if (!strcmp(c, "scan")) {
     if (!scanning) scanStart();
@@ -2111,6 +2149,8 @@ static uint16_t castSrcW = 0, castSrcH = 0;
 static uint16_t castSrcOx = 0, castSrcOy = 0;
 static int      castDstX = 0, castDstY = 0;
 static uint16_t castDstW = 0, castDstH = 0;
+static int      castPrevX = -1, castPrevY = -1;   // 上一帧落在屏幕上的矩形
+static uint16_t castPrevW = 0, castPrevH = 0;     // 变了就先抹一圈，别留残影
 static bool     castOddHas = false;
 static uint8_t  castOdd = 0;
 static bool     castFull = false;       // 源图就是整屏，可以省掉逐行设窗口
@@ -2161,6 +2201,23 @@ static void castFrameBegin(uint16_t w, uint16_t h) {
   else               { castDstH = h;        castSrcOy = 0;                  castDstY = (SCREEN_H - h) / 2; }
   castFull = (castSrcW == SCREEN_W && castSrcH == SCREEN_H);
   castRowFill = 0; castCurRow = 0; castOddHas = false;
+
+  /* 新帧盖不满整屏时，边上一圈还留着上一帧的像素 —— 尺寸一变就先抹黑。
+     只在矩形变化时做，正常逐帧推同一个尺寸不会多花时间。 */
+  if (castDstX != castPrevX || castDstY != castPrevY ||
+      castDstW != castPrevW || castDstH != castPrevH) {
+    if (castDstX > 0)
+      tft.fillRect(0, 0, castDstX, SCREEN_H, TFT_BLACK);
+    if (castDstX + (int)castDstW < SCREEN_W)
+      tft.fillRect(castDstX + castDstW, 0, SCREEN_W - castDstX - castDstW, SCREEN_H, TFT_BLACK);
+    if (castDstY > 0)
+      tft.fillRect(0, 0, SCREEN_W, castDstY, TFT_BLACK);
+    if (castDstY + (int)castDstH < SCREEN_H)
+      tft.fillRect(0, castDstY + castDstH, SCREEN_W, SCREEN_H - castDstY - castDstH, TFT_BLACK);
+    castPrevX = castDstX; castPrevY = castDstY;
+    castPrevW = castDstW; castPrevH = castDstH;
+  }
+
   castLive = true;
   tft.startWrite();
   if (castFull) tft.setAddrWindow(0, 0, SCREEN_W, SCREEN_H);
@@ -2328,15 +2385,136 @@ static bool castDispatch(const uint8_t* src, size_t len, const char** why) {
   return ok;
 }
 
+/* ---------------------------------------------------------- 推屏专用页
+ * 一整屏 320x240，没有状态栏也没有导航栏：投屏时像素是直写 TFT 的，
+ * LVGL 整个让位，所以这一页只在「还没开始」和「已经结束」时看得见 ——
+ * 它的作用是给地址、给状态、留一条退路。
+ *
+ * 进入方式：设置页的「进入投屏页」按钮 / POST /api {"c":"ui","id":5} /
+ * 收到第一帧时自动切过来（自动切过来的，投屏结束后会自动退回监控页）。 */
+#define CAST_PAGE_IDLE_MS  60000      // 手动进来干等 60 秒没人推，退回监控
+#define CAST_FAIL_LIMIT    8          // 连续这么多帧失败就认栽，别把屏占着
+
+static lv_obj_t* castLblBig = nullptr;
+static lv_obj_t* castLblUrl = nullptr;
+static lv_obj_t* castLblTip = nullptr;
+static lv_obj_t* castLblStat = nullptr;
+
+static uint32_t castPageAtMs = 0;
+static bool     castPageAuto = false;     // 是"因为来了帧"自动打开的
+static char     castLastMsg[64] = "";     // 上一次投屏怎么结束的
+static uint8_t  castFailStreak = 0;
+
+static void castPageRefresh() {
+  if (!scrCast) return;
+
+  char b[72];
+  if (castActive) {
+    ui_set_text(castLblBig, "正在投屏");
+    ui_set_text(castLblTip, "上位机直写画面，触屏退出");
+  } else if (castLastMsg[0]) {
+    ui_set_text(castLblBig, "已停止");
+    ui_set_text(castLblTip, castLastMsg);
+  } else {
+    ui_set_text(castLblBig, "等待推送画面");
+    ui_set_text(castLblTip, "从 LuCI「投屏」页推一帧即可");
+  }
+
+  snprintf(b, sizeof b, "http://%s:%d",
+           WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "—",
+           SSE_PORT);
+  ui_set_text(castLblUrl, b);
+
+  snprintf(b, sizeof b, "已收 %lu 帧 · 失败 %lu 次",
+           (unsigned long)castFrames, (unsigned long)castErrs);
+  ui_set_text(castLblStat, b);
+}
+
+static void castPageBuild() {
+  scrCast = lv_obj_create(NULL);
+  ui_screen_root(scrCast);
+
+  lv_obj_t* ti = ui_icon(scrCast, &ic_flow, UI_C_CYAN);
+  lv_obj_set_pos(ti, 10, 10);
+  ui_icon_size(ti, 18);
+
+  lv_obj_t* tt = ui_label(scrCast, "投屏", UI_F_S, UI_C_TEXT);
+  lv_obj_set_pos(tt, 34, 9);
+
+  lv_obj_t* xb = ui_button(scrCast, &ic_back, nullptr, UI_C_CARD, nullptr, nullptr);
+  lv_obj_set_pos(xb, UI_W - 40, 6);
+  lv_obj_set_size(xb, 30, 26);
+  lv_obj_add_event_cb(xb, [](lv_event_t*) { castPageClose(); }, LV_EVENT_CLICKED, nullptr);
+
+  /* 中间：状态大卡。整块居中，字少了也不空 */
+  lv_obj_t* card = ui_card(scrCast);
+  lv_obj_set_pos(card, 8, 40);
+  lv_obj_set_size(card, UI_W - 16, 118);
+  lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(card, 6, 0);
+
+  castLblBig = ui_label(card, "等待推送画面", UI_F_L, UI_C_TEXT);
+  castLblUrl = ui_label(card, "http://—", UI_F_XS, UI_C_CYAN);
+  castLblTip = ui_label(card, "", UI_F_XS, UI_C_TEXT_DIM);
+  lv_obj_set_width(castLblTip, UI_W - 48);
+  lv_label_set_long_mode(castLblTip, LV_LABEL_LONG_MODE_WRAP);
+  lv_obj_set_style_text_align(castLblTip, LV_TEXT_ALIGN_CENTER, 0);
+
+  castLblStat = ui_label(scrCast, "", UI_F_XS, UI_C_TEXT_MUTE);
+  lv_obj_set_pos(castLblStat, 10, 164);
+
+  lv_obj_t* b1 = ui_button(scrCast, &ic_back, "回到监控", UI_C_CARD, nullptr, nullptr);
+  lv_obj_set_pos(b1, 8, 188);
+  lv_obj_set_size(b1, 148, 36);
+  lv_obj_add_event_cb(b1, [](lv_event_t*) { castPageClose(); }, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* b2 = ui_button(scrCast, &ic_power, "停止投屏", UI_C_CARD_HI, nullptr, nullptr);
+  lv_obj_set_pos(b2, 164, 188);
+  lv_obj_set_size(b2, 148, 36);
+  lv_obj_add_event_cb(b2, [](lv_event_t*) { castExit("手动停止"); }, LV_EVENT_CLICKED, nullptr);
+}
+
+static void castPageOpen() {
+  if (!scrMain) return;
+  if (scrProv) closeProvisioning();
+  if (scrOw) closeRouter();
+  if (!scrCast) castPageBuild();
+  castPageAtMs = millis();
+  lv_screen_load(scrCast);
+  castPageRefresh();
+}
+
+static void castPageClose() {
+  if (!scrCast) return;
+  if (castActive) castExit("退出页面");      // 先停投屏，别把帧写到监控页上
+  lv_screen_load(scrMain);
+  lv_obj_del(scrCast);
+  scrCast = nullptr;
+  castLblBig = castLblUrl = castLblTip = castLblStat = nullptr;
+  castPageAuto = false;
+  uiDirty = true;
+  lv_obj_invalidate(scrMain);
+  lv_refr_now(disp);
+}
+
 /* ---------------------------------------------------------- 会话进出 */
 static void castEnter() {
   if (castActive) return;
   castActive = true;
   castLastFrameMs = millis();
   castFrames = 0; castErrs = 0;
+  castFailStreak = 0;
+  castLastMsg[0] = 0;
   castWinAlloc();
+
+  /* 有专用页就切过去：这样小于整屏的帧四周是投屏页的底色，
+     而不是监控界面被压在下面 */
+  if (!scrCast) { castPageOpen(); castPageAuto = true; }
+  else          { castPageAtMs = millis(); castPageRefresh(); }
+
   pollReset();                       // 投屏期间别再去占着带宽问 ubus
   tft.fillScreen(TFT_BLACK);
+  castPrevX = -1; castPrevW = 0; castPrevH = 0;
   Serial.printf("[cast] 进入投屏，free %u\n", (unsigned)ESP.getFreeHeap());
 }
 
@@ -2347,14 +2525,41 @@ static void castExit(const char* why) {
   castLive = false;
   castWinFree();
   castFreeBuf();
+  castPrevX = -1; castPrevW = 0; castPrevH = 0;
+  snprintf(castLastMsg, sizeof castLastMsg, "%s退出 · %lu 帧 / %lu 失败",
+           why ? why : "", (unsigned long)castFrames, (unsigned long)castErrs);
   Serial.printf("[cast] 退出投屏（%s），%u 帧 / %u 次失败\n",
                 why ? why : "", (unsigned)castFrames, (unsigned)castErrs);
+
   /* LVGL 不知道我们偷偷写过屏幕，得逼它整屏重绘一次 */
   tft.fillScreen(TFT_BLACK);
-  lv_obj_invalidate(lv_screen_active());
-  lv_refr_now(disp);
   uiDirty = true;
   pollReset();
+
+  /* 自动打开的推屏页用完就收，别让屏幕停在「已停止」上 */
+  if (castPageAuto) { castPageClose(); return; }
+
+  castPageRefresh();
+  lv_obj_invalidate(lv_screen_active());
+  lv_refr_now(disp);
+}
+
+/* 一帧的结果：成功就把连败清零，失败就累加（看门狗据此放弃） */
+static inline void castResult(bool ok) {
+  if (ok) { castFailStreak = 0; return; }
+  castErrs++;
+  if (castFailStreak < 255) castFailStreak++;
+}
+
+/* 给 /api/state 用的只读快照（buildState 排在文件前面，只能这样取） */
+static void castSnapshot(int* on, int* page, unsigned long* frames,
+                         unsigned long* errs, unsigned* w, unsigned* h) {
+  if (on)     *on     = castActive ? 1 : 0;
+  if (page)   *page   = scrCast ? 1 : 0;
+  if (frames) *frames = castFrames;
+  if (errs)   *errs   = castErrs;
+  if (w)      *w      = castSrcW;
+  if (h)      *h      = castSrcH;
 }
 
 /* ---------------------------------------------------------- HTTP 裸 socket 服务
@@ -2502,18 +2707,19 @@ static void castHandleHttp(WiFiClient& c, const String& head) {
     bool full = castReadBody(c, cl, castFeedPixels, nullptr);
     castFrameEnd();
     char b[96];
+    castResult(full);
     if (full) { snprintf(b, sizeof b, "%ux%u OK %lums", w, h, (unsigned long)(millis() - t0));
                 castHttpRsp(c, 200, b); }
-    else      { castErrs++; snprintf(b, sizeof b, "接收不完整，期望 %lu 字节", (unsigned long)cl);
+    else      { snprintf(b, sizeof b, "接收不完整，期望 %lu 字节", (unsigned long)cl);
                 castHttpRsp(c, 400, b); }
     return;
   }
 
   if (path == "/draw_rgb565_lz4" || path == "/draw_image") {
-    if (!castAllocBuf(cl)) { castHttpRsp(c, 507, "内存不足，装不下这一帧"); return; }
+    if (!castAllocBuf(cl)) { castResult(false); castHttpRsp(c, 507, "内存不足，装不下这一帧"); return; }
     CastBufCtx ctx; ctx.len = 0;
     if (!castReadBody(c, cl, castFeedBuf, &ctx)) {
-      castErrs++; castHttpRsp(c, 400, "接收不完整"); return;
+      castResult(false); castHttpRsp(c, 400, "接收不完整"); return;
     }
     uint32_t t0 = millis();
     const char* why = "ok";
@@ -2529,7 +2735,7 @@ static void castHandleHttp(WiFiClient& c, const String& head) {
     char b[180];
     snprintf(b, sizeof b, "%s %lums (free %u)", why,
              (unsigned long)(millis() - t0), (unsigned)ESP.getFreeHeap());
-    if (!ok) castErrs++;
+    castResult(ok);
     castHttpRsp(c, ok ? 200 : 400, b);
     return;
   }
@@ -2614,7 +2820,7 @@ static void wsFrameDone() {
   castEnter();
   const char* why = "ok";
   bool ok = castDispatch(castBuf, ws.acc, &why);
-  if (!ok && strcmp(why, "nop") != 0) castErrs++;
+  if (strcmp(why, "nop") == 0) castResult(true); else castResult(ok);
   if (castFrames % 30 == 0)
     Serial.printf("[cast] %s %uB -> %s (free %u)\n", ok ? "OK " : "ERR",
                   (unsigned)ws.acc, why, (unsigned)ESP.getFreeHeap());
@@ -2886,8 +3092,14 @@ static void netAccept() {
 
 /* ---------------------------------------------------------- 投屏看门狗 */
 static void castWatchdog() {
-  if (!castActive) return;
+  if (!castActive) {
+    /* 手动点进来的推屏页干等着没人推，到点退回监控页 */
+    if (scrCast && !castPageAuto && millis() - castPageAtMs > CAST_PAGE_IDLE_MS)
+      castPageClose();
+    return;
+  }
   if (castLive) return;                     // 半帧写一半的时候别打扰
+  if (castFailStreak >= CAST_FAIL_LIMIT) { castExit("连续失败"); return; }
   if (touch.Pressed()) { castExit("触屏"); delay(300); return; }
   if (millis() - castLastFrameMs > CAST_TIMEOUT_MS) castExit("超时");
 }

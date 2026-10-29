@@ -51,12 +51,15 @@ STUBS = r'''
 #define CAST_MAX_SRC 262144u
 #define SCREEN_W 320
 #define SCREEN_H 240
+#define TFT_BLACK 0
 
 struct TftStub {
   std::vector<uint16_t> out;
   void startWrite() {}
   void endWrite() {}
   void setAddrWindow(int32_t x, int32_t y, uint32_t w, uint32_t h) { (void)x;(void)y;(void)w;(void)h; }
+  void fillScreen(uint32_t) {}
+  void fillRect(int32_t, int32_t, int32_t, int32_t, uint32_t) {}
   void fillScreen(uint16_t) {}
   void pushColors(uint16_t* p, uint32_t n, bool) { for (uint32_t i=0;i<n;i++) out.push_back(p[i]); }
 };

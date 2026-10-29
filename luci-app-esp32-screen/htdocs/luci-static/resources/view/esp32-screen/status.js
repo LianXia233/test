@@ -10,6 +10,13 @@
 'require rpc';
 'require esp32screen';
 
+/* 投屏状态一行字 */
+function castText(c) {
+	if (!c) return '—';
+	if (!c.on) return c.page ? '推屏页已打开，等待画面' : '未投屏';
+	return '进行中 · ' + (c.frames || 0) + ' 帧 · ' + (c.w || 0) + '×' + (c.h || 0);
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -78,6 +85,17 @@ return view.extend({
 									esp32screen.cmd(host, { c: 'bright', pct: +v });
 								}
 							}, '应用')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, '推屏页'),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('button', {
+								'class': 'btn',
+								'click': function() { esp32screen.cmd(host, { c: 'ui', id: 5 }); }
+							}, '让屏幕切到推屏页'),
+							E('span', { 'style': 'color:#5D6A8E;font-size:12px;margin-left:8px' },
+								'整屏 320×240，无状态栏；60 秒没人推会自动退回')
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
@@ -204,7 +222,8 @@ return view.extend({
 			['空闲内存', esp32screen.fmtBytes((m.heap || 0) / 1024)],
 			['已运行', esp32screen.fmtUptime(m.up)],
 			['采集周期', (m.poll || 0) + ' ms'],
-			['当前页', String(s.screen)]
+			['当前页', String(s.screen)],
+			['投屏', castText(s.cast)]
 		]);
 	},
 
