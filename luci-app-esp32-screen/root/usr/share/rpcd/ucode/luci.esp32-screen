@@ -1,0 +1,210 @@
+// luci.esp32-screen —— luci-app-esp32-screen 的 rpcd 后端
+//
+// 这个插件只管两件事：
+//   get / set  读写 /etc/config/esp32screen（面板在哪、默认用什么模板）
+//   probe      由路由器自己去问面板的 /api/state
+//
+// 画画面这件事不经过路由器：浏览器直接 POST 到面板的 :81/draw_rgb565，
+// 153,600 字节一帧，绕开 ubus 反而更快。但浏览器未必够得着面板
+// （比如从外面连 LuCI、或者面板在另一个 VLAN），所以留了个 probe 兜底。
+//
+// 注册出来的 ubus 对象叫 luci.esp32-screen，方法：
+//   ubus call luci.esp32-screen get
+//   ubus call luci.esp32-screen set  '{"values":{"host":"192.168.1.23"}}'
+//   ubus call luci.esp32-screen probe '{"host":"openwrt-monitor.local"}'
+
+'use strict';
+
+import { cursor } from 'uci';
+import { access, popen } from 'fs';
+
+const CONFIG = 'esp32screen';
+
+/* UCI 里没写的就给这些值 */
+const DEFAULTS = {
+	host: '',
+	mdns: 'openwrt-monitor',
+	enabled: '1',
+	template: 'overview',
+	custom_html: '',
+	push_interval: '4',
+	ip: '',
+	user: 'root',
+	password: ''
+};
+
+const PANEL_KEYS  = [ 'host', 'mdns', 'enabled', 'template', 'custom_html', 'push_interval' ];
+const ROUTER_KEYS = [ 'ip', 'user', 'password' ];
+
+function shellquote(s) {
+	return "'" + replace(s, "'", "'\\''") + "'";
+}
+
+function str(v) {
+	if (v == null) return null;
+	if (type(v) == 'bool' || type(v) == 'boolean') return v ? '1' : '0';
+	return '' + v;
+}
+
+/* ------------------------------------------------------------------ 读 */
+
+function readConfig() {
+	const ctx = cursor();
+	const cfg = {};
+
+	for (let k in DEFAULTS)
+		cfg[k] = DEFAULTS[k];
+
+	ctx.load(CONFIG);
+
+	ctx.foreach(CONFIG, 'panel', function(s) {
+		for (let i = 0; i < length(PANEL_KEYS); i++) {
+			const k = PANEL_KEYS[i];
+			if (s[k] != null) cfg[k] = s[k];
+		}
+	});
+
+	ctx.foreach(CONFIG, 'router', function(s) {
+		for (let i = 0; i < length(ROUTER_KEYS); i++) {
+			const k = ROUTER_KEYS[i];
+			if (s[k] != null) cfg[k] = s[k];
+		}
+	});
+
+	/* 前端只认 host 一个字段：没填 IP 就把 mDNS 名字拼成地址，
+	   并标一下这个地址是猜出来的，方便页面上提示 */
+	if (cfg.host == '') {
+		cfg.mdns = (cfg.mdns == '') ? 'openwrt-monitor' : cfg.mdns;
+		cfg.host = cfg.mdns + '.local';
+		cfg.host_source = 'mdns';
+	}
+	else {
+		cfg.host_source = 'static';
+	}
+
+	return cfg;
+}
+
+/* ------------------------------------------------------------------ 写 */
+
+function haveSection(ctx, type) {
+	let found = false;
+	ctx.foreach(CONFIG, type, function(s) { found = true; });
+	return found;
+}
+
+function writeConfig(values) {
+	const ctx = cursor();
+	const val = (type(values) == 'object') ? values : {};
+	let changed = 0;
+
+	ctx.load(CONFIG);
+
+	for (let pass = 0; pass < 2; pass++) {
+		const keys = (pass == 0) ? PANEL_KEYS : ROUTER_KEYS;
+		const sid  = (pass == 0) ? 'panel'   : 'router';
+
+		for (let i = 0; i < length(keys); i++) {
+			const k = keys[i];
+			if (val[k] == null)
+				continue;
+
+			const v = str(val[k]);
+			if (v == null)
+				continue;
+
+			/* 段不存在就先建一个（三段式 set = 建命名段），
+			   正常安装时 /etc/config/esp32screen 里已经有了 */
+			if (!haveSection(ctx, sid))
+				ctx.set(CONFIG, sid, sid);
+
+			ctx.set(CONFIG, sid, k, v);
+			changed++;
+		}
+	}
+
+	if (changed)
+		ctx.commit(CONFIG);
+
+	return changed;
+}
+
+/* -------------------------------------------------------------- 探测面板 */
+
+function httpGet(url, timeout) {
+	let cmd = null;
+
+	if (access('/usr/bin/uclient-fetch'))
+		cmd = sprintf('/usr/bin/uclient-fetch -q -O - -T %d %s 2>/dev/null',
+		              timeout, shellquote(url));
+	else if (access('/usr/bin/curl'))
+		cmd = sprintf('/usr/bin/curl -s -m %d %s', timeout, shellquote(url));
+	else if (access('/usr/bin/wget'))
+		cmd = sprintf('/usr/bin/wget -q -T %d -O - %s', timeout, shellquote(url));
+
+	if (!cmd)
+		return { error: '路由器上没有 uclient-fetch / curl / wget' };
+
+	const fd = popen(cmd);
+	if (!fd)
+		return { error: '无法执行取数命令' };
+
+	const body = fd.read('all');
+	fd.close();
+
+	if (body == null || trim(body) == '')
+		return { error: '面板无响应（' + url + '）' };
+
+	try {
+		return { state: json(body) };
+	}
+	catch (e) {
+		return { error: '面板返回的不是 JSON：' + trim(substr(body, 0, 80)) };
+	}
+}
+
+function probe(host) {
+	if (host == null || host == '')
+		return { error: '未配置面板地址' };
+
+	let url = '' + host;
+	if (!match(url, /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//))
+		url = 'http://' + url;
+
+	url = replace(url, /\/+$/, '') + '/api/state';
+
+	return httpGet(url, 3);
+}
+
+/* ------------------------------------------------------------ ubus 出口 */
+
+return {
+	'luci.esp32-screen': {
+		get: {
+			call: function() {
+				return { config: readConfig() };
+			}
+		},
+
+		set: {
+			args: { values: {} },
+			call: function(request) {
+				const n = writeConfig(request.args.values);
+				return {
+					ok: (n >= 0),
+					changed: n,
+					config: readConfig()
+				};
+			}
+		},
+
+		probe: {
+			args: { host: '' },
+			call: function(request) {
+				const cfg = readConfig();
+				const host = request.args.host || cfg.host || '';
+				return probe(host);
+			}
+		}
+	}
+};

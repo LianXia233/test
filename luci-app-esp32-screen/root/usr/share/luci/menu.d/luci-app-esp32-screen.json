@@ -1,0 +1,40 @@
+{
+	"admin/services/esp32-screen": {
+		"title": "ESP32 屏幕",
+		"order": 62,
+		"action": {
+			"type": "view",
+			"path": "esp32-screen/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-esp32-screen" ]
+		}
+	},
+
+	"admin/services/esp32-screen/status": {
+		"title": "状态",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "esp32-screen/status"
+		}
+	},
+
+	"admin/services/esp32-screen/cast": {
+		"title": "投屏",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "esp32-screen/cast"
+		}
+	},
+
+	"admin/services/esp32-screen/settings": {
+		"title": "设置",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "esp32-screen/settings"
+		}
+	}
+}

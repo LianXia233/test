@@ -1,0 +1,17 @@
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+*.pyo
+.codebuddy/
+
+# PlatformIO 构建产物
+.pio/
+.pioenvs/
+.piolibdeps/
+OpenWrtMonitor/lib/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

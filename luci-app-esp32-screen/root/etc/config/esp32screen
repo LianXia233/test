@@ -1,0 +1,12 @@
+config panel 'panel'
+	option host ''
+	option mdns 'openwrt-monitor'
+	option enabled '1'
+	option template 'overview'
+	option custom_html ''
+	option push_interval '4'
+
+config router 'router'
+	option ip ''
+	option user 'root'
+	option password ''
