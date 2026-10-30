@@ -79,6 +79,10 @@ String OPENWRT_PASS = "";
 #define LV_SYMBOL_BULLET    "\xE2\x80\xA2"  /* 密码遮罩圆点 U+2022（UTF-8），已在子集里 */
 #endif
 
+/* 投屏帧回调：返回 false 中断接收。必须声明在 include 之前 —— Arduino 会把
+   下面 castReadBody() 的原型自动提到文件最前面，typedef 晚了就找不到。 */
+typedef bool (*CastFeed)(const uint8_t*, size_t, void*);
+
 #include <ArduinoJson.h>
 #include <TFT_Touch.h>
 #include <TFT_eSPI.h>
@@ -2597,8 +2601,6 @@ static void castHttpRsp(WiFiClient& c, int code, const char* body) {
   snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\n", code, code == 200 ? "OK" : "Error");
   castHttpSend(c, h, body, "text/plain; charset=utf-8");
 }
-
-typedef bool (*CastFeed)(const uint8_t*, size_t, void*);
 
 static bool castReadBody(WiFiClient& c, size_t total, CastFeed feed, void* ctx) {
   uint8_t buf[1024];
