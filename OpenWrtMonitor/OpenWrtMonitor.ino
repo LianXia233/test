@@ -150,9 +150,11 @@ static HTTPClient httpCli;                 // 常驻，避免每次请求都构�
 #define EE_OWPASS_ADDR 164
 #define EE_BRIGHT_ADDR 228
 #define EE_POLL_ADDR   229
+#define EE_CORES_ADDR  230                // CPU 核心数：0=自动，2/4/6/8=手动
 #define EE_MAGIC       0x4F575232UL        // "OWR2"
 
 static uint8_t cfgBright = 100;
+static uint8_t cfgCores = 0;              // CPU 核心数覆盖：0=自动（读不到按 2 算）
 static uint16_t cfgPollMs = POLL_DEFAULT_MS;
 
 static String eeReadStr(int addr, int maxLen) {
@@ -189,6 +191,7 @@ static void savePrefs() {
   EEPROM.writeUInt(EE_MAGIC_ADDR, EE_MAGIC);
   EEPROM.write(EE_BRIGHT_ADDR, cfgBright);
   EEPROM.write(EE_POLL_ADDR, (uint8_t)constrain((int)((cfgPollMs - 1000) / 1000), 1, 4));
+  EEPROM.write(EE_CORES_ADDR, cfgCores);
   EEPROM.commit();
 }
 
@@ -215,6 +218,8 @@ static void loadConfig() {
   if (b >= 10 && b <= 100) cfgBright = b;
   uint8_t p = EEPROM.read(EE_POLL_ADDR);
   if (p >= 1 && p <= 4) cfgPollMs = (uint16_t)(1000 + p * 1000);   // 2/3/4/5s
+  uint8_t cc = EEPROM.read(EE_CORES_ADDR);
+  if (cc == 0 || cc == 2 || cc == 4 || cc == 6 || cc == 8) cfgCores = cc;
 
   Serial.printf("[cfg] ssid='%s' ow='%s' bright=%u poll=%u\n",
                 WIFI_SSID.c_str(), OPENWRT_IP.c_str(), cfgBright, cfgPollMs);
@@ -319,7 +324,7 @@ static void fmtUptime(char* b, size_t n, uint32_t s) {
  *  例：0.05 @2核 -> 3%。上限 999 防呆。 */
 static int loadPct(float load) {
   int pct = (int)(load * 100.0f / rtr.cores + 0.5f);
-  return pct < 0 ? 0 : (pct > 999 ? 999 : pct);
+  return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 }
 
 // ============================== LVGL 驱动 ==============================
@@ -535,15 +540,23 @@ static bool fetchBoard() {
   const char* desc = rel["description"] | "";
   if (!strlen(desc)) desc = rel["version"] | "";
   snprintf(rtr.release, sizeof rtr.release, "%s", desc);
-  /* 顺手数核心数：/proc/cpuinfo 里 processor 的个数。失败沿用旧值（初始 1），
-     load 百分比按 单核百分比 = load/核数x100 换算 */
-  JsonDoc c JDOC_CAP(4096);
-  if (ubusInvokeRaw("file", "read", "{\"path\":\"/proc/cpuinfo\"}", c)) {
-    const char* ci = c["result"][1]["data"] | "";
-    uint8_t n = 0;
-    for (const char* pp = ci; (pp = strstr(pp, "processor")) != nullptr; pp += 9)
-      if (n < 8) n++;
-    if (n) rtr.cores = n;
+  /* 核心数优先级：设置页手动值 > /proc/cpuinfo 自动读取 > 兜底 2（主流双核）。
+     有些固件的 rpcd ACL 不给 file.read（实测 ImmortalWrt rc=6），自动会失败，
+     所以设置页留了手动覆盖，存 EEPROM。 */
+  if (cfgCores > 0) {
+    rtr.cores = cfgCores;
+  } else {
+    JsonDoc c JDOC_CAP(4096);
+    if (ubusInvokeRaw("file", "read", "{\"path\":\"/proc/cpuinfo\"}", c)) {
+      const char* ci = c["result"][1]["data"] | "";
+      uint8_t n = 0;
+      for (const char* pp = ci; (pp = strstr(pp, "processor")) != nullptr; pp += 9)
+        if (n < 8) n++;
+      if (n) rtr.cores = n;
+      else   rtr.cores = 2;
+    } else {
+      rtr.cores = 2;
+    }
   }
   boardFresh = true;
   boardAt = millis();
@@ -1332,6 +1345,12 @@ static void pollEvent(lv_event_t* e) {
   ui_toast("刷新间隔已更新");
 }
 
+static void coresEvent(lv_event_t* e) {
+  cfgCores = (uint8_t)(intptr_t)lv_event_get_user_data(e);   // 0 = 自动
+  savePrefs();
+  ui_toast(cfgCores ? "CPU 核心数已固定" : "CPU 核心数已改为自动");
+}
+
 static void rebootEvent(lv_event_t*) {
   ui_toast("正在重启…");
   delay(400);
@@ -1371,6 +1390,32 @@ static void buildSettings(lv_obj_t* p) {
     lv_obj_t* l = ui_label(b, names[i], UI_F_XS, on ? UI_C_ACCENT : UI_C_TEXT_DIM);
     lv_obj_center(l);
     lv_obj_add_event_cb(b, pollEvent, LV_EVENT_CLICKED, (void*)(intptr_t)opts[i]);
+  }
+
+  ui_divider(c2);
+  ui_label(c2, "CPU 核心数（负载换算百分比用）", UI_F_XS, UI_C_TEXT_DIM);
+  lv_obj_t* seg2 = lv_obj_create(c2);
+  ui_clean(seg2);
+  lv_obj_set_size(seg2, LV_PCT(100), 26);
+  lv_obj_set_flex_flow(seg2, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(seg2, 4, 0);
+  {
+    const uint8_t copts[4] = {0, 2, 4, 8};
+    const char* cnames[4] = {"自动", "2核", "4核", "8核"};
+    for (int i = 0; i < 4; i++) {
+      lv_obj_t* b = lv_btn_create(seg2);
+      lv_obj_set_size(b, 66, 24);
+      lv_obj_set_style_radius(b, UI_RADIUS_S, 0);
+      lv_obj_set_style_shadow_width(b, 0, 0);
+      lv_obj_set_style_border_width(b, 1, 0);
+      bool on = (cfgCores == copts[i]);
+      lv_obj_set_style_bg_color(b, ui_col(on ? UI_C_ACCENT : UI_C_CARD), 0);
+      lv_obj_set_style_bg_opa(b, on ? LV_OPA_30 : LV_OPA_COVER, 0);
+      lv_obj_set_style_border_color(b, ui_col(on ? UI_C_ACCENT : UI_C_BORDER), 0);
+      lv_obj_t* l = ui_label(b, cnames[i], UI_F_XS, on ? UI_C_ACCENT : UI_C_TEXT_DIM);
+      lv_obj_center(l);
+      lv_obj_add_event_cb(b, coresEvent, LV_EVENT_CLICKED, (void*)(intptr_t)copts[i]);
+    }
   }
 
   lv_obj_t* c3 = ui_card(p);
