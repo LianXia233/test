@@ -60,6 +60,7 @@ make package/luci-app-esp32-screen/compile V=s
 
 | 文档 | 内容 |
 |---|---|
+| [CHANGELOG.md](CHANGELOG.md) | 更新日志：每个版本改了什么、为什么这么改 |
 | [OpenWrtMonitor/README.md](OpenWrtMonitor/README.md) | 固件：硬件接线、编译、五个页面、WebUI、投屏协议、中文字体子集流水线、实现要点、排障、验证情况（13+1 节） |
 | [luci-app-esp32-screen/README.md](luci-app-esp32-screen/README.md) | 插件：数据流、两种编译方式、UCI 键表、ubus 接口、占位符、排障、验证情况 |
 
