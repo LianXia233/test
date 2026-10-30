@@ -3,7 +3,8 @@
 		"description": "Grant access to the ESP32 screen panel configuration",
 		"read": {
 			"ubus": {
-				"luci.esp32-screen": [ "get", "probe" ]
+				"luci.esp32-screen": [ "get", "probe" ],
+				"file": [ "list", "read" ]
 			},
 			"uci": [ "esp32screen" ]
 		},
