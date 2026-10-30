@@ -2020,17 +2020,21 @@ static String buildState() {
   r["release"] = rtr.release;
   r["up"] = rtr.uptimeSec;
   r["ip"] = owIp;
+  r["cores"] = rtr.cores;             // LuCI 侧把 load 换算成单核百分比用
   JsonArray ld = r.createNestedArray("load");
   ld.add(rtr.load1); ld.add(rtr.load5); ld.add(rtr.load15);
+  /* mem/swap 的契约单位是 KB（LuCI 的 fmtBytes 和内置网页后台都按 KB 解读，
+   * 网页端还做了 *1024 还原成字节）。曾在这里发过字节，两个消费端就都把
+   * 988MB 显示成 943GB。 */
   JsonObject mem = r.createNestedObject("mem");
-  mem["total"] = rtr.memTotal;
-  mem["used"] = rtr.memTotal > rtr.memAvail ? (rtr.memTotal - rtr.memAvail) : 0;
+  mem["total"] = rtr.memTotal / 1024U;
+  mem["used"] = rtr.memTotal > rtr.memAvail ? ((rtr.memTotal - rtr.memAvail) / 1024U) : 0;
   mem["pct"] = rtr.memPct;
-  mem["cached"] = rtr.memCached;
-  mem["buffered"] = rtr.memBuffered;
+  mem["cached"] = rtr.memCached / 1024U;
+  mem["buffered"] = rtr.memBuffered / 1024U;
   JsonObject sw = r.createNestedObject("swap");
-  sw["total"] = rtr.swapTotal;
-  sw["used"] = rtr.swapTotal > rtr.swapFree ? (rtr.swapTotal - rtr.swapFree) : 0;
+  sw["total"] = rtr.swapTotal / 1024U;
+  sw["used"] = rtr.swapTotal > rtr.swapFree ? ((rtr.swapTotal - rtr.swapFree) / 1024U) : 0;
 
   JsonObject n = d.createNestedObject("net");
   n["iface"] = net.iface;

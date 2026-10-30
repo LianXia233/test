@@ -206,7 +206,10 @@ return view.extend({
 			['型号', r.model],
 			['内核', r.kernel],
 			['固件', r.release],
-			['负载', (r.load || []).join(' / ')],
+			['负载（单核）', (r.load || []).map(function(v) {
+				var cores = r.cores || 1;
+				return Math.round(v * 100 / cores) + '%';
+			}).join(' / ')],
 			['内存', r.mem ? (r.mem.pct + '%　' +
 				esp32screen.fmtBytes(r.mem.used) + ' / ' +
 				esp32screen.fmtBytes(r.mem.total)) : null],
