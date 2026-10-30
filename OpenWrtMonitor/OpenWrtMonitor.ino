@@ -1101,7 +1101,7 @@ static void buildHome(lv_obj_t* p) {
     lv_obj_set_height(sp, 1);
     *outVal = ui_label(t, "--", UI_F_NUM, UI_C_TEXT);
     /* 显式宽度（max_width+DOTS 在 flex 行里会退化成 WRAP 折行），防溢出 */
-    lv_obj_set_width(*outVal, 64);
+    lv_obj_set_size(*outVal, 64, UI_LH_24);
     lv_label_set_long_mode(*outVal, LV_LABEL_LONG_MODE_DOTS);
     *outBar = ui_bar(c, col);
   };
@@ -1134,7 +1134,7 @@ static void buildHome(lv_obj_t* p) {
     /* 值用 16px：24px 下 "1.8MB/s" 要 89px，半卡只有 83px，实测必溢出；
        16px 下 "999.9MB/s" 也只占 77px，全段安全 */
     *out = ui_label(t, "--", UI_F_S, col);
-    lv_obj_set_width(*out, 80);
+    lv_obj_set_size(*out, 80, UI_LH_16);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkRate(row2, &ic_down, "下载", UI_C_OK, &hDl);
@@ -1194,7 +1194,7 @@ static void buildSystem(lv_obj_t* p) {
     lv_obj_set_style_pad_row(b, 0, 0);
     ui_label(b, cap, UI_F_XS, UI_C_TEXT_MUTE);
     *out = ui_label(b, "0.00", UI_F_L, UI_C_CYAN);
-    lv_obj_set_width(*out, 88);
+    lv_obj_set_size(*out, 88, UI_LH_24);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkLoad(loads, "1 分钟", &sL1);
@@ -1281,7 +1281,7 @@ static void buildNet(lv_obj_t* p) {
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
     *out = ui_label(t, "--", UI_F_S, col);   /* 同概览页：16px 防溢出 */
-    lv_obj_set_width(*out, 80);
+    lv_obj_set_size(*out, 80, UI_LH_16);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkBig(row, &ic_down, "下载", UI_C_OK, &nDl);
@@ -1337,9 +1337,10 @@ static void rebuildClientList() {
     (void)q;
     lv_obj_t* ml = ui_label(r, gClients[i].name[0] ? gClients[i].name : gClients[i].mac,
                             UI_F_XS, UI_C_TEXT);
-    /* 必须显式宽度：max_width + DOTS 在 9.6 里会退回 WRAP 折成两行，
-       26px 的行装不下，行与行就叠在一起了（实机照片确认过） */
-    lv_obj_set_width(ml, 180);
+    /* DOTS 只在「高度也固定、文本垂直溢出」时才生效（lv_label.c 的判定是
+       size.y > 高度），只给宽度的话长名字会折成两行、把 26px 的行撑爆
+       （实机照片确认过）。所以宽高都要显式固定成单行。 */
+    lv_obj_set_size(ml, 180, UI_LH_16);
     lv_label_set_long_mode(ml, LV_LABEL_LONG_MODE_DOTS);
 
     lv_obj_t* sp = lv_obj_create(r);
@@ -1350,14 +1351,14 @@ static void rebuildClientList() {
     char sig[16];
     snprintf(sig, sizeof sig, "%d", q);    /* 单位省略：RSSI 恒为 dBm，宽度让给主机名 */
     lv_obj_t* sl = ui_label(r, sig, UI_F_XS, q > -70 ? UI_C_OK : UI_C_WARN);
-    lv_obj_set_width(sl, 30);
+    lv_obj_set_size(sl, 30, UI_LH_16);
     lv_label_set_long_mode(sl, LV_LABEL_LONG_MODE_DOTS);
 
     if (gClients[i].rateMbps) {
       char rt[12];
       snprintf(rt, sizeof rt, "%uM", gClients[i].rateMbps);
       lv_obj_t* ch = ui_chip(r, rt, UI_C_ACCENT);
-      lv_obj_set_width(ch, 62);
+      lv_obj_set_size(ch, 62, UI_LH_16);
       lv_label_set_long_mode(ch, LV_LABEL_LONG_MODE_DOTS);
     }
   }

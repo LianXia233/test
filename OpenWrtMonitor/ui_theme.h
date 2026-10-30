@@ -273,7 +273,7 @@ static inline lv_obj_t* ui_kv(lv_obj_t* parent, const char* key, const char* val
   lv_obj_set_style_pad_column(r, 6, 0);
   ui_label(r, key, UI_F_XS, UI_C_TEXT_MUTE);
   lv_obj_t* v = ui_label(r, val, UI_F_S, val_color);
-  lv_obj_set_width(v, 176);            /* 显式宽度，同上：max_width 会退化成折行 */
+  lv_obj_set_size(v, 176, UI_LH_16);   /* 宽高都固定，DOTS 才会生效（见无线页名字的注释） */
   lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
   lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
   if (out_val) *out_val = v;
