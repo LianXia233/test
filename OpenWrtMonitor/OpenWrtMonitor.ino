@@ -39,7 +39,7 @@ String OPENWRT_USER = "root";
 String OPENWRT_PASS = "";
 
 #define APP_NAME        "OpenWrt Monitor"
-#define APP_VERSION     "2.0.0"
+#define APP_VERSION     "2.0.1"
 #define MDNS_NAME       "openwrt-monitor"      // http://openwrt-monitor.local
 #define WEB_PORT        80
 #define SSE_PORT        81                     // 事件推送单独一个端口（见 Web 段落注释）
@@ -209,7 +209,7 @@ static void loadConfig() {
 
   if (ssid.length()) { WIFI_SSID = ssid; WIFI_PASS = pass; }
   // 旧固件把写死的路由器地址当成"手动覆盖"存了下来，这里迁回网关模式
-  if (ip == "192.168.10.1" || ip == "192.168.88.1") ip = "";
+  if (ip == "192.168.1.1") ip = "";
   if (ip.length()) OPENWRT_IP = ip;
   if (user.length()) OPENWRT_USER = user;
   if (opass.length()) OPENWRT_PASS = opass;
