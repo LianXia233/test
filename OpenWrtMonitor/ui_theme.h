@@ -166,7 +166,12 @@ static inline lv_obj_t* ui_scroll_col(lv_obj_t* parent, int w, int h) {
   lv_obj_add_flag(b, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scroll_dir(b, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(b, LV_SCROLLBAR_MODE_AUTO);
-  lv_obj_set_style_width(b, 0, LV_PART_SCROLLBAR);
+  /* 滚动条做窄但可见：原来宽度 0 全隐藏，用户看不出页面能滑 */
+  lv_obj_set_style_width(b, 3, LV_PART_SCROLLBAR);
+  lv_obj_set_style_radius(b, 2, LV_PART_SCROLLBAR);
+  lv_obj_set_style_pad_right(b, 1, 0);
+  lv_obj_set_style_bg_color(b, ui_col(UI_C_ACCENT), LV_PART_SCROLLBAR);
+  lv_obj_set_style_bg_opa(b, LV_OPA_50, LV_PART_SCROLLBAR);
   return b;
 }
 

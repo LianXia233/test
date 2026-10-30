@@ -322,7 +322,12 @@ static void fmtUptime(char* b, size_t n, uint32_t s) {
 
 /** 负载 -> 单核占用百分比：load 是全核之和，除以核数再乘 100。
  *  例：0.05 @2核 -> 3%。上限 999 防呆。 */
+static int cpuUtilPct = -1;   /* /proc/stat 差分的真实占用率；-1 = 读不到，回退负载估算 */
+
 static int loadPct(float load) {
+  /* 有真实利用率就用它（与 LuCI 后台 /proc/stat 口径一致），否则按负载估算。
+     注意负载含 D 状态的 I/O 等待，跑 VPN/NAT 的机器两者会差不少。 */
+  if (cpuUtilPct >= 0) return cpuUtilPct;
   int pct = (int)(load * 100.0f / rtr.cores + 0.5f);
   return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
 }
@@ -584,6 +589,39 @@ static bool fetchSystem() {
   rtr.swapFree = m["swap_free"] | 0U;
   if (rtr.memTotal && rtr.memAvail <= rtr.memTotal) {
     rtr.memPct = (uint8_t)((uint64_t)(rtr.memTotal - rtr.memAvail) * 100 / rtr.memTotal);
+  }
+
+  /* 真实 CPU 占用率：/proc/stat 相邻两次采集差分（busy / total）。
+     需要 rpcd 的 file:read 授权——有些固件只给 stat/list（实测 rc=6），
+     读不到就保持 -1，显示回退到负载估算。 */
+  {
+    JsonDoc cs JDOC_CAP(2048);
+    if (ubusInvokeRaw("file", "read", "{\"path\":\"/proc/stat\"}", cs)) {
+      const char* cp = cs["result"][1]["data"] | "";
+      if (!strncmp(cp, "cpu ", 4)) {
+        unsigned long long v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        int cnt = 0;
+        const char* pp = cp + 4;
+        while (cnt < 8) {
+          char* end;
+          unsigned long long x = strtoull(pp, &end, 10);
+          if (end == pp) break;
+          v[cnt++] = x;
+          pp = end;
+        }
+        if (cnt >= 4) {
+          unsigned long long total = 0;
+          for (int i2 = 0; i2 < cnt; i2++) total += v[i2];
+          unsigned long long idleAll = v[3] + (cnt > 4 ? v[4] : 0);   // idle + iowait
+          unsigned long long busy = total - idleAll;
+          static unsigned long long pTotal = 0, pBusy = 0;
+          if (pTotal && total > pTotal && busy >= pBusy)
+            cpuUtilPct = (int)((busy - pBusy) * 100 / (total - pTotal));
+          pTotal = total;
+          pBusy = busy;
+        }
+      }
+    }
   }
   return true;
 }
@@ -1050,6 +1088,9 @@ static void buildHome(lv_obj_t* p) {
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
     *outVal = ui_label(t, "--", UI_F_NUM, UI_C_TEXT);
+    /* 限宽防溢出：数值大了省略号截尾，不挤出卡片 */
+    lv_obj_set_style_max_width(*outVal, 64, 0);
+    lv_label_set_long_mode(*outVal, LV_LABEL_LONG_MODE_DOTS);
     *outBar = ui_bar(c, col);
   };
   mkGauge(row1, &ic_chip, "处理器", UI_C_ACCENT, &hLoad, &hLoadBar);
@@ -1081,6 +1122,8 @@ static void buildHome(lv_obj_t* p) {
     /* 值用 16px：24px 下 "1.8MB/s" 要 89px，半卡只有 83px，实测必溢出；
        16px 下 "999.9MB/s" 也只占 77px，全段安全 */
     *out = ui_label(t, "--", UI_F_S, col);
+    lv_obj_set_style_max_width(*out, 80, 0);
+    lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkRate(row2, &ic_down, "下载", UI_C_OK, &hDl);
   mkRate(row2, &ic_up, "上传", UI_C_WARM, &hUl);
@@ -1139,6 +1182,8 @@ static void buildSystem(lv_obj_t* p) {
     lv_obj_set_style_pad_row(b, 0, 0);
     ui_label(b, cap, UI_F_XS, UI_C_TEXT_MUTE);
     *out = ui_label(b, "0.00", UI_F_L, UI_C_CYAN);
+    lv_obj_set_style_max_width(*out, 88, 0);
+    lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkLoad(loads, "1 分钟", &sL1);
   mkLoad(loads, "5 分钟", &sL5);
@@ -1224,6 +1269,8 @@ static void buildNet(lv_obj_t* p) {
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
     *out = ui_label(t, "--", UI_F_S, col);   /* 同概览页：16px 防溢出 */
+    lv_obj_set_style_max_width(*out, 80, 0);
+    lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkBig(row, &ic_down, "下载", UI_C_OK, &nDl);
   mkBig(row, &ic_up, "上传", UI_C_WARM, &nUl);
