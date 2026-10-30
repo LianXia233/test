@@ -72,5 +72,5 @@ Flash 52%，RAM 23.5%）。以下修复全部在真机上逐项验证。
 - **LuCI 插件**：`luci-app-esp32-screen`（APK 格式），状态 / 投屏 / 设置三页
 - **投屏**：LuCI 加 320×240 预览框 + 自定义数据，固件加推屏专用页
 
-[2.0.1]: https://github.com/LianXia233/test/compare/011df5f...875654a
-[2.0.0]: https://github.com/LianXia233/test/tree/011df5f
+[2.0.1]: https://github.com/LianXia233/esp32-openwrt-screen/compare/011df5f...875654a
+[2.0.0]: https://github.com/LianXia233/esp32-openwrt-screen/tree/011df5f
