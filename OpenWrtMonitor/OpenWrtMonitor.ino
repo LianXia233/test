@@ -768,11 +768,14 @@ static bool fetchClients(int radioIdx) {
     const char* nm = leaseName(it.mac);
     snprintf(it.name, sizeof it.name, "%s", nm ? nm : "");
     it.rssi = (int8_t)(c["signal"] | -100);
-    // iwinfo 的速率单位不统一：有的固件给 bps(866700)，有的给 100kbps(8667)
+    /* iwinfo 的 rate 是 kbit/s（866.7Mbps -> 866700）。原三段猜单位全错了：
+       39Mbps(=39000) 走 /10 显示成 3900M，1201Mbps(=1201000) 被 /1000000
+       砍成 1M，866700 被砍成 0。统一按 kbit/s 折算成 Mbps（四舍五入）；
+       不足 1000 的直接当 Mbps，兼容报裸 Mbps 的老固件。rx 为 0（空闲）
+       就退回 tx 的值。 */
     uint32_t r = c["rx"]["rate"] | 0U;
-    if (r > 100000U)      it.rateMbps = (uint16_t)(r / 1000000U);
-    else if (r > 1000U)   it.rateMbps = (uint16_t)(r / 10U);
-    else                  it.rateMbps = (uint16_t)r;
+    if (!r) r = c["tx"]["rate"] | 0U;
+    it.rateMbps = (uint16_t)(r >= 1000U ? (r + 500) / 1000U : r);
     sClientCount++;
   }
   return true;
