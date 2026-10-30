@@ -51,11 +51,13 @@ String OPENWRT_PASS = "";
 // ======================================================================
 
 #include <Arduino.h>
+#include <driver/rtc_io.h>   /* rtc_gpio_* / gpio_hold_en：进下载模式用 */
 #include <EEPROM.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_wifi.h>   /* esp_wifi_scan_*：原生扫描，绕开 Arduino 状态机 */
 
 /* ------------------------------------------------------------------ 内置符号中文化
  * LVGL 的 lv_keyboard / lv_textarea 键盘在系统里用 LV_SYMBOL_xxx 做特殊键
@@ -116,7 +118,12 @@ using JsonDoc = DynamicJsonDocument;
 static const uint16_t SCREEN_W = 320;
 static const uint16_t SCREEN_H = 240;
 
-TFT_eSPI tft = TFT_eSPI(SCREEN_W, SCREEN_H);
+/* TFT_eSPI 的构造函数要的是「原生」尺寸，不是最终朝向的尺寸。
+   这块 ILI9341 屏原生竖屏 240x320，靠 setup() 里的 setRotation(1) 交换成
+   横屏 320x240。若传横屏尺寸，_init_width=320，rotation 1 后 _width 反而
+   变成 240，fillScreen/flush 只覆盖左 240 列，右侧 80 列永远停在 GRAM 上电
+   垃圾（表现为屏幕右边一条蓝白条纹）。 */
+TFT_eSPI tft = TFT_eSPI(240, 320);
 
 #define TP_CS   33
 #define TP_CLK  25
@@ -226,6 +233,7 @@ struct RouterData {
   uint32_t memTotal = 0, memAvail = 0, memFree = 0, memBuffered = 0, memCached = 0;
   uint32_t swapTotal = 0, swapFree = 0;
   uint8_t memPct = 0;
+  uint8_t cores = 1;                  // CPU 核心数（load 换算百分比用），拿不到按 1
 } rtr;
 
 struct NetData {
@@ -242,10 +250,31 @@ struct NetData {
 #define MAX_CLIENTS 16
 struct ClientItem {
   char mac[18];
+  char name[24];                        // DHCP 主机名，空则回退显示 MAC
   int8_t rssi;
   uint16_t rateMbps;
 };
 static ClientItem gClients[MAX_CLIENTS];
+/* DHCP 主机名映射：ubus luci-rpc getDHCPLeases。拿不到（固件没装 luci-rpc）
+   就整表沿用旧值，列表回退显示 MAC */
+struct LeaseItem { char mac[18]; char name[24]; };
+static LeaseItem sLeases[32];
+static int sLeaseCount = 0;
+static const char* leaseName(const char* mac) {
+  for (int i = 0; i < sLeaseCount; i++)
+    if (!strcasecmp(sLeases[i].mac, mac)) return sLeases[i].name;
+  return nullptr;
+}
+
+/* 客户端列表缓存：采集写进暂存区，整轮全部成功才提交。中途失败沿用上一轮
+   的列表，无线页不再闪"正在等待路由器数据…"（原来每轮先清零再拉，拉取
+   期间/失败时界面就空了） */
+static ClientItem sClients[MAX_CLIENTS];
+static int sClientCount = 0;
+static int sClientTotal = 0;
+static int sAssocFail = 0;            // 本轮失败的射频数
+static uint16_t sAssocCycle = 0;      // 轮次计数（客户端降频采集用）
+static bool sAssocSkip = false;       // 本轮跳过客户端采集
 static int gClientCount = 0;          // 当前展示条数（<= MAX_CLIENTS）
 static int gClientTotal = 0;          // 路由器报的总数
 static bool gClientsValid = false;
@@ -284,6 +313,13 @@ static void fmtUptime(char* b, size_t n, uint32_t s) {
   if (d > 0) snprintf(b, n, "%lu天%02lu:%02lu", (unsigned long)d,
                       (unsigned long)((s % 86400) / 3600), (unsigned long)((s % 3600) / 60));
   else       snprintf(b, n, "%02lu:%02lu", (unsigned long)(s / 3600), (unsigned long)((s % 3600) / 60));
+}
+
+/** 负载 -> 单核占用百分比：load 是全核之和，除以核数再乘 100。
+ *  例：0.05 @2核 -> 3%。上限 999 防呆。 */
+static int loadPct(float load) {
+  int pct = (int)(load * 100.0f / rtr.cores + 0.5f);
+  return pct < 0 ? 0 : (pct > 999 ? 999 : pct);
 }
 
 // ============================== LVGL 驱动 ==============================
@@ -379,14 +415,15 @@ static bool ubusLogin() {
 
   int code = httpCli.POST((uint8_t*)body.c_str(), body.length());
   if (code != 200) {
-    Serial.printf("[ubus] login http %d\n", code);
     httpCli.end();
     return false;
   }
-  // 登录响应带着整份 ACL（十几 KB），doc 要给足
+  // 登录响应带着整份 ACL（十几 KB），doc 要给足。
+  // 不能用 getStream()：这条链路上流是空的，必须先 getString() 再解析
   JsonDoc res JDOC_CAP(16384);
-  DeserializationError err = deserializeJson(res, httpCli.getStream());
+  String resp = httpCli.getString();
   httpCli.end();
+  DeserializationError err = deserializeJson(res, resp);
   if (err) {
     Serial.printf("[ubus] login json %s\n", err.c_str());
     ubusToken = "";
@@ -434,8 +471,11 @@ static bool ubusInvoke(const char* obj, const char* method, const char* device, 
     ubusToken = "";                       // 多半是会话过期，下轮重登
     return false;
   }
-  DeserializationError err = deserializeJson(out, httpCli.getStream());
+  /* 不能用 getStream()：HTTPClient 在这条链路上流是空的（登录当初同样
+     报 InvalidInput，换成先 getString() 再解析就好了）。 */
+  String resp = httpCli.getString();
   httpCli.end();
+  DeserializationError err = deserializeJson(out, resp);
   if (err) {
     Serial.printf("[ubus] %s.%s json %s\n", obj, method, err.c_str());
     return false;
@@ -449,6 +489,41 @@ static bool ubusInvoke(const char* obj, const char* method, const char* device, 
 }
 
 // ============================== 采集 ==============================
+/** ubus 调用（参数为原生 JSON 串）。ubusInvoke 的 args 只塞得下 device，
+ *  file.read 这类需要 {"path":...} 的得走这里。 */
+static bool ubusInvokeRaw(const char* obj, const char* method, const char* argsJson, JsonDoc& out) {
+  if (!ubusToken.length() || (millis() - tokenAt) > TOKEN_TTL) {
+    if (!ubusLogin()) return false;
+  }
+  httpSetup("http://" + owIp + "/ubus");
+
+  JsonDoc req JDOC_CAP(384);
+  req["jsonrpc"] = "2.0";
+  req["id"] = 2;
+  req["method"] = "call";
+  JsonArray p = req.createNestedArray("params");
+  p.add(ubusToken);
+  p.add(obj);
+  p.add(method);
+  JsonObject args = p.createNestedObject();
+  if (argsJson && *argsJson) {
+    JsonDoc a JDOC_CAP(256);
+    if (!deserializeJson(a, argsJson))
+      for (JsonPair kv : a.as<JsonObject>()) args[kv.key()] = kv.value();
+  }
+  String body;
+  serializeJson(req, body);
+
+  int code = httpCli.POST((uint8_t*)body.c_str(), body.length());
+  if (code != 200) { httpCli.end(); return false; }
+  String resp = httpCli.getString();
+  httpCli.end();
+  DeserializationError err = deserializeJson(out, resp);
+  if (err) return false;
+  JsonArray r = out["result"];
+  return r.size() >= 2 && r[0].as<int>() == 0;
+}
+
 static bool fetchBoard() {
   JsonDoc d JDOC_CAP(1536);
   if (!ubusInvoke("system", "board", nullptr, d)) return false;
@@ -460,6 +535,16 @@ static bool fetchBoard() {
   const char* desc = rel["description"] | "";
   if (!strlen(desc)) desc = rel["version"] | "";
   snprintf(rtr.release, sizeof rtr.release, "%s", desc);
+  /* 顺手数核心数：/proc/cpuinfo 里 processor 的个数。失败沿用旧值（初始 1），
+     load 百分比按 单核百分比 = load/核数x100 换算 */
+  JsonDoc c JDOC_CAP(4096);
+  if (ubusInvokeRaw("file", "read", "{\"path\":\"/proc/cpuinfo\"}", c)) {
+    const char* ci = c["result"][1]["data"] | "";
+    uint8_t n = 0;
+    for (const char* pp = ci; (pp = strstr(pp, "processor")) != nullptr; pp += 9)
+      if (n < 8) n++;
+    if (n) rtr.cores = n;
+  }
   boardFresh = true;
   boardAt = millis();
   return true;
@@ -471,9 +556,11 @@ static bool fetchSystem() {
   JsonObject si = d["result"][1];
   rtr.uptimeSec = si["uptime"] | 0U;
   JsonArray ld = si["load"];
-  rtr.load1 = ld[0] | 0.0f;
-  rtr.load5 = ld[1] | 0.0f;
-  rtr.load15 = ld[2] | 0.0f;
+  /* ubus 的 load 是 16.16 定点数（SI_LOAD_SHIFT=16），原始值要除以 65536，
+      * 否则 0.05 的负载会显示成 2944.00 */
+  rtr.load1 = (ld[0] | 0.0f) / 65536.0f;
+  rtr.load5 = (ld[1] | 0.0f) / 65536.0f;
+  rtr.load15 = (ld[2] | 0.0f) / 65536.0f;
   JsonObject m = si["memory"];
   rtr.memTotal = m["total"] | 0U;
   rtr.memAvail = m["available"] | (m["free"] | 0U);
@@ -590,27 +677,47 @@ static bool fetchDevices() {
   return true;
 }
 
+static void fetchDhcpNames() {
+  JsonDoc d JDOC_CAP(4096);
+  if (!ubusInvoke("luci-rpc", "getDHCPLeases", nullptr, d)) return;
+  JsonArray ls = d["result"][1]["dhcp_leases"];
+  if (ls.isNull()) return;
+  int n = 0;
+  for (JsonObject l : ls) {
+    if (n >= (int)(sizeof(sLeases) / sizeof(sLeases[0]))) break;
+    const char* mac = (const char*)(l["macaddr"] | "");
+    const char* nm = (const char*)(l["hostname"] | "");
+    if (!mac[0] || !nm[0] || !strcmp(nm, "*")) continue;
+    snprintf(sLeases[n].mac, sizeof sLeases[n].mac, "%s", mac);
+    snprintf(sLeases[n].name, sizeof sLeases[n].name, "%s", nm);
+    n++;
+  }
+  if (n) sLeaseCount = n;              // 空表不覆盖，避免抖动时全部回退成 MAC
+}
+
 static bool fetchClients(int radioIdx) {
   if (radioIdx < 0 || radioIdx >= gRadioCount) return false;
+  if (radioIdx == 0) { sClientCount = 0; sClientTotal = 0; sAssocFail = 0; }
   JsonDoc d JDOC_CAP(3072);
-  if (!ubusInvoke("iwinfo", "assoclist", gRadios[radioIdx], d)) return false;
+  if (!ubusInvoke("iwinfo", "assoclist", gRadios[radioIdx], d)) { sAssocFail++; return false; }
   JsonArray res = d["result"][1]["results"];
-  if (res.isNull()) return false;
+  if (res.isNull()) { sAssocFail++; return false; }
 
-  gClientTotal = res.size();
+  sClientTotal += res.size();          // 多射频累加，别像原来那样被最后一个覆盖
   for (JsonObject c : res) {
-    if (gClientCount >= MAX_CLIENTS) break;
-    ClientItem& it = gClients[gClientCount];
+    if (sClientCount >= MAX_CLIENTS) break;
+    ClientItem& it = sClients[sClientCount];
     snprintf(it.mac, sizeof it.mac, "%s", (const char*)(c["mac"] | ""));
+    const char* nm = leaseName(it.mac);
+    snprintf(it.name, sizeof it.name, "%s", nm ? nm : "");
     it.rssi = (int8_t)(c["signal"] | -100);
     // iwinfo 的速率单位不统一：有的固件给 bps(866700)，有的给 100kbps(8667)
     uint32_t r = c["rx"]["rate"] | 0U;
     if (r > 100000U)      it.rateMbps = (uint16_t)(r / 1000000U);
     else if (r > 1000U)   it.rateMbps = (uint16_t)(r / 10U);
     else                  it.rateMbps = (uint16_t)r;
-    gClientCount++;
+    sClientCount++;
   }
-  gClientsValid = true;
   return true;
 }
 
@@ -628,10 +735,9 @@ static void pollReset() { pollStep = PS_DONE; }
 
 /** 开一轮新的采集：清掉上一轮的客户端列表，从第一个射频重新数 */
 static void pollBeginCycle() {
-  gClientCount = 0;
-  gClientTotal = 0;
-  gClientsValid = false;
+  /* 不清客户端列表：写暂存区、整轮成功才提交，失败沿用缓存 */
   assocIdx = 0;
+  sAssocSkip = gClientsValid && (++sAssocCycle % 3 != 0);   // 缓存命中时 1/3 频率刷新
   pollStep = PS_LOGIN;
 }
 
@@ -657,9 +763,18 @@ static bool pollStepOnce() {
     case PS_ASSOC:
       // 每个射频一次请求；没拉完就停在这一步，下一个 loop 继续
       if (assocIdx < gRadioCount) {
-        fetchClients(assocIdx);
+        if (!sAssocSkip) {
+          if (assocIdx == 0) fetchDhcpNames();   // 主机名表跟客户端同频刷新
+          fetchClients(assocIdx);
+        }
         assocIdx++;
         return false;
+      }
+      if (!sAssocSkip && gRadioCount > 0 && sAssocFail == 0) {
+        memcpy(gClients, sClients, sizeof gClients);   // 整轮成功才提交
+        gClientCount = sClientCount;
+        gClientTotal = sClientTotal;
+        gClientsValid = true;
       }
       break;
     default:
@@ -950,7 +1065,9 @@ static void buildHome(lv_obj_t* p) {
     ui_clean(sp);
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
-    *out = ui_label(t, "--", UI_F_L, col);
+    /* 值用 16px：24px 下 "1.8MB/s" 要 89px，半卡只有 83px，实测必溢出；
+       16px 下 "999.9MB/s" 也只占 77px，全段安全 */
+    *out = ui_label(t, "--", UI_F_S, col);
   };
   mkRate(row2, &ic_down, "下载", UI_C_OK, &hDl);
   mkRate(row2, &ic_up, "上传", UI_C_WARM, &hUl);
@@ -975,9 +1092,11 @@ static void buildHome(lv_obj_t* p) {
     *out = v;
   };
   /* 宽度是量出来的：标签 2 个汉字 32px，值按内容给够 */
-  mkMini(row3, "客户端", 58, 26, UI_C_CYAN, &hClients);
-  mkMini(row3, "外网", 128, 92, UI_C_TEXT, &hWan);
-  mkMini(row3, "运行", 100, 68, UI_C_TEXT_DIM, &hUp);
+  /* 宽度按字形实测：设备 2 字 32px+4+值；三格合计 292 <= 294 可用宽。
+     原"客户端"3 个字 48px 挤在 58px 格里，数值怼到隔壁格子上 */
+  mkMini(row3, "设备", 56, 20, UI_C_CYAN, &hClients);
+  mkMini(row3, "外网", 132, 96, UI_C_TEXT, &hWan);
+  mkMini(row3, "运行", 104, 68, UI_C_TEXT_DIM, &hUp);
 }
 
 // ============================== 页面：系统 ==============================
@@ -1091,7 +1210,7 @@ static void buildNet(lv_obj_t* p) {
     ui_clean(sp);
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
-    *out = ui_label(t, "--", UI_F_L, col);
+    *out = ui_label(t, "--", UI_F_S, col);   /* 同概览页：16px 防溢出 */
   };
   mkBig(row, &ic_down, "下载", UI_C_OK, &nDl);
   mkBig(row, &ic_up, "上传", UI_C_WARM, &nUl);
@@ -1114,6 +1233,7 @@ static uint32_t clientsHash() {
   h = (h ^ (uint32_t)gClientTotal) * 16777619u;
   for (int i = 0; i < gClientCount; i++) {
     for (const char* p2 = gClients[i].mac; *p2; p2++) h = (h ^ (uint8_t)*p2) * 16777619u;
+    for (const char* p2 = gClients[i].name; *p2; p2++) h = (h ^ (uint8_t)*p2) * 16777619u;
     h = (h ^ (uint32_t)gClients[i].rssi) * 16777619u;
   }
   return h;
@@ -1140,12 +1260,14 @@ static void rebuildClientList() {
     lv_obj_set_style_pad_column(r, 5, 0);
 
     int8_t q = gClients[i].rssi;
-    lv_obj_t* ic = ui_icon(r, &ic_wifi, q > -65 ? UI_C_OK : (q > -78 ? UI_C_WARN : UI_C_DANGER));
-    lv_image_set_pivot(ic, 12, 12);
-    lv_image_set_scale(ic, 125);
-
-    lv_obj_t* ml = ui_label(r, gClients[i].mac, UI_F_XS, UI_C_TEXT);
-    lv_obj_set_style_max_width(ml, 108, 0);        /* 17 字符 MAC 放不下整行，超出省略 */
+    /* 每行都长一样的 Wi-Fi 图标是纯装饰，删掉换 MAC 完整显示的空间：
+       17 字符 MAC 实测 141.6px，108px 只能给出省略号；144px 刚好放全 */
+    (void)q;
+    lv_obj_t* ml = ui_label(r, gClients[i].name[0] ? gClients[i].name : gClients[i].mac,
+                            UI_F_XS, UI_C_TEXT);
+    /* 必须显式宽度：max_width + DOTS 在 9.6 里会退回 WRAP 折成两行，
+       26px 的行装不下，行与行就叠在一起了（实机照片确认过） */
+    lv_obj_set_width(ml, 180);
     lv_label_set_long_mode(ml, LV_LABEL_LONG_MODE_DOTS);
 
     lv_obj_t* sp = lv_obj_create(r);
@@ -1154,13 +1276,17 @@ static void rebuildClientList() {
     lv_obj_set_height(sp, 1);
 
     char sig[16];
-    snprintf(sig, sizeof sig, "%d dBm", q);
-    ui_label(r, sig, UI_F_XS, q > -70 ? UI_C_OK : UI_C_WARN);
+    snprintf(sig, sizeof sig, "%d", q);    /* 单位省略：RSSI 恒为 dBm，宽度让给主机名 */
+    lv_obj_t* sl = ui_label(r, sig, UI_F_XS, q > -70 ? UI_C_OK : UI_C_WARN);
+    lv_obj_set_width(sl, 30);
+    lv_label_set_long_mode(sl, LV_LABEL_LONG_MODE_DOTS);
 
     if (gClients[i].rateMbps) {
       char rt[12];
       snprintf(rt, sizeof rt, "%uM", gClients[i].rateMbps);
-      ui_chip(r, rt, UI_C_ACCENT);
+      lv_obj_t* ch = ui_chip(r, rt, UI_C_ACCENT);
+      lv_obj_set_style_max_width(ch, 62, 0);
+      lv_label_set_long_mode(ch, LV_LABEL_LONG_MODE_DOTS);
     }
   }
 }
@@ -1318,9 +1444,9 @@ static void updateStatusBar() {
 
 static void updateHome() {
   char b[40];
-  snprintf(b, sizeof b, "%.2f", rtr.load1);
+  snprintf(b, sizeof b, "%d%%", loadPct(rtr.load1));
   ui_set_text(hLoad, b);
-  lv_bar_set_value(hLoadBar, constrain((int)(rtr.load1 * 100), 0, 100), LV_ANIM_OFF);
+  lv_bar_set_value(hLoadBar, constrain(loadPct(rtr.load1), 0, 100), LV_ANIM_OFF);
   snprintf(b, sizeof b, "%u%%", rtr.memPct);
   ui_set_text(hMem, b);
   lv_bar_set_value(hMemBar, rtr.memPct, LV_ANIM_OFF);
@@ -1346,21 +1472,23 @@ static void updateSystem() {
   ui_set_text(sKernel, rtr.kernel[0] ? rtr.kernel : "—");
   ui_set_text(sRelease, rtr.release[0] ? rtr.release : "—");
 
-  snprintf(b, sizeof b, "%.2f", rtr.load1);  ui_set_text(sL1, b);
-  snprintf(b, sizeof b, "%.2f", rtr.load5);  ui_set_text(sL5, b);
-  snprintf(b, sizeof b, "%.2f", rtr.load15); ui_set_text(sL15, b);
+  snprintf(b, sizeof b, "%d%%", loadPct(rtr.load1));  ui_set_text(sL1, b);
+  snprintf(b, sizeof b, "%d%%", loadPct(rtr.load5));  ui_set_text(sL5, b);
+  snprintf(b, sizeof b, "%d%%", loadPct(rtr.load15)); ui_set_text(sL15, b);
 
   char used[20], total[20];
-  fmtBytes(used, sizeof used, (uint64_t)(rtr.memTotal - rtr.memAvail) * 1024ULL);
-  fmtBytes(total, sizeof total, (uint64_t)rtr.memTotal * 1024ULL);
+  /* ubus memory 字段单位是字节，直接给 fmtBytes；原代码当 KB 又乘 1024，
+      * 987MB 的内存才会显示成 987GB */
+  fmtBytes(used, sizeof used, (uint64_t)(rtr.memTotal - rtr.memAvail));
+  fmtBytes(total, sizeof total, (uint64_t)rtr.memTotal);
   snprintf(b, sizeof b, "%s / %s", used, total);
   ui_set_text(sMemTxt, b);
   lv_bar_set_value(sMemBar, rtr.memPct, LV_ANIM_OFF);
 
   if (rtr.swapTotal) {
     char su[16], st[16];
-    fmtBytes(su, sizeof su, (uint64_t)(rtr.swapTotal - rtr.swapFree) * 1024ULL);
-    fmtBytes(st, sizeof st, (uint64_t)rtr.swapTotal * 1024ULL);
+    fmtBytes(su, sizeof su, (uint64_t)(rtr.swapTotal - rtr.swapFree));
+    fmtBytes(st, sizeof st, (uint64_t)rtr.swapTotal);
     snprintf(b, sizeof b, "%s / %s", su, st);
   } else {
     snprintf(b, sizeof b, "未启用");
@@ -1482,30 +1610,91 @@ static ApItem apList[AP_MAX];
 static int apCount = 0;
 static bool scanning = false;
 static String selSsid;
+static int scanFailCount = 0;          /* 连续失败次数，用于重试上限 */
+static uint32_t scanDelayUntil = 0;    /* 失败后冷却，避免立刻重扫 */
 
 static void scanStart() {
   apCount = 0;
   scanning = true;
-  WiFi.scanNetworks(true);
+  scanFailCount = 0;
+  scanDelayUntil = 0;
 }
 
-/** 返回 true 表示扫描已结束（成功或失败） */
-static bool scanPoll() {
-  int n = WiFi.scanComplete();
-  if (n == -1) return false;
-  if (n < 0) { WiFi.scanDelete(); apCount = 0; scanning = false; return true; }
-  if (n > AP_MAX) n = AP_MAX;
-  for (int i = 0; i < n; i++) {
-    apList[i].ssid = WiFi.SSID(i);
-    apList[i].rssi = WiFi.RSSI(i);
-    apList[i].sec = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
-  }
-  apCount = n;
-  // 信号强的排前面
+/* 结果按信号强度排序（信号强的排前面） */
+static void scanSort() {
   for (int i = 0; i < apCount - 1; i++)
     for (int j = i + 1; j < apCount; j++)
-      if (apList[j].rssi > apList[i].rssi) { ApItem t = apList[i]; apList[i] = apList[j]; apList[j] = t; }
-  WiFi.scanDelete();
+      if (apList[j].rssi > apList[i].rssi) {
+        ApItem t = apList[i]; apList[i] = apList[j]; apList[j] = t;
+      }
+}
+
+/**
+ * 扫描。两条路，按顺序试：
+ *  1) Arduino 的同步扫描 WiFi.scanNetworks(false)：内部起异步扫描后死等
+ *     SCAN_DONE 事件，结果进它自己的缓存，再用 WiFi.SSID(i) 读。最稳。
+ *  2) 原生 esp_wifi_*：缓冲区必须提前分配好，扫描一返回就立刻读记录 ——
+ *     中间只要插一句打印或 malloc，WiFi 事件任务就会插进来把结果消费掉，
+ *     表现就是 get_ap_num() 说有 10 个、get_ap_records() 却读出 0 条。
+ */
+static bool scanPoll() {
+  if (scanDelayUntil && millis() < scanDelayUntil) return false;
+  scanDelayUntil = 0;
+
+  /* ---- 方案一：Arduino 同步扫描 ---- */
+  int16_t n = WiFi.scanNetworks(false, false, false, 300);
+  if (n > 0) {
+    if (n > AP_MAX) n = AP_MAX;
+    for (int i = 0; i < n; i++) {
+      apList[i].ssid = WiFi.SSID(i);
+      apList[i].rssi = WiFi.RSSI(i);
+      apList[i].sec = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    }
+    apCount = n;
+    scanSort();
+    scanning = false;
+    return true;
+  }
+
+  /* ---- 方案二：原生 API，缓冲区和读结果都贴着扫描 ---- */
+  static wifi_ap_record_t* recs = nullptr;
+  if (!recs) recs = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * AP_MAX);
+  if (recs) {
+    wifi_scan_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.ssid = nullptr;
+    cfg.bssid = nullptr;
+    cfg.channel = 0;                       // 0 = 全信道
+    cfg.show_hidden = false;
+    cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    cfg.scan_time.active.min = 100;
+    cfg.scan_time.active.max = 300;
+
+    esp_err_t e = esp_wifi_scan_start(&cfg, true);   // 阻塞直到完成
+    uint16_t got = AP_MAX;                           /* 容量进，实际条数出 */
+    esp_err_t ge = (e == ESP_OK) ? esp_wifi_scan_get_ap_records(&got, recs) : e;
+
+    if (ge == ESP_OK && got) {
+      if (got > AP_MAX) got = AP_MAX;
+      for (int i = 0; i < got; i++) {
+        apList[i].ssid = (const char*)recs[i].ssid;
+        apList[i].rssi = recs[i].rssi;
+        apList[i].sec = (recs[i].authmode != WIFI_AUTH_OPEN);
+      }
+      apCount = got;
+      scanSort();
+      scanning = false;
+      return true;
+    }
+  }
+
+  /* 两条路都没成：退避后重试 */
+  apCount = 0;
+  if (++scanFailCount <= 10) {
+    scanDelayUntil = millis() + 1500;
+    Serial.printf("[scan] retry %d/10\n", scanFailCount);
+    return false;
+  }
   scanning = false;
   return true;
 }
@@ -1677,6 +1866,7 @@ void showProvisioning() {
 
 // ============================== 路由器登录页 ==============================
 static lv_obj_t* scrOw = nullptr;
+static lv_obj_t* owKb = nullptr;
 static lv_obj_t* owTaIp = nullptr;
 static lv_obj_t* owTaUser = nullptr;
 static lv_obj_t* owTaPass = nullptr;
@@ -1685,7 +1875,7 @@ static void closeRouter() {
   if (!scrOw) return;
   lv_screen_load(scrMain);
   lv_obj_del(scrOw);
-  scrOw = nullptr; owTaIp = nullptr; owTaUser = nullptr; owTaPass = nullptr;
+  scrOw = nullptr; owTaIp = nullptr; owTaUser = nullptr; owTaPass = nullptr; owKb = nullptr;
 }
 
 static void owSave(lv_event_t*) {
@@ -1728,7 +1918,7 @@ void showRouterScreen() {
   auto mkTa = [](int y, const char* ph, const char* val, bool pw) {
     lv_obj_t* ta = lv_textarea_create(scrOw);
     lv_obj_set_pos(ta, 8, y);
-    lv_obj_set_size(ta, UI_W - 16, 30);
+    lv_obj_set_size(ta, UI_W - 16, 24);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_placeholder_text(ta, ph);
     lv_textarea_set_password_mode(ta, pw);
@@ -1739,25 +1929,30 @@ void showRouterScreen() {
     lv_obj_set_style_radius(ta, UI_RADIUS_S, 0);
     return ta;
   };
-  owTaIp = mkTa(36, "IP (blank = DHCP gateway)", OPENWRT_IP.c_str(), false);
-  owTaUser = mkTa(70, "User", OPENWRT_USER.c_str(), false);
-  owTaPass = mkTa(104, "请输入密码", OPENWRT_PASS.c_str(), true);
+  owTaIp = mkTa(34, "IP (blank = DHCP gateway)", OPENWRT_IP.c_str(), false);
+  owTaUser = mkTa(60, "User", OPENWRT_USER.c_str(), false);
+  owTaPass = mkTa(86, "请输入密码", OPENWRT_PASS.c_str(), true);
 
-  lv_obj_t* kb = lv_keyboard_create(scrOw);
-  lv_obj_set_pos(kb, 0, 138);
-  lv_obj_set_size(kb, UI_W, 102);
+  owKb = lv_keyboard_create(scrOw);
+  lv_obj_t* kb = owKb;
+  lv_obj_set_pos(kb, 0, 112);
+  lv_obj_set_size(kb, UI_W, 128);
   lv_keyboard_set_textarea(kb, owTaPass);
   lv_obj_set_style_bg_color(kb, ui_col(UI_C_CARD), 0);
+  /* 这个工程默认背景全透明（ui_clean 里设的 LV_OPA_TRANSP），只设 bg_color
+     不设 bg_opa 的话整个键盘是透明的，屏幕上什么都看不到。 */
+  lv_obj_set_style_bg_opa(kb, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(kb, ui_col(UI_C_CARD_2), LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa(kb, LV_OPA_COVER, LV_PART_ITEMS);
+  lv_obj_set_style_text_color(kb, ui_col(UI_C_TEXT), LV_PART_ITEMS);
   lv_obj_add_event_cb(kb, [](lv_event_t* e) {
     if (lv_event_get_code(e) == LV_EVENT_READY) owSave(e);
   }, LV_EVENT_ALL, nullptr);
 
   // 点哪个框，键盘就输入哪个框
   auto focus = [](lv_event_t* e) {
-    lv_obj_t* kb2 = (lv_obj_t*)lv_obj_get_user_data((lv_obj_t*)lv_event_get_current_target(e));
-    if (kb2) lv_keyboard_set_textarea(kb2, (lv_obj_t*)lv_event_get_target(e));
+    if (owKb) lv_keyboard_set_textarea(owKb, (lv_obj_t*)lv_event_get_target(e));
   };
-  lv_obj_set_user_data(scrOw, kb);
   lv_obj_add_event_cb(owTaIp, focus, LV_EVENT_CLICKED, nullptr);
   lv_obj_add_event_cb(owTaUser, focus, LV_EVENT_CLICKED, nullptr);
   lv_obj_add_event_cb(owTaPass, focus, LV_EVENT_CLICKED, nullptr);
@@ -1856,6 +2051,7 @@ static String buildState() {
   for (int i = 0; i < gClientCount; i++) {
     JsonObject o = arr.createNestedObject();
     o["mac"] = gClients[i].mac;
+    o["name"] = gClients[i].name;
     o["rssi"] = gClients[i].rssi;
     o["rate"] = gClients[i].rateMbps;
   }
@@ -3110,6 +3306,31 @@ static void castWatchdog() {
 static uint32_t lastCycleAt = 0;
 static uint32_t lastUiTick = 0;
 
+/* ---- 调试：进下载模式 ----
+ * 这块板子的 CH340 没把 DTR 接到 GPIO0，esptool 的标准复位序列进不了
+ * bootloader，只能靠软件拉低 GPIO0 再重启。关键是跨复位保持：esp_restart()
+ * 之后 GPIO 配置会被重置、脚变回输入（内部上拉），ROM 采样到高电平就正常
+ * 启动，所以必须用 RTC hold 把电平钉住。 */
+static void enterDownloadMode() {
+  Serial.println("[dbg] entering download mode");
+  Serial.flush();
+  delay(20);
+
+  /* 走 RTC 专用 API：GPIO0 = RTC_GPIO11，支持跨复位保持 */
+  esp_err_t e0 = rtc_gpio_init(GPIO_NUM_0);
+  rtc_gpio_set_direction(GPIO_NUM_0, RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(GPIO_NUM_0, 0);
+  esp_err_t e1 = rtc_gpio_hold_en(GPIO_NUM_0);
+  /* 双保险：再套一层通用 API */
+  esp_err_t e2 = gpio_hold_en((gpio_num_t)0);
+
+  Serial.printf("[dbg] rtc_gpio_init=%d hold_en=%d gpio_hold_en=%d\n",
+                (int)e0, (int)e1, (int)e2);
+  Serial.flush();
+  delay(50);
+  ESP.restart();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -3143,6 +3364,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);                    // 关省电，否则轮询延迟会飘
   WiFi.setAutoReconnect(false);            // 重连自己管，避免和状态机打架
+  delay(300);                              // 等 WiFi 驱动稳定再动它；异步扫描对时序很敏感
 
   if (WIFI_SSID.length()) {
     wifiBegin(WIFI_SSID, WIFI_PASS);
@@ -3155,6 +3377,12 @@ void setup() {
 }
 
 void loop() {
+  /* 调试：串口收到 D/d 就进下载模式，免得每次按 BOOT 键 */
+  if (Serial.available()) {
+    int dbgC = Serial.read();
+    if (dbgC == 'D' || dbgC == 'd') enterDownloadMode();
+  }
+
   /* 投屏期间 LVGL 要彻底松手：画面是上位机的像素直接写进去的，
      LVGL 再补什么都会盖在上面（触摸也不用它，退出靠 castWatchdog 自己看） */
   if (!castActive) lv_timer_handler();

@@ -1169,7 +1169,10 @@
 #define LV_FONT_FMT_TXT_LARGE 0
 
 /** Compressed fonts */
-#define LV_USE_FONT_COMPRESSED 0
+/* 必须为 1：ui_font_cn_16.c / ui_font_cn_24.c 是用 lv_font_conv 生成的，
+   font_dsc.bitmap_format = LV_FONT_FMT_TXT_COMPRESSED，字形位图是 RLE 压缩的。
+   关掉的话 LVGL 取不到位图，整个界面一个字都不显示（只有图标正常）。 */
+#define LV_USE_FONT_COMPRESSED 1
 
 /** Draw a placeholder rectangle instead of nothing when a glyph is missing
  *  from the font.
