@@ -95,7 +95,7 @@ return view.extend({
 								'click': function() { esp32screen.cmd(host, { c: 'ui', id: 5 }); }
 							}, '让屏幕切到推屏页'),
 							E('span', { 'style': 'color:#5D6A8E;font-size:12px;margin-left:8px' },
-								'整屏 320×240，无状态栏；60 秒没人推会自动退回')
+								'整屏 320×240，无状态栏；6 秒没人推会自动退回')
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [

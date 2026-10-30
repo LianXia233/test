@@ -257,12 +257,17 @@ return view.extend({
 		    c = (st || {}).cli || {}, w = (st || {}).wifi || {};
 		var mem = r.mem || {}, load = r.load || [];
 		var num = function(v, d) { return (v == null) ? '' : Number(v).toFixed(d); };
+		var pct = function(v) {
+			if (v == null) return '—';
+			return Math.round(v * 100 / (r.cores || 1)) + '%';
+		};
 
 		return {
 			hostname: s(r.host), model: s(r.model),
 			kernel: s(r.kernel), release: s(r.release),
 			uptime: esp32screen.fmtUptime(r.up),
-			load1: num(load[0], 2), load5: num(load[1], 2), load15: num(load[2], 2),
+			/* 负载统一用单核百分比，和屏幕本体、状态页口径一致 */
+			load1: pct(load[0]), load5: pct(load[1]), load15: pct(load[2]),
 			mem: (mem.pct == null) ? '' : mem.pct + '%',
 			mem_used: (mem.used == null) ? '' : esp32screen.fmtBytes(mem.used),
 			mem_total: (mem.total == null) ? '' : esp32screen.fmtBytes(mem.total),
