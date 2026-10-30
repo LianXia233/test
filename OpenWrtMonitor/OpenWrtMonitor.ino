@@ -664,7 +664,13 @@ static bool fetchDevices() {
     if (name == "lo") continue;
     JsonObject o = kv.value();
     String dtype = o["devtype"] | "";
-    if (dtype == "wlan" && gRadioCount < 4) {
+    /* 内核 6.18 / ImmortalWrt 的 network.device status 里无线 AP 是 phy0-ap0
+       这种名字且 devtype 为空，不能只认 devtype=="wlan"；按名字兜底。
+       -ap 匹配把 phy0-sta0（客户端模式）排除掉。 */
+    bool isWlan = (dtype == "wlan") ||
+                  (name.startsWith("phy") && name.indexOf("-ap") > 0) ||
+                  name.startsWith("wlan");
+    if (isWlan && gRadioCount < 4) {
       snprintf(gRadios[gRadioCount], sizeof gRadios[0], "%s", name.c_str());
       gRadioCount++;
     }
@@ -821,8 +827,11 @@ static bool pollStepOnce() {
         assocIdx++;
         return false;
       }
-      if (!sAssocSkip && gRadioCount > 0 && sAssocFail == 0) {
-        memcpy(gClients, sClients, sizeof gClients);   // 整轮成功才提交
+      /* 至少一个射频成功就提交（部分射频被禁用时 assoclist 会失败，
+         原来要求整轮全成，那台机器上列表就永远出不来） */
+      if (!sAssocSkip && gRadioCount > 0 &&
+          (sAssocFail == 0 || sClientCount > 0)) {
+        memcpy(gClients, sClients, sizeof gClients);
         gClientCount = sClientCount;
         gClientTotal = sClientTotal;
         gClientsValid = true;
@@ -1088,8 +1097,8 @@ static void buildHome(lv_obj_t* p) {
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
     *outVal = ui_label(t, "--", UI_F_NUM, UI_C_TEXT);
-    /* 限宽防溢出：数值大了省略号截尾，不挤出卡片 */
-    lv_obj_set_style_max_width(*outVal, 64, 0);
+    /* 显式宽度（max_width+DOTS 在 flex 行里会退化成 WRAP 折行），防溢出 */
+    lv_obj_set_width(*outVal, 64);
     lv_label_set_long_mode(*outVal, LV_LABEL_LONG_MODE_DOTS);
     *outBar = ui_bar(c, col);
   };
@@ -1122,7 +1131,7 @@ static void buildHome(lv_obj_t* p) {
     /* 值用 16px：24px 下 "1.8MB/s" 要 89px，半卡只有 83px，实测必溢出；
        16px 下 "999.9MB/s" 也只占 77px，全段安全 */
     *out = ui_label(t, "--", UI_F_S, col);
-    lv_obj_set_style_max_width(*out, 80, 0);
+    lv_obj_set_width(*out, 80);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkRate(row2, &ic_down, "下载", UI_C_OK, &hDl);
@@ -1182,7 +1191,7 @@ static void buildSystem(lv_obj_t* p) {
     lv_obj_set_style_pad_row(b, 0, 0);
     ui_label(b, cap, UI_F_XS, UI_C_TEXT_MUTE);
     *out = ui_label(b, "0.00", UI_F_L, UI_C_CYAN);
-    lv_obj_set_style_max_width(*out, 88, 0);
+    lv_obj_set_width(*out, 88);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkLoad(loads, "1 分钟", &sL1);
@@ -1269,7 +1278,7 @@ static void buildNet(lv_obj_t* p) {
     lv_obj_set_flex_grow(sp, 1);
     lv_obj_set_height(sp, 1);
     *out = ui_label(t, "--", UI_F_S, col);   /* 同概览页：16px 防溢出 */
-    lv_obj_set_style_max_width(*out, 80, 0);
+    lv_obj_set_width(*out, 80);
     lv_label_set_long_mode(*out, LV_LABEL_LONG_MODE_DOTS);
   };
   mkBig(row, &ic_down, "下载", UI_C_OK, &nDl);
@@ -1345,7 +1354,7 @@ static void rebuildClientList() {
       char rt[12];
       snprintf(rt, sizeof rt, "%uM", gClients[i].rateMbps);
       lv_obj_t* ch = ui_chip(r, rt, UI_C_ACCENT);
-      lv_obj_set_style_max_width(ch, 62, 0);
+      lv_obj_set_width(ch, 62);
       lv_label_set_long_mode(ch, LV_LABEL_LONG_MODE_DOTS);
     }
   }
